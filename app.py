@@ -10,11 +10,66 @@ st.set_page_config(
 )
 st.title("🚗 Pro Auto Diagnostic & VIN Tool")
 
-# Store vehicle info across tabs
+# Store persistent session state across tabs
 if "vehicle_info" not in st.session_state:
   st.session_state.vehicle_info = ""
+if "active_dtc" not in st.session_state:
+  st.session_state.active_dtc = ""
+if "chat_history" not in st.session_state:
+  st.session_state.chat_history = []
 
-tab1, tab2 = st.tabs(["📷 VIN Scanner", "🔧 In-Depth Diagnostic Strategy"])
+tab1, tab2, tab3 = st.tabs([
+    "📷 VIN Scanner",
+    "🔧 In-Depth Diagnostic Strategy",
+    "⚡ Copilot & Scope Lab",
+])
+
+
+# Helper function to call Perplexity Agent API
+def query_perplexity(prompt_text: str, preset: str = "low") -> str:
+  api_key = os.environ.get("PERPLEXITY_API_KEY")
+  if not api_key and hasattr(st, "secrets"):
+    api_key = st.secrets.get("PERPLEXITY_API_KEY")
+
+  if not api_key:
+    return "Error: PERPLEXITY_API_KEY is not configured in Streamlit Secrets."
+
+  headers = {
+      "Authorization": f"Bearer {api_key}",
+      "Content-Type": "application/json",
+  }
+  payload = {"preset": preset, "input": prompt_text}
+
+  try:
+    res = requests.post(
+        "https://api.perplexity.ai/v1/responses",
+        headers=headers,
+        json=payload,
+        timeout=60,
+    )
+    if res.status_code == 200:
+      data = res.json()
+      if "output_text" in data:
+        return data["output_text"]
+      elif "output" in data:
+        text = ""
+        for item in data["output"]:
+          if item.get("type") == "message":
+            for c in item.get("content", []):
+              if "text" in c:
+                text += c["text"]
+        return text or "No response text received."
+      return "No message content found in API output."
+    else:
+      return f"API Error ({res.status_code}): {res.text}"
+  except requests.exceptions.Timeout:
+    return (
+        "Request timed out. Please try again or switch to 'Fast' preset in"
+        " Tab 2."
+    )
+  except Exception as e:
+    return f"Unexpected error: {e}"
+
 
 # ========================================================
 # --- TAB 1: VIN SCANNER ---
@@ -99,10 +154,16 @@ with tab2:
   col_input, col_preset, col_btn = st.columns([3, 2, 1.5])
   with col_input:
     code_input = (
-        st.text_input("Enter OBD-II DTC (e.g., P0316, P0300, U0100, P0420):")
+        st.text_input(
+            "Enter OBD-II DTC (e.g., P0316, P0300, U0100, P0420):",
+            value=st.session_state.active_dtc,
+        )
         .strip()
         .upper()
     )
+    if code_input:
+      st.session_state.active_dtc = code_input
+
   with col_preset:
     preset_choice = st.selectbox(
         "Diagnostic Depth",
@@ -120,15 +181,8 @@ with tab2:
     lookup_clicked = st.button("Run Diagnostic Tree", use_container_width=True)
 
   if code_input and lookup_clicked:
-    api_key = os.environ.get("PERPLEXITY_API_KEY")
-    if not api_key and hasattr(st, "secrets"):
-      api_key = st.secrets.get("PERPLEXITY_API_KEY")
-
-    if not api_key:
-      st.error("PERPLEXITY_API_KEY is not configured in Streamlit Secrets.")
-    else:
-      vehicle = st.session_state.vehicle_info or "General OBD-II Vehicle"
-      prompt = f"""
+    vehicle = st.session_state.vehicle_info or "General OBD-II Vehicle"
+    dtc_prompt = f"""
 You are a master ASE-certified automotive diagnostic technician. Provide an in-depth, practical field diagnostic testing workflow for fault code {code_input} on a {vehicle}.
 
 Format strictly using these Markdown sections:
@@ -151,52 +205,132 @@ Format strictly using these Markdown sections:
 ### 4. Known Platform Pattern Failures & TSBs
 - Specific common real-world failure points, harness rub spots, or known TSBs for {vehicle}
 """
+    with st.spinner(
+        f"Querying Perplexity Agent API for {code_input} diagnostic tree..."
+    ):
+      result = query_perplexity(dtc_prompt, preset=preset_choice)
+      st.markdown(result)
 
-      with st.spinner(
-          f"Querying Perplexity Agent API for {code_input} diagnostic tree..."
-      ):
-        try:
-          # Directly query Perplexity Agent API endpoint
-          headers = {
-              "Authorization": f"Bearer {api_key}",
-              "Content-Type": "application/json",
-          }
-          payload = {
-              "preset": preset_choice,
-              "input": prompt,
-          }
+# ========================================================
+# --- TAB 3: DIAGNOSTIC COPILOT & SCOPE LAB ---
+# ========================================================
+with tab3:
+  st.subheader("⚡ Diagnostic Copilot & Scope Lab")
 
-          api_res = requests.post(
-              "https://api.perplexity.ai/v1/responses",
-              headers=headers,
-              json=payload,
-              timeout=45,
-          )
+  v_label = st.session_state.vehicle_info or "No Vehicle Selected (General)"
+  d_label = st.session_state.active_dtc or "None Specified"
+  st.info(f"📋 **Context:** Vehicle: `{v_label}` | Active DTC: `{d_label}`")
 
-          if api_res.status_code == 200:
-            data = api_res.json()
-            diagnostic_text = ""
+  col_scope, col_scratch = st.columns([1, 1])
 
-            # Extract generated message from Agent API output
-            if "output_text" in data:
-              diagnostic_text = data["output_text"]
-            elif "output" in data:
-              for item in data["output"]:
-                if item.get("type") == "message":
-                  for c in item.get("content", []):
-                    if "text" in c:
-                      diagnostic_text += c["text"]
+  with col_scope:
+    st.markdown("#### 📸 Scope & Meter Display Capture")
+    scope_capture = st.camera_input(
+        "Capture oscilloscope screen or meter reading"
+    )
+    scope_file = st.file_uploader(
+        "Or upload scope waveform file/image",
+        type=["png", "jpg", "jpeg"],
+        key="scope_upload",
+    )
 
-            if diagnostic_text:
-              st.markdown(diagnostic_text)
-            else:
-              st.warning("No diagnostic text returned.")
-          else:
-            st.error(f"API Error ({api_res.status_code}): {api_res.text}")
+    active_img = scope_capture or scope_file
+    if active_img:
+      st.image(active_img, caption="Captured Scope / Meter Display")
 
-        except requests.exceptions.Timeout:
-          st.error(
-              "Request timed out. Try again or switch preset to 'Fast' above."
-          )
-        except Exception as e:
-          st.error(f"Unexpected error: {e}")
+  with col_scratch:
+    st.markdown("#### 📝 Test Results Scratchpad")
+    with st.expander("Enter Physical Test Readings", expanded=True):
+      comp_data = st.text_input(
+          "Compression / Leakdown (psi / % drop):",
+          placeholder="e.g., Cyl 1: 160, Cyl 2: 155, Cyl 3: 90, Cyl 4: 160",
+      )
+      fuel_data = st.text_input(
+          "Fuel Pressure (Running / 5-min Bleed-down):",
+          placeholder="e.g., 55 psi running, drops to 12 psi in 3 mins",
+      )
+      volt_data = st.text_input(
+          "Electrical / Voltage Drop:",
+          placeholder="e.g., Cranking battery drop 9.1V, engine ground drop 0.4V",
+      )
+      scope_notes = st.text_area(
+          "Scope Waveform Observations:",
+          placeholder=(
+              "e.g., Ignition coil burn time is 0.7ms; injector kick voltage is"
+              " only 35V; CKP missing tooth has uneven spacing during crank"
+          ),
+          height=70,
+      )
+
+  # Button to evaluate all scratchpad data
+  if st.button("🔍 Analyze Entered Test Results & Scope Data"):
+    test_summary = f"""
+Vehicle: {v_label}
+Active DTC: {d_label}
+Compression/Leakdown: {comp_data or 'Not tested'}
+Fuel Pressure & Bleed-down: {fuel_data or 'Not tested'}
+Voltage Drop / Electrical: {volt_data or 'Not tested'}
+Scope Observations: {scope_notes or 'None reported'}
+"""
+    copilot_prompt = f"""
+You are an expert diagnostic master technician. Analyze these real-world shop test results and scope observations:
+
+{test_summary}
+
+Provide a concise, direct diagnostic breakdown:
+1. **Critical Findings:** Identify which values fail specifications or show circuit/mechanical defects.
+2. **Component Condemnation or Next Check:** What specific part is failing, or what exact pinpoint test isolates the culprit?
+3. **Common Trap to Avoid:** What mistake or misdiagnosis frequently happens with these specific readings?
+"""
+    with st.spinner("Analyzing test data..."):
+      eval_res = query_perplexity(copilot_prompt, preset="low")
+      st.markdown("### Diagnostic Evaluation")
+      st.markdown(eval_res)
+
+  st.write("---")
+  st.markdown("#### 💬 Interactive Diagnostic Copilot")
+  st.caption(
+      "Ask follow-up questions, request specific pinout checks, or ask how to"
+      " isolate an intermittent fault."
+  )
+
+  # Display chat history
+  for msg in st.session_state.chat_history:
+    with st.chat_message(msg["role"]):
+      st.markdown(msg["content"])
+
+  user_question = st.chat_input(
+      "Ask a diagnostic question (e.g., 'How do I isolate a leaking injector"
+      " from a bad pump check valve?')"
+  )
+
+  if user_question:
+    # Add user message to UI
+    st.session_state.chat_history.append(
+        {"role": "user", "content": user_question}
+    )
+    with st.chat_message("user"):
+      st.markdown(user_question)
+
+    # Build conversation context
+    history_context = ""
+    for m in st.session_state.chat_history[-6:]:  # Keep recent turns
+      history_context += f"{m['role'].upper()}: {m['content']}\n"
+
+    chat_prompt = f"""
+You are an expert automotive diagnostic technician assisting a mechanic in the field.
+Current Vehicle: {v_label}
+Active DTC: {d_label}
+
+Recent Conversation & Test Data:
+{history_context}
+
+Respond directly, practically, and concisely to the latest question. Focus on physical shop tests, circuit checks, and logical isolation procedures.
+"""
+    with st.chat_message("assistant"):
+      with st.spinner("Thinking..."):
+        bot_reply = query_perplexity(chat_prompt, preset="low")
+        st.markdown(bot_reply)
+        st.session_state.chat_history.append(
+            {"role": "assistant", "content": bot_reply}
+        )
