@@ -18,15 +18,12 @@ st.set_page_config(
 )
 st.title("🚗 Pro Auto Diagnostic & VIN Tool")
 
-# Initialize session state for vehicle info across tabs
 if "vehicle_info" not in st.session_state:
   st.session_state.vehicle_info = ""
 
 tab1, tab2 = st.tabs(["📷 VIN Scanner", "🔧 In-Depth Diagnostic Strategy"])
 
-# ========================================================
 # --- TAB 1: VIN SCANNER ---
-# ========================================================
 with tab1:
   st.subheader("Vehicle Identification")
 
@@ -93,9 +90,7 @@ with tab1:
     else:
       st.error("Could not find vehicle details. Check the VIN and try again.")
 
-# ========================================================
 # --- TAB 2: IN-DEPTH DTC DIAGNOSTIC STRATEGY ---
-# ========================================================
 with tab2:
   st.subheader("Field Diagnostic Strategy & Testing Workflow")
 
@@ -104,7 +99,6 @@ with tab2:
   else:
     st.caption("Tip: Decode a vehicle in Tab 1 to carry vehicle specs over.")
 
-  # Model selector for Perplexity Router catalog
   col_input, col_model, col_btn = st.columns([3, 2, 1.5])
   with col_input:
     code_input = (
@@ -122,30 +116,34 @@ with tab2:
             "perplexity/nemotron-3-ultra-550b-a55b",
         ],
         index=0,
-        help="Model catalog slugs available on the Perplexity Router API.",
+        help=(
+            "Model slugs available via Router API GET /router/v1/models"
+            " catalog."
+        ),
     )
   with col_btn:
     st.write("")
     lookup_clicked = st.button("Run Diagnostic Tree", use_container_width=True)
 
   if code_input and lookup_clicked:
-    # Resolve secret from environment or Streamlit secrets
+    # Resolve secret safely from environment or Streamlit secrets
     api_key = os.environ.get("PERPLEXITY_API_KEY")
     if not api_key and hasattr(st, "secrets"):
       api_key = st.secrets.get("PERPLEXITY_API_KEY")
 
     if not api_key:
       st.error(
-          "PERPLEXITY_API_KEY is missing. Please create a key in the API"
-          " Console (https://console.perplexity.ai) and export it as an"
-          " environment variable or add it to Streamlit secrets."
+          "PERPLEXITY_API_KEY is not configured. Please create an API key at"
+          " https://console.perplexity.ai and set it as an environment variable"
+          " or in Streamlit Secrets."
       )
     else:
       vehicle = st.session_state.vehicle_info or "General OBD-II Vehicle"
       prompt = f"""
-You are a master ASE-certified diagnostic technician. Provide an in-depth, practical field diagnostic workflow for fault code {code_input} on a {vehicle}.
+You are a master ASE-certified diagnostic technician. Provide a real-world, highly practical field diagnostic testing workflow for fault code {code_input} on a {vehicle}.
 
-Format strictly with these sections:
+Format your response strictly using these Markdown sections:
+
 ### Code Definition & Severity
 - Exact Code Definition
 - Severity level and drivability symptoms
@@ -166,8 +164,7 @@ Format strictly with these sections:
 """
 
       with st.spinner(
-          f"Routing {code_input} diagnosis via {model_choice} on Perplexity"
-          " Router..."
+          f"Routing diagnostic tree via {model_choice} on Perplexity Router..."
       ):
         try:
           client = OpenAI(
@@ -193,20 +190,24 @@ Format strictly with these sections:
           if response.choices and len(response.choices) > 0:
             st.markdown(response.choices[0].message.content)
 
-            # Display token metrics according to Chat Completions schema
             if response.usage:
+              cached = getattr(
+                  getattr(response.usage, "prompt_tokens_details", None),
+                  "cached_tokens",
+                  0,
+              )
               st.caption(
-                  f"Tokens: Prompt: {response.usage.prompt_tokens} |"
-                  f" Completion: {response.usage.completion_tokens} | Total:"
-                  f" {response.usage.total_tokens}"
+                  f"Tokens: Prompt: {response.usage.prompt_tokens} (Cached:"
+                  f" {cached}) | Completion: {response.usage.completion_tokens}"
+                  f" | Total: {response.usage.total_tokens}"
               )
           else:
             st.warning("No completion choices returned by Router API.")
 
         except AuthenticationError:
           st.error(
-              "Authentication failed (HTTP 401). Check that your"
-              " PERPLEXITY_API_KEY is valid in https://console.perplexity.ai."
+              "Authentication failed (HTTP 401). Verify your"
+              " PERPLEXITY_API_KEY in https://console.perplexity.ai."
           )
         except BadRequestError as e:
           st.error(
@@ -214,9 +215,12 @@ Format strictly with these sections:
               f" '{model_choice}' is listed in GET /router/v1/models: {e.message}"
           )
         except RateLimitError as e:
+          retry_after = getattr(e, "response", {}).headers.get(
+              "Retry-After", "shortly"
+          )
           st.error(
-              "Model temporarily overloaded or rate limit reached (HTTP 429)."
-              " Please honor the Retry-After interval and retry shortly."
+              f"Model overloaded or rate limited (HTTP 429). Retry after"
+              f" {retry_after}s."
           )
         except APIStatusError as e:
           if e.status_code == 402:
@@ -225,13 +229,17 @@ Format strictly with these sections:
                 " usage tier (HTTP 402). Upgrade tier or select an accessible"
                 " model."
             )
+          elif e.status_code == 403:
+            st.error(
+                "Router API is currently in limited preview (HTTP 403). Contact"
+                " api@perplexity.ai for access, or switch to the standard"
+                " Sonar model endpoint."
+            )
           else:
             st.error(f"Perplexity Router API error ({e.status_code}): {e.message}")
         except APIConnectionError:
           st.error(
-              "Network error connecting to"
-              " https://api.perplexity.ai/router/v1. Check internet"
-              " connectivity."
+              "Network connection error to https://api.perplexity.ai/router/v1."
           )
         except Exception as e:
           st.error(f"Unexpected error: {e}")
