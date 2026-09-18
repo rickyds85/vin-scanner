@@ -1,13 +1,5 @@
 import os
 import re
-from openai import (
-    APIConnectionError,
-    APIStatusError,
-    AuthenticationError,
-    BadRequestError,
-    OpenAI,
-    RateLimitError,
-)
 from PIL import Image
 import requests
 import streamlit as st
@@ -104,29 +96,30 @@ with tab2:
   else:
     st.caption("Tip: Decode a vehicle in Tab 1 to carry vehicle specs over.")
 
-  col_input, col_model, col_btn = st.columns([3, 2, 1.5])
+  col_input, col_preset, col_btn = st.columns([3, 2, 1.5])
   with col_input:
     code_input = (
         st.text_input("Enter OBD-II DTC (e.g., P0316, P0300, U0100, P0420):")
         .strip()
         .upper()
     )
-  with col_model:
-    model_choice = st.selectbox(
-        "AI Diagnostic Model",
-        options=["sonar-pro", "sonar"],
+  with col_preset:
+    preset_choice = st.selectbox(
+        "Diagnostic Depth",
+        options=["low", "medium", "fast"],
         index=0,
-        help=(
-            "Sonar Pro pulls comprehensive real-world diagnostic trees and"
-            " known TSBs."
-        ),
+        format_func=lambda x: {
+            "low": "Sonar Pro (Detailed TSBs & PIDs)",
+            "medium": "Reasoning Pro (Deep Scope & Logic)",
+            "fast": "Fast (Quick Overview)",
+        }[x],
+        help="Controls depth of diagnostic testing and live web research.",
     )
   with col_btn:
     st.write("")
     lookup_clicked = st.button("Run Diagnostic Tree", use_container_width=True)
 
   if code_input and lookup_clicked:
-    # Safely load API key from environment or Streamlit secrets
     api_key = os.environ.get("PERPLEXITY_API_KEY")
     if not api_key and hasattr(st, "secrets"):
       api_key = st.secrets.get("PERPLEXITY_API_KEY")
@@ -159,50 +152,51 @@ Format strictly using these Markdown sections:
 - Specific common real-world failure points, harness rub spots, or known TSBs for {vehicle}
 """
 
-      with st.spinner(f"Generating diagnostic tree for {code_input}..."):
+      with st.spinner(
+          f"Querying Perplexity Agent API for {code_input} diagnostic tree..."
+      ):
         try:
-          client = OpenAI(
-              api_key=api_key,
-              base_url="https://api.perplexity.ai",
+          # Directly query Perplexity Agent API endpoint
+          headers = {
+              "Authorization": f"Bearer {api_key}",
+              "Content-Type": "application/json",
+          }
+          payload = {
+              "preset": preset_choice,
+              "input": prompt,
+          }
+
+          api_res = requests.post(
+              "https://api.perplexity.ai/v1/responses",
+              headers=headers,
+              json=payload,
+              timeout=45,
           )
 
-          response = client.chat.completions.create(
-              model=model_choice,
-              messages=[
-                  {
-                      "role": "system",
-                      "content": (
-                          "You are an expert automotive diagnostic technician."
-                          " Provide precise, actionable diagnostic trees."
-                      ),
-                  },
-                  {"role": "user", "content": prompt},
-              ],
-          )
+          if api_res.status_code == 200:
+            data = api_res.json()
+            diagnostic_text = ""
 
-          if response.choices and len(response.choices) > 0:
-            st.markdown(response.choices[0].message.content)
+            # Extract generated message from Agent API output
+            if "output_text" in data:
+              diagnostic_text = data["output_text"]
+            elif "output" in data:
+              for item in data["output"]:
+                if item.get("type") == "message":
+                  for c in item.get("content", []):
+                    if "text" in c:
+                      diagnostic_text += c["text"]
+
+            if diagnostic_text:
+              st.markdown(diagnostic_text)
+            else:
+              st.warning("No diagnostic text returned.")
           else:
-            st.warning("No diagnostic data returned.")
+            st.error(f"API Error ({api_res.status_code}): {api_res.text}")
 
-        except AuthenticationError:
+        except requests.exceptions.Timeout:
           st.error(
-              "Authentication failed (HTTP 401). Check your PERPLEXITY_API_KEY"
-              " in Streamlit secrets."
-          )
-        except BadRequestError as e:
-          st.error(f"Bad Request (HTTP 400): {e.message}")
-        except RateLimitError:
-          st.error(
-              "Rate limit reached (HTTP 429). Please wait a moment and try"
-              " again."
-          )
-        except APIStatusError as e:
-          st.error(f"API Error ({e.status_code}): {e.message}")
-        except APIConnectionError:
-          st.error(
-              "Network connection error to Perplexity. Check internet"
-              " connectivity."
+              "Request timed out. Try again or switch preset to 'Fast' above."
           )
         except Exception as e:
           st.error(f"Unexpected error: {e}")
