@@ -1,5 +1,14 @@
-from PIL import Image
+import os
 import re
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    AuthenticationError,
+    BadRequestError,
+    OpenAI,
+    RateLimitError,
+)
+from PIL import Image
 import requests
 import streamlit as st
 import zxingcpp
@@ -21,7 +30,7 @@ tab1, tab2 = st.tabs(["📷 VIN Scanner", "🔧 In-Depth Diagnostic Strategy"])
 with tab1:
   st.subheader("Vehicle Identification")
 
-  def decode_vin(vin_code):
+  def decode_vin(vin_code: str) -> dict | None:
     url = f"https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/{vin_code}?format=json"
     try:
       response = requests.get(url, timeout=10).json()
@@ -95,270 +104,134 @@ with tab2:
   else:
     st.caption("Tip: Decode a vehicle in Tab 1 to carry vehicle specs over.")
 
-  DTC_DEEP_DIVE = {
-      "P0300": {
-          "title": "Random / Multiple Cylinder Misfire Detected",
-          "severity": (
-              "High (Flashing MIL indicates active catalyst-damaging misfire)"
-          ),
-          "pids": [
-              "Cylinder 1-8 Live Misfire Counters (Mode $06 TID $0B / $0C)",
-              (
-                  "Long Term & Short Term Fuel Trims (LTFT / STFT) Bank 1 &"
-                  " Bank 2"
-              ),
-              "Mass Air Flow (g/s) & Calculated Engine Load",
-              "Fuel Rail Pressure (Actual vs Desired)",
-          ],
-          "phase1_scan": (
-              "1. Check Mode $06 misfire counters to identify if one cylinder"
-              " is dominating the misfire.\n2. Observe fuel trims at idle vs"
-              " 2,500 RPM:\n   - LTFT high (+15% or more) at idle that"
-              " drops/corrects at 2,500 RPM = **Vacuum leak**.\n   - LTFT high"
-              " across both idle and load = **Fuel delivery problem (weak pump,"
-              " clogged filter/injectors)**."
-          ),
-          "phase2_electrical": (
-              "1. **Ignition Testing:** Check primary current ramps with a"
-              " low-amp current probe on the coil ground/power feed. Verify 6-8A"
-              " peak current and consistent burn time (1.2ms - 2.0ms).\n2."
-              " **Injector Waveforms:** Check injector voltage peak spike (~60V"
-              " - 80V on port injection) and verify pintle-closing hump."
-          ),
-          "phase3_mechanical": (
-              "1. Perform a **Relative Compression test** with an amp clamp"
-              " around the main battery cable during 5 seconds of cranking"
-              " (disable fuel/spark).\n2. If uneven peaks appear, run a physical"
-              " manual compression check and cylinder leak-down test."
-          ),
-          "pattern_failures": [
-              (
-                  "Intake manifold gaskets leaking unmetered air on cold starts"
-                  " (GM 5.3L / Ford 4.6L / Toyota 1.8L)."
-              ),
-              "Carbon buildup on intake valves (Direct-Injection GDI engines).",
-              "Weak valve springs causing intermittent high-RPM misfires.",
-          ],
-      },
-      "P0420": {
-          "title": "Catalyst System Efficiency Below Threshold (Bank 1)",
-          "severity": "Medium (Emissions failure; non-stranding unless plugged)",
-          "pids": [
-              "Upstream Air/Fuel (A/F) Sensor Voltage or Current (mA)",
-              "Downstream Oxygen Sensor Voltage (O2S2 Bank 1)",
-              "Engine Coolant Temperature (ECT)",
-              "Long Term Fuel Trim (LTFT Bank 1)",
-          ],
-          "phase1_scan": (
-              "1. Ensure engine is in closed loop with ECT above 185°F (85°C).\n2."
-              " Bring engine to 2,000 RPM steady cruise:\n   - **Normal"
-              " Converter:** Downstream O2 sensor should hold a steady, stable"
-              " voltage (typically 0.55V to 0.75V) with minimal oscillation.\n  "
-              " - **Failed Converter:** Downstream O2 mirrors the upstream"
-              " sensor, actively switching rapidly between 0.1V and 0.8V."
-          ),
-          "phase2_electrical": (
-              "1. Verify downstream O2 heater circuit resistance (typically 5"
-              " to 15 ohms across heater terminals).\n2. Confirm sensor ground"
-              " drops less than 50mV to battery negative."
-          ),
-          "phase3_mechanical": (
-              "1. **Exhaust Leak Inspection:** Inspect exhaust manifold, flex"
-              " pipe, and gaskets within 12 inches of the catalytic converter."
-              " Any pinhole leak draws in outside oxygen and triggers P0420.\n2."
-              " **Thermal Test:** Use an infrared pyrometer on the catalytic"
-              " converter shell. An active converter's outlet should be 50°F to"
-              " 100°F hotter than its inlet."
-          ),
-          "pattern_failures": [
-              (
-                  "Fix upstream misfires or oil/coolant consumption BEFORE"
-                  " installing a new converter, or the new converter will fail"
-                  " within months."
-              ),
-              "Cracked exhaust manifold near weld joints (Subaru / Nissan 2.5L).",
-              "Exhaust flange gasket blown out upstream of cat.",
-          ],
-      },
-      "P0171": {
-          "title": "System Too Lean (Bank 1)",
-          "severity": "Medium-High (May cause bucking, detonation, and misfire)",
-          "pids": [
-              "Short Term Fuel Trim (STFT 1) & Long Term Fuel Trim (LTFT 1)",
-              "Mass Air Flow (g/s) & Calculated Load",
-              "Manifold Absolute Pressure (MAP in Hg / kPa)",
-              "Fuel Pressure / Rail Pressure Sensor",
-          ],
-          "phase1_scan": (
-              "1. **Isolate Idle vs Load:**\n   - High positive trim (+18% to"
-              " +25%) that drops toward 0% at 2,500 RPM = **Vacuum leak**.\n  "
-              " - Trim stays lean or gets worse under heavy load = **Fuel pump /"
-              " filter / restricted injector delivery issue**.\n2. **MAF"
-              " Sanity Check:** At idle, MAF g/s should roughly equal engine"
-              " displacement in liters (e.g., 2.0L engine ≈ 2.0 g/s ± 0.5 g/s)."
-          ),
-          "phase2_electrical": (
-              "1. Check 5V reference and sensor ground circuits to MAF/MAP"
-              " sensors.\n2. Measure fuel pump current draw at fuel pump relay"
-              " terminal using an amp clamp (look for ripple pattern anomalies"
-              " or high amperage indicating a seizing pump motor)."
-          ),
-          "phase3_mechanical": (
-              "1. Connect a **Smoke Machine** to the intake manifold vacuum port"
-              " and inspect for leaks around intake gaskets, PCV hoses, throttle"
-              " body seals, and brake booster diaphragm.\n2. Connect a manual"
-              " fuel pressure gauge to the test port and perform a deadhead/"
-              " volume delivery test."
-          ),
-          "pattern_failures": [
-              (
-                  "Torn intake accordion air boot after the MAF sensor (BMW /"
-                  " Toyota)."
-              ),
-              "Stuck-open PCV valve or cracked crankcase breather tube.",
-              "Contaminated hot-wire in the MAF sensor (clean with MAF cleaner).",
-          ],
-      },
-      "U0100": {
-          "title": "Lost Communication With ECM / PCM 'A'",
-          "severity": "High (No-crank / no-start / limp home mode)",
-          "pids": [
-              "CAN-H Voltage (~2.5V recessive, ~3.5V dominant)",
-              "CAN-L Voltage (~2.5V recessive, ~1.5V dominant)",
-              "DLC Pin 16 Battery Voltage",
-              "Module Scan Communication Status across all nodes",
-          ],
-          "phase1_scan": (
-              "1. Perform an **All-Module Network Scan**:\n   - If only the ECM"
-              " is missing while TCM, ABS, and BCM are communicating and"
-              " reporting U0100, the CAN bus is alive, but the ECM is"
-              " dead/unpowered.\n   - If multiple modules fail to communicate,"
-              " suspect a bus wire shorted to power or ground."
-          ),
-          "phase2_electrical": (
-              "1. **Terminating Resistance Test:** Turn ignition OFF, disconnect"
-              " battery negative, measure resistance across DLC Pin 6 (CAN-H)"
-              " and Pin 14 (CAN-L):\n   - **60 Ω:** Normal (both 120 Ω"
-              " terminating resistors are present and connected).\n   - **120"
-              " Ω:** One terminating resistor or module connector is open/cut."
-              "\n   - **0-10 Ω:** Short circuit between CAN-H and CAN-L wires."
-              "\n2. **ECM Power & Ground:** Verify 12V under load on all main"
-              " ECM power feeds and less than 50mV voltage drop across all ECM"
-              " grounds."
-          ),
-          "phase3_mechanical": (
-              "1. Inspect engine bay main harness routing near exhaust"
-              " manifolds, pulleys, or sharp bracket edges for chafing.\n2."
-              " Check ECM connector pins for water intrusion, fretting"
-              " corrosion, or bent terminal pins."
-          ),
-          "pattern_failures": [
-              "Corroded main ECM relay or blown ECM/IGN fuse in underhood fuse box.",
-              "Water leak into footwell soaking BCM or Gateway module connectors.",
-              "Rodent damage to engine wiring harness behind cylinder heads.",
-          ],
-      },
-      "P0128": {
-          "title": "Coolant Thermostat Below Regulating Temperature",
-          "severity": (
-              "Low-Medium (Poor heater performance, fuel richness, disables"
-              " EVAP monitor)"
-          ),
-          "pids": [
-              "Engine Coolant Temperature (ECT)",
-              "Intake Air Temperature (IAT)",
-              "Vehicle Speed Sensor (VSS)",
-          ],
-          "phase1_scan": (
-              "1. Cold-soak sanity check: Before cold startup, ECT and IAT"
-              " readings should match within 3°F of ambient shop temp.\n2. Start"
-              " engine and monitor ECT temperature rise rate while idling or"
-              " driving."
-          ),
-          "phase2_electrical": (
-              "1. Measure ECT resistance across sensor pins with connector"
-              " unplugged (NTC thermistor should decrease resistance as"
-              " temperature rises).\n2. Verify 5.0V reference on sensor harness"
-              " with key on, engine off."
-          ),
-          "phase3_mechanical": (
-              "1. **Hose Temperature Check:** Use an infrared thermometer on"
-              " the upper and lower radiator hoses during warm-up. If the upper"
-              " hose warms up immediately from cold idle, the thermostat is"
-              " stuck open or missing."
-          ),
-          "pattern_failures": [
-              "Rubber seal on thermostat deteriorated and jamming the valve open.",
-              "Corroded pins at the ECT pigtail causing high circuit resistance.",
-          ],
-      },
-  }
-
-  col_input, col_btn = st.columns([3, 1])
+  # Model selector for Perplexity Router catalog
+  col_input, col_model, col_btn = st.columns([3, 2, 1.5])
   with col_input:
     code_input = (
-        st.text_input("Enter OBD-II DTC (e.g., P0300, P0420, P0171, U0100):")
+        st.text_input("Enter OBD-II DTC (e.g., P0316, P0300, U0100, P0420):")
         .strip()
         .upper()
+    )
+  with col_model:
+    model_choice = st.selectbox(
+        "Router Model",
+        options=[
+            "perplexity/kimi-k3",
+            "perplexity/deepseek-v4-flash-0731",
+            "perplexity/glm-5.3",
+            "perplexity/nemotron-3-ultra-550b-a55b",
+        ],
+        index=0,
+        help="Model catalog slugs available on the Perplexity Router API.",
     )
   with col_btn:
     st.write("")
     lookup_clicked = st.button("Run Diagnostic Tree", use_container_width=True)
 
-  if code_input and (lookup_clicked or code_input):
-    first_char = code_input[0] if len(code_input) > 0 else ""
-    systems = {
-        "P": "Powertrain (Engine, Transmission, Emissions)",
-        "B": "Body (Airbags, BCM, Lighting, HVAC, Doors)",
-        "C": "Chassis (ABS, Traction Control, Steering, Suspension)",
-        "U": "Network (CAN Bus, Serial Data, Module Communications)",
-    }
+  if code_input and lookup_clicked:
+    # Resolve secret from environment or Streamlit secrets
+    api_key = os.environ.get("PERPLEXITY_API_KEY")
+    if not api_key and hasattr(st, "secrets"):
+      api_key = st.secrets.get("PERPLEXITY_API_KEY")
 
-    if first_char in systems:
-      st.info(f"**System Subsystem:** {systems[first_char]}")
-
-    if code_input in DTC_DEEP_DIVE:
-      data = DTC_DEEP_DIVE[code_input]
-      st.markdown(f"### {code_input} — {data['title']}")
-      st.warning(f"**Severity Level:** {data['severity']}")
-
-      # Display structured tabs for testing phases
-      dtab1, dtab2, dtab3, dtab4 = st.tabs([
-          "📊 1. PIDs & Scan Tool",
-          "⚡ 2. Electrical & Scope",
-          "🔧 3. Mechanical & Physical",
-          "⚠️ 4. Known Pattern Failures",
-      ])
-
-      with dtab1:
-        st.write("#### Key Live PIDs to Monitor")
-        for pid in data["pids"]:
-          st.write(f"- {pid}")
-        st.write("---")
-        st.write("#### Scan Tool Verification Strategy")
-        st.markdown(data["phase1_scan"])
-
-      with dtab2:
-        st.write("#### Circuit & Component Testing (DMM / Scope)")
-        st.markdown(data["phase2_electrical"])
-
-      with dtab3:
-        st.write("#### Mechanical & Physical Testing")
-        st.markdown(data["phase3_mechanical"])
-
-      with dtab4:
-        st.write("#### Field Notes & Common Pattern Failures")
-        for pf in data["pattern_failures"]:
-          st.write(f"- {pf}")
-
-    else:
-      st.warning(f"Detailed field tree for **{code_input}** is not pre-loaded.")
-      st.write("### Standard SAE Diagnostic Flow")
-      st.markdown(
-          """
-            1. **Verify Freeze Frame:** Check engine RPM, engine load, vehicle speed, and loop status when the code set.
-            2. **Inspect Wiring & Harness:** Check sensor power (typically 5V ref or 12V), ground drop (<50mV), and signal line integrity.
-            3. **Component Resistance:** Test actuator or sensor winding resistance against OE specifications at room temperature.
-            4. **Clean & Verify Grounds:** Ensure all engine block, chassis, and ECM grounding lugs are clean, bare metal, and tight.
-            """
+    if not api_key:
+      st.error(
+          "PERPLEXITY_API_KEY is missing. Please create a key in the API"
+          " Console (https://console.perplexity.ai) and export it as an"
+          " environment variable or add it to Streamlit secrets."
       )
+    else:
+      vehicle = st.session_state.vehicle_info or "General OBD-II Vehicle"
+      prompt = f"""
+You are a master ASE-certified diagnostic technician. Provide an in-depth, practical field diagnostic workflow for fault code {code_input} on a {vehicle}.
+
+Format strictly with these sections:
+### Code Definition & Severity
+- Exact Code Definition
+- Severity level and drivability symptoms
+
+### 1. PIDs & Scan Tool Verification
+- Top 4-5 live data PIDs to graph and their normal expected values
+- Step-by-step scan tool strategy (Mode $06, freeze frame checks, idle vs 2500 RPM rules)
+
+### 2. Electrical & Scope Testing (DMM / Scope)
+- Step-by-step multimeter and oscilloscope checks (voltage drop thresholds, ground tests, sensor signal wire specs)
+- Expected waveforms or current ramp specs (if applicable)
+
+### 3. Mechanical & Physical Testing
+- Physical tests (smoke testing, fuel pressure hold/leakdown tests, relative compression, vacuum checks)
+
+### 4. Known Platform Pattern Failures & TSBs
+- Specific common real-world failure points, harness rub spots, or known TSBs for {vehicle}
+"""
+
+      with st.spinner(
+          f"Routing {code_input} diagnosis via {model_choice} on Perplexity"
+          " Router..."
+      ):
+        try:
+          client = OpenAI(
+              api_key=api_key,
+              base_url="https://api.perplexity.ai/router/v1",
+          )
+
+          response = client.chat.completions.create(
+              model=model_choice,
+              messages=[
+                  {
+                      "role": "system",
+                      "content": (
+                          "You are an expert automotive diagnostic technician."
+                          " Provide precise, actionable diagnostic trees."
+                      ),
+                  },
+                  {"role": "user", "content": prompt},
+              ],
+              temperature=0.2,
+          )
+
+          if response.choices and len(response.choices) > 0:
+            st.markdown(response.choices[0].message.content)
+
+            # Display token metrics according to Chat Completions schema
+            if response.usage:
+              st.caption(
+                  f"Tokens: Prompt: {response.usage.prompt_tokens} |"
+                  f" Completion: {response.usage.completion_tokens} | Total:"
+                  f" {response.usage.total_tokens}"
+              )
+          else:
+            st.warning("No completion choices returned by Router API.")
+
+        except AuthenticationError:
+          st.error(
+              "Authentication failed (HTTP 401). Check that your"
+              " PERPLEXITY_API_KEY is valid in https://console.perplexity.ai."
+          )
+        except BadRequestError as e:
+          st.error(
+              f"Invalid model or request payload (HTTP 400). Ensure"
+              f" '{model_choice}' is listed in GET /router/v1/models: {e.message}"
+          )
+        except RateLimitError as e:
+          st.error(
+              "Model temporarily overloaded or rate limit reached (HTTP 429)."
+              " Please honor the Retry-After interval and retry shortly."
+          )
+        except APIStatusError as e:
+          if e.status_code == 402:
+            st.error(
+                f"Model '{model_choice}' is excluded by your organization's"
+                " usage tier (HTTP 402). Upgrade tier or select an accessible"
+                " model."
+            )
+          else:
+            st.error(f"Perplexity Router API error ({e.status_code}): {e.message}")
+        except APIConnectionError:
+          st.error(
+              "Network error connecting to"
+              " https://api.perplexity.ai/router/v1. Check internet"
+              " connectivity."
+          )
+        except Exception as e:
+          st.error(f"Unexpected error: {e}")
