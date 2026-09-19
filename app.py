@@ -1,6 +1,6 @@
 import os
 import re
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageOps
 import requests
 import streamlit as st
 import zxingcpp
@@ -10,7 +10,7 @@ st.set_page_config(
 )
 st.title("🚗 Pro Auto Diagnostic & VIN Tool")
 
-# Store persistent session state across tabs
+# Persistent session state across tabs
 if "vehicle_info" not in st.session_state:
   st.session_state.vehicle_info = ""
 if "active_dtc" not in st.session_state:
@@ -25,7 +25,7 @@ tab1, tab2, tab3 = st.tabs([
 ])
 
 
-# Helper function to call Perplexity Agent API
+# --- HELPER FUNCTIONS ---
 def query_perplexity(prompt_text: str, preset: str = "low") -> str:
   api_key = os.environ.get("PERPLEXITY_API_KEY")
   if not api_key and hasattr(st, "secrets"):
@@ -63,12 +63,70 @@ def query_perplexity(prompt_text: str, preset: str = "low") -> str:
     else:
       return f"API Error ({res.status_code}): {res.text}"
   except requests.exceptions.Timeout:
-    return (
-        "Request timed out. Please try again or switch to 'Fast' preset in"
-        " Tab 2."
-    )
+    return "Request timed out. Please try again or switch preset to 'Fast'."
   except Exception as e:
     return f"Unexpected error: {e}"
+
+
+def scan_vin_barcode(pil_img: Image.Image) -> str:
+  """Aggressively scans an image for 17-digit VIN barcodes using rotation, downscaling, inversion, and contrast enhancement."""
+  # Pass 1: Full rotation, downscale, and inverted color check
+  barcodes = zxingcpp.read_barcodes(
+      pil_img, try_rotate=True, try_downscale=True, try_invert=True
+  )
+  for b in barcodes:
+    match = re.search(r"[A-HJ-NPR-Z0-9]{17}", b.text.upper())
+    if match:
+      return match.group(0)
+
+  # Pass 2: Grayscale and double contrast (cuts through glossy door jamb glare)
+  gray = ImageOps.grayscale(pil_img)
+  enhancer = ImageEnhance.Contrast(gray)
+  high_contrast = enhancer.enhance(2.2)
+
+  barcodes = zxingcpp.read_barcodes(
+      high_contrast, try_rotate=True, try_downscale=True, try_invert=True
+  )
+  for b in barcodes:
+    match = re.search(r"[A-HJ-NPR-Z0-9]{17}", b.text.upper())
+    if match:
+      return match.group(0)
+
+  # Pass 3: Sharpening filter for out-of-focus camera sensors
+  sharp = ImageEnhance.Sharpness(high_contrast).enhance(2.5)
+  barcodes = zxingcpp.read_barcodes(
+      sharp, try_rotate=True, try_downscale=True, try_invert=True
+  )
+  for b in barcodes:
+    match = re.search(r"[A-HJ-NPR-Z0-9]{17}", b.text.upper())
+    if match:
+      return match.group(0)
+
+  return ""
+
+
+def decode_vin(vin_code: str) -> dict | None:
+  url = (
+      f"https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/{vin_code}?format=json"
+  )
+  try:
+    response = requests.get(url, timeout=10).json()
+    details = {}
+    for item in response.get("Results", []):
+      if item.get("Value") and item.get("Variable") in [
+          "Model Year",
+          "Make",
+          "Model",
+          "Displacement (L)",
+          "Engine Number of Cylinders",
+          "Fuel Type - Primary",
+          "Drive Type",
+          "Vehicle Type",
+      ]:
+        details[item["Variable"]] = item["Value"]
+    return details
+  except Exception:
+    return None
 
 
 # ========================================================
@@ -77,44 +135,36 @@ def query_perplexity(prompt_text: str, preset: str = "low") -> str:
 with tab1:
   st.subheader("Vehicle Identification")
 
-  def decode_vin(vin_code: str) -> dict | None:
-    url = f"https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/{vin_code}?format=json"
-    try:
-      response = requests.get(url, timeout=10).json()
-      details = {}
-      for item in response.get("Results", []):
-        if item.get("Value") and item.get("Variable") in [
-            "Model Year",
-            "Make",
-            "Model",
-            "Displacement (L)",
-            "Engine Number of Cylinders",
-            "Fuel Type - Primary",
-            "Drive Type",
-            "Vehicle Type",
-        ]:
-          details[item["Variable"]] = item["Value"]
-      return details
-    except Exception:
-      return None
+  col_cam, col_up = st.columns([1, 1])
+  with col_cam:
+    photo = st.camera_input("Snap door jamb barcode")
+  with col_up:
+    uploaded_label = st.file_uploader(
+        "Or upload a high-res photo from your phone gallery",
+        type=["png", "jpg", "jpeg"],
+        key="vin_upload",
+        help=(
+            "Tip: Phone camera apps take sharper, higher-resolution photos than"
+            " web browsers."
+        ),
+    )
 
-  photo = st.camera_input("Snap a photo of the door jamb barcode")
+  active_image = photo or uploaded_label
   found_vin = ""
 
-  if photo:
-    st.image(photo, caption="Captured Image", use_container_width=True)
-    img = Image.open(photo)
-    barcodes = zxingcpp.read_barcodes(img)
-    for b in barcodes:
-      match = re.search(r"[A-HJ-NPR-Z0-9]{17}", b.text.upper())
-      if match:
-        found_vin = match.group(0)
-        break
+  if active_image:
+    st.image(active_image, caption="Captured Sticker", use_container_width=True)
+    img = Image.open(active_image)
+    found_vin = scan_vin_barcode(img)
 
     if found_vin:
       st.success(f"Barcode Detected! VIN: **{found_vin}**")
     else:
-      st.warning("No barcode detected. Ensure barcode is centered and clear.")
+      st.warning(
+          "No barcode detected. Move closer, tilt slightly to avoid glare, or"
+          " take a sharp picture with your phone camera app and upload it"
+          " above."
+      )
 
   vin = st.text_input(
       "Enter 17-digit VIN manually:", value=found_vin, max_chars=17
@@ -262,7 +312,6 @@ with tab3:
           height=70,
       )
 
-  # Button to evaluate all scratchpad data
   if st.button("🔍 Analyze Entered Test Results & Scope Data"):
     test_summary = f"""
 Vehicle: {v_label}
@@ -294,7 +343,6 @@ Provide a concise, direct diagnostic breakdown:
       " isolate an intermittent fault."
   )
 
-  # Display chat history
   for msg in st.session_state.chat_history:
     with st.chat_message(msg["role"]):
       st.markdown(msg["content"])
@@ -305,16 +353,14 @@ Provide a concise, direct diagnostic breakdown:
   )
 
   if user_question:
-    # Add user message to UI
     st.session_state.chat_history.append(
         {"role": "user", "content": user_question}
     )
     with st.chat_message("user"):
       st.markdown(user_question)
 
-    # Build conversation context
     history_context = ""
-    for m in st.session_state.chat_history[-6:]:  # Keep recent turns
+    for m in st.session_state.chat_history[-6:]:
       history_context += f"{m['role'].upper()}: {m['content']}\n"
 
     chat_prompt = f"""
