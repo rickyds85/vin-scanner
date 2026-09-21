@@ -32,6 +32,12 @@ if "active_vin" not in st.session_state:
   st.session_state.active_vin = ""
 if "active_dtc" not in st.session_state:
   st.session_state.active_dtc = ""
+if "customer_name" not in st.session_state:
+  st.session_state.customer_name = ""
+if "customer_address" not in st.session_state:
+  st.session_state.customer_address = ""
+if "customer_phone" not in st.session_state:
+  st.session_state.customer_phone = ""
 if "chat_history" not in st.session_state:
   st.session_state.chat_history = []
 
@@ -39,18 +45,32 @@ LOG_FILE = "scan_history.csv"
 
 
 # --- LOGGING HELPER FUNCTIONS ---
-def append_to_log(vin: str, vehicle: str, dtc: str):
-  """Appends a single diagnostic entry (timestamp, vin, vehicle, dtc) to a local CSV file."""
+def append_to_log(
+    vin: str, vehicle: str, dtc: str, customer: str = "", phone: str = ""
+):
+  """Appends a diagnostic entry to local CSV log with customer info."""
   file_exists = os.path.isfile(LOG_FILE)
   timestamp = datetime.now().strftime("%Y-%m-%d %I:%M %p")
   try:
     with open(LOG_FILE, mode="a", newline="", encoding="utf-8") as f:
       writer = csv.writer(f)
       if not file_exists:
-        writer.writerow(["Timestamp", "VIN", "Vehicle", "Fault Code (DTC)"])
-      writer.writerow(
-          [timestamp, vin or "N/A", vehicle or "Unknown Vehicle", dtc or "N/A"]
-      )
+        writer.writerow([
+            "Timestamp",
+            "Customer",
+            "Phone",
+            "VIN",
+            "Vehicle",
+            "Fault Code (DTC)",
+        ])
+      writer.writerow([
+          timestamp,
+          customer or "N/A",
+          phone or "N/A",
+          vin or "N/A",
+          vehicle or "Unknown Vehicle",
+          dtc or "N/A",
+      ])
   except Exception:
     pass
 
@@ -67,10 +87,10 @@ def load_log():
         rows.append(r)
   except Exception:
     return []
-  return rows[::-1]  # Return newest entries first
+  return rows[::-1]
 
 
-# --- API & DIAGNOSTIC HELPERS ---
+# --- PERPLEXITY AGENT API HELPER ---
 def query_perplexity(prompt_text: str, preset: str = "low") -> str:
   api_key = os.environ.get("PERPLEXITY_API_KEY")
   if not api_key and hasattr(st, "secrets"):
@@ -171,21 +191,59 @@ def decode_vin(vin_code: str) -> dict | None:
 
 
 tab1, tab2, tab3, tab4 = st.tabs([
-    "📷 VIN Scanner",
+    "📷 VIN & Customer Info",
     "🔧 In-Depth Diagnostic Strategy",
     "⚡ Copilot & Scope Lab",
     "📋 Vehicle & DTC Log",
 ])
 
 # ========================================================
-# --- TAB 1: VIN SCANNER ---
+# --- TAB 1: VIN & CUSTOMER INFO ---
 # ========================================================
 with tab1:
-  st.subheader("Vehicle Identification")
+  st.subheader("Customer & Vehicle Identification")
+
+  # --- Customer Info Inputs ---
+  st.markdown("#### 👤 Customer Information")
+  col_c1, col_c2 = st.columns([1, 1])
+  with col_c1:
+    cust_name = st.text_input(
+        "Customer Name:",
+        value=st.session_state.customer_name,
+        placeholder="e.g. ROTAE LLC",
+    )
+    cust_phone = st.text_input(
+        "Phone Number:",
+        value=st.session_state.customer_phone,
+        placeholder="e.g. 678-365-2146",
+    )
+  with col_c2:
+    cust_address = st.text_area(
+        "Address:",
+        value=st.session_state.customer_address,
+        placeholder="e.g. 6428 DAWSON BLVD, STE 1730, NORCROSS, GA, 30093",
+        height=108,
+    )
+
+  st.session_state.customer_name = cust_name.strip()
+  st.session_state.customer_phone = cust_phone.strip()
+  st.session_state.customer_address = cust_address.strip()
+
+  # Display pinned summary badge if customer is entered
+  if st.session_state.customer_name:
+    st.markdown(f"""
+        <div style="background-color: #1E232A; border-left: 4px solid #00FF66; padding: 12px 16px; border-radius: 6px; margin: 0.8rem 0 1.2rem 0;">
+            <div style="font-size: 1.1rem; font-weight: 700; color: #FFFFFF;">👤 {st.session_state.customer_name}</div>
+            <div style="color: #A0AEC0; font-size: 0.95rem;">📍 {st.session_state.customer_address or 'No address provided'}</div>
+            <div style="color: #A0AEC0; font-size: 0.95rem;">📞 {st.session_state.customer_phone or 'No phone number'}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+  st.write("---")
+  st.markdown("#### 🚪 Vehicle VIN Barcode Scanner")
 
   col_cam, col_up = st.columns([1, 1])
   with col_cam:
-    # Camera toggle button so the lens is NOT constantly streaming
     open_camera = st.toggle("📷 Open Camera Scanner", value=False)
     photo = None
     if open_camera:
@@ -193,7 +251,7 @@ with tab1:
 
   with col_up:
     uploaded_label = st.file_uploader(
-        "Or upload a high-res photo from gallery",
+        "Or upload a photo of the barcode",
         type=["png", "jpg", "jpeg"],
         key="vin_upload",
     )
@@ -202,7 +260,9 @@ with tab1:
   found_vin = ""
 
   if active_image:
-    st.image(active_image, caption="Captured Sticker", use_container_width=True)
+    st.image(
+        active_image, caption="Captured Barcode", use_container_width=True
+    )
     img = Image.open(active_image)
     found_vin = scan_vin_barcode(img)
 
@@ -211,8 +271,7 @@ with tab1:
       st.success(f"Barcode Detected! VIN: **{found_vin}**")
     else:
       st.warning(
-          "No barcode detected. Tilt slightly to avoid glare, or take a sharp"
-          " photo with your phone camera app and upload."
+          "No barcode detected. Tilt slightly to avoid glare or type VIN below."
       )
 
   vin = st.text_input(
@@ -247,6 +306,13 @@ with tab1:
 # ========================================================
 with tab2:
   st.subheader("Field Diagnostic Strategy & Testing Workflow")
+
+  if st.session_state.customer_name:
+    st.markdown(
+        f"👤 Customer: **{st.session_state.customer_name}** | 📞"
+        f" `{st.session_state.customer_phone or 'No phone'}` | 📍"
+        f" `{st.session_state.customer_address or 'No address'}`"
+    )
 
   if st.session_state.vehicle_info:
     st.success(
@@ -288,9 +354,13 @@ with tab2:
   if code_input and lookup_clicked:
     vehicle = st.session_state.vehicle_info or "General OBD-II Vehicle"
 
-    # Automatically save VIN, Vehicle, and Code to local log (no tree text)
+    # Automatically save Customer, Phone, VIN, Vehicle, and Code to local log
     append_to_log(
-        vin=st.session_state.active_vin, vehicle=vehicle, dtc=code_input
+        vin=st.session_state.active_vin,
+        vehicle=vehicle,
+        dtc=code_input,
+        customer=st.session_state.customer_name,
+        phone=st.session_state.customer_phone,
     )
 
     dtc_prompt = f"""
@@ -335,7 +405,11 @@ with tab3:
 
   v_label = st.session_state.vehicle_info or "No Vehicle Selected (General)"
   d_label = st.session_state.active_dtc or "None Specified"
-  st.info(f"📋 **Context:** Vehicle: `{v_label}` | Active DTC: `{d_label}`")
+  c_label = st.session_state.customer_name or "None"
+  st.info(
+      f"📋 **Context:** Customer: `{c_label}` | Vehicle: `{v_label}` | Active"
+      f" DTC: `{d_label}`"
+  )
 
   col_scope, col_scratch = st.columns([1, 1])
 
@@ -382,6 +456,7 @@ with tab3:
 
   if st.button("🔍 Analyze Entered Test Results & Scope Data"):
     test_summary = f"""
+Customer: {c_label}
 Vehicle: {v_label}
 Active DTC: {d_label}
 Compression/Leakdown: {comp_data or 'Not tested'}
@@ -433,6 +508,7 @@ Provide a concise, direct diagnostic breakdown:
 
     chat_prompt = f"""
 You are an expert automotive diagnostic technician assisting a mechanic in the field.
+Customer: {c_label}
 Current Vehicle: {v_label}
 Active DTC: {d_label}
 
@@ -454,10 +530,7 @@ Respond directly, practically, and concisely to the latest question. Focus on ph
 # ========================================================
 with tab4:
   st.subheader("📋 Vehicle Diagnostic Scan History")
-  st.caption(
-      "Tracks vehicles decoded and diagnostic trouble codes tested on this"
-      " device."
-  )
+  st.caption("Tracks customer tickets, VINs, and diagnostic fault codes.")
 
   history = load_log()
 
@@ -466,10 +539,9 @@ with tab4:
 
     col_csv, col_del = st.columns([1, 1])
     with col_csv:
-      # Convert history to CSV format for simple download
-      csv_data = "Timestamp,VIN,Vehicle,Fault Code (DTC)\n"
+      csv_data = "Timestamp,Customer,Phone,VIN,Vehicle,Fault Code (DTC)\n"
       for r in history:
-        csv_data += f'"{r.get("Timestamp","")}","{r.get("VIN","")}","{r.get("Vehicle","")}","{r.get("Fault Code (DTC)","")}"\n'
+        csv_data += f'"{r.get("Timestamp","")}","{r.get("Customer","")}","{r.get("Phone","")}","{r.get("VIN","")}","{r.get("Vehicle","")}","{r.get("Fault Code (DTC)","")}"\n'
       st.download_button(
           label="📥 Export Log to CSV",
           data=csv_data,
@@ -483,4 +555,7 @@ with tab4:
         st.success("Log cleared!")
         st.rerun()
   else:
-    st.info("No vehicles or DTCs logged yet. Run a code lookup in Tab 2 to start logging.")
+    st.info(
+        "No vehicles or DTCs logged yet. Run a code lookup in Tab 2 to start"
+        " logging."
+    )
