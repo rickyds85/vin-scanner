@@ -6,9 +6,22 @@ import streamlit as st
 import zxingcpp
 
 st.set_page_config(
-    page_title="Pro Auto Diagnostic Tool", page_icon="🔧", layout="wide"
+    page_title="Test Don't Guess", page_icon="⚡", layout="wide"
 )
-st.title("🚗 Pro Auto Diagnostic & VIN Tool")
+
+# Header with custom ignition firing line scope waveform
+firing_line_svg = """
+<div style="display: flex; align-items: center; gap: 14px; margin-bottom: 1.5rem;">
+  <svg width="65" height="42" viewBox="0 0 120 70" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align: middle;">
+    <!-- Dwell, Firing Line Spike, Spark Burn Line, and Coil Ringing -->
+    <path d="M 5 45 L 22 45 L 24 60 L 42 60 L 43 5 L 46 36 Q 48 34 54 36 T 64 36 T 74 35 T 80 36 Q 84 18 88 50 Q 92 24 96 44 Q 100 32 104 42 L 118 42" 
+          stroke="#00FF66" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" 
+          style="filter: drop-shadow(0px 0px 5px #00FF66);"/>
+  </svg>
+  <h1 style="margin: 0; padding: 0; font-size: 2.2rem; font-weight: 700;">Test Don't Guess</h1>
+</div>
+"""
+st.markdown(firing_line_svg, unsafe_allow_html=True)
 
 # Persistent session state across tabs
 if "vehicle_info" not in st.session_state:
