@@ -233,27 +233,32 @@ with tab2:
   if code_input and lookup_clicked:
     vehicle = st.session_state.vehicle_info or "General OBD-II Vehicle"
     dtc_prompt = f"""
-You are a master ASE-certified automotive diagnostic technician. Provide an in-depth, practical field diagnostic testing workflow for fault code {code_input} on a {vehicle}.
+You are an expert ASE master diagnostic technician. Provide a laser-focused, code-specific diagnostic testing workflow for fault code {code_input} on a {vehicle}.
+
+STRICT SCOPE RULES:
+- ONLY provide tests and checks for the exact subsystem, sensor, actuator, or circuit named in {code_input}.
+- DO NOT provide generic boilerplate checks. (For example: do NOT mention fuel pressure, fuel trims, spark/glow plugs, or engine compression UNLESS {code_input} directly involves those systems).
+- Focus on practical shop isolation: isolate circuit vs computer vs mechanical component.
 
 Format strictly using these Markdown sections:
 
-### Code Definition & Severity
-- Exact Code Definition
-- Severity level and drivability symptoms
+### 1. Code Definition & Setting Criteria
+- Exact technical definition of {code_input}
+- Exact conditions required for ECM to flag this fault (voltage out of range, commanded vs actual position mismatch, duty cycle threshold)
 
-### 1. PIDs & Scan Tool Verification
-- Top 4-5 live data PIDs to graph and their normal expected values
-- Step-by-step scan tool strategy (Mode $06, freeze frame checks, idle vs 2500 RPM rules)
+### 2. Live Scan Data & Bi-Directional Active Tests
+- Only the specific live PIDs directly tied to this circuit/actuator (and their expected values)
+- Bi-directional / functional test to command the actuator and what to observe
 
-### 2. Electrical & Scope Testing (DMM / Scope)
-- Step-by-step multimeter and oscilloscope checks (voltage drop thresholds, ground tests, sensor signal wire specs)
-- Expected waveforms or current ramp specs (if applicable)
+### 3. Pinpoint Electrical & Circuit Checks (DMM / Scope)
+- Connector pinout checks at the component (e.g. 5V reference, ground drop limit, 12V feed, PWM control duty cycle)
+- Component resistance specification (solenoid coil resistance, motor winding resistance, potentiometer sweep)
 
-### 3. Mechanical & Physical Testing
-- Physical tests (smoke testing, fuel pressure hold/leakdown tests, relative compression, vacuum checks)
+### 4. Physical & Mechanical Inspection
+- Visual and mechanical tests strictly for this mechanism (carbon buildup, binding linkages, vacuum diaphragm leaks, broken arm)
 
-### 4. Known Platform Pattern Failures & TSBs
-- Specific common real-world failure points, harness rub spots, or known TSBs for {vehicle}
+### 5. Known Platform Pattern Failures & TSBs
+- Specific real-world failure patterns for {vehicle} on this specific system
 """
     with st.spinner(
         f"Querying Perplexity Agent API for {code_input} diagnostic tree..."
