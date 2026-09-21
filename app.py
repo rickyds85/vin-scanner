@@ -1,3 +1,5 @@
+import csv
+from datetime import datetime
 import os
 import re
 from PIL import Image, ImageEnhance, ImageOps
@@ -26,19 +28,49 @@ st.markdown(firing_line_svg, unsafe_allow_html=True)
 # Persistent session state across tabs
 if "vehicle_info" not in st.session_state:
   st.session_state.vehicle_info = ""
+if "active_vin" not in st.session_state:
+  st.session_state.active_vin = ""
 if "active_dtc" not in st.session_state:
   st.session_state.active_dtc = ""
 if "chat_history" not in st.session_state:
   st.session_state.chat_history = []
 
-tab1, tab2, tab3 = st.tabs([
-    "📷 VIN Scanner",
-    "🔧 In-Depth Diagnostic Strategy",
-    "⚡ Copilot & Scope Lab",
-])
+LOG_FILE = "scan_history.csv"
 
 
-# --- HELPER FUNCTIONS ---
+# --- LOGGING HELPER FUNCTIONS ---
+def append_to_log(vin: str, vehicle: str, dtc: str):
+  """Appends a single diagnostic entry (timestamp, vin, vehicle, dtc) to a local CSV file."""
+  file_exists = os.path.isfile(LOG_FILE)
+  timestamp = datetime.now().strftime("%Y-%m-%d %I:%M %p")
+  try:
+    with open(LOG_FILE, mode="a", newline="", encoding="utf-8") as f:
+      writer = csv.writer(f)
+      if not file_exists:
+        writer.writerow(["Timestamp", "VIN", "Vehicle", "Fault Code (DTC)"])
+      writer.writerow(
+          [timestamp, vin or "N/A", vehicle or "Unknown Vehicle", dtc or "N/A"]
+      )
+  except Exception:
+    pass
+
+
+def load_log():
+  """Reads the CSV file and returns list of dictionaries."""
+  if not os.path.isfile(LOG_FILE):
+    return []
+  rows = []
+  try:
+    with open(LOG_FILE, mode="r", encoding="utf-8") as f:
+      reader = csv.DictReader(f)
+      for r in reader:
+        rows.append(r)
+  except Exception:
+    return []
+  return rows[::-1]  # Return newest entries first
+
+
+# --- API & DIAGNOSTIC HELPERS ---
 def query_perplexity(prompt_text: str, preset: str = "low") -> str:
   api_key = os.environ.get("PERPLEXITY_API_KEY")
   if not api_key and hasattr(st, "secrets"):
@@ -82,8 +114,6 @@ def query_perplexity(prompt_text: str, preset: str = "low") -> str:
 
 
 def scan_vin_barcode(pil_img: Image.Image) -> str:
-  """Aggressively scans an image for 17-digit VIN barcodes using rotation, downscaling, inversion, and contrast enhancement."""
-  # Pass 1: Full rotation, downscale, and inverted color check
   barcodes = zxingcpp.read_barcodes(
       pil_img, try_rotate=True, try_downscale=True, try_invert=True
   )
@@ -92,7 +122,6 @@ def scan_vin_barcode(pil_img: Image.Image) -> str:
     if match:
       return match.group(0)
 
-  # Pass 2: Grayscale and double contrast (cuts through glossy door jamb glare)
   gray = ImageOps.grayscale(pil_img)
   enhancer = ImageEnhance.Contrast(gray)
   high_contrast = enhancer.enhance(2.2)
@@ -105,7 +134,6 @@ def scan_vin_barcode(pil_img: Image.Image) -> str:
     if match:
       return match.group(0)
 
-  # Pass 3: Sharpening filter for out-of-focus camera sensors
   sharp = ImageEnhance.Sharpness(high_contrast).enhance(2.5)
   barcodes = zxingcpp.read_barcodes(
       sharp, try_rotate=True, try_downscale=True, try_invert=True
@@ -142,6 +170,13 @@ def decode_vin(vin_code: str) -> dict | None:
     return None
 
 
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📷 VIN Scanner",
+    "🔧 In-Depth Diagnostic Strategy",
+    "⚡ Copilot & Scope Lab",
+    "📋 Vehicle & DTC Log",
+])
+
 # ========================================================
 # --- TAB 1: VIN SCANNER ---
 # ========================================================
@@ -150,16 +185,17 @@ with tab1:
 
   col_cam, col_up = st.columns([1, 1])
   with col_cam:
-    photo = st.camera_input("Snap door jamb barcode")
+    # Camera toggle button so the lens is NOT constantly streaming
+    open_camera = st.toggle("📷 Open Camera Scanner", value=False)
+    photo = None
+    if open_camera:
+      photo = st.camera_input("Snap door jamb barcode")
+
   with col_up:
     uploaded_label = st.file_uploader(
-        "Or upload a high-res photo from your phone gallery",
+        "Or upload a high-res photo from gallery",
         type=["png", "jpg", "jpeg"],
         key="vin_upload",
-        help=(
-            "Tip: Phone camera apps take sharper, higher-resolution photos than"
-            " web browsers."
-        ),
     )
 
   active_image = photo or uploaded_label
@@ -171,20 +207,23 @@ with tab1:
     found_vin = scan_vin_barcode(img)
 
     if found_vin:
+      st.session_state.active_vin = found_vin
       st.success(f"Barcode Detected! VIN: **{found_vin}**")
     else:
       st.warning(
-          "No barcode detected. Move closer, tilt slightly to avoid glare, or"
-          " take a sharp picture with your phone camera app and upload it"
-          " above."
+          "No barcode detected. Tilt slightly to avoid glare, or take a sharp"
+          " photo with your phone camera app and upload."
       )
 
   vin = st.text_input(
-      "Enter 17-digit VIN manually:", value=found_vin, max_chars=17
+      "Enter 17-digit VIN manually:",
+      value=found_vin or st.session_state.active_vin,
+      max_chars=17,
   )
   active_vin = vin.strip().upper()
 
   if active_vin and (found_vin or st.button("Decode VIN")):
+    st.session_state.active_vin = active_vin
     details = decode_vin(active_vin)
     if details:
       year = details.get("Model Year", "")
@@ -210,7 +249,10 @@ with tab2:
   st.subheader("Field Diagnostic Strategy & Testing Workflow")
 
   if st.session_state.vehicle_info:
-    st.success(f"Active Vehicle: **{st.session_state.vehicle_info}**")
+    st.success(
+        f"Active Vehicle: **{st.session_state.vehicle_info}** (VIN:"
+        f" `{st.session_state.active_vin or 'Manual'}`)"
+    )
   else:
     st.caption("Tip: Decode a vehicle in Tab 1 to carry vehicle specs over.")
 
@@ -218,7 +260,7 @@ with tab2:
   with col_input:
     code_input = (
         st.text_input(
-            "Enter OBD-II DTC (e.g., P0316, P0300, U0100, P0420):",
+            "Enter OBD-II DTC (e.g., P200A, P0316, P0300):",
             value=st.session_state.active_dtc,
         )
         .strip()
@@ -245,6 +287,12 @@ with tab2:
 
   if code_input and lookup_clicked:
     vehicle = st.session_state.vehicle_info or "General OBD-II Vehicle"
+
+    # Automatically save VIN, Vehicle, and Code to local log (no tree text)
+    append_to_log(
+        vin=st.session_state.active_vin, vehicle=vehicle, dtc=code_input
+    )
+
     dtc_prompt = f"""
 You are an expert ASE master diagnostic technician. Provide a laser-focused, code-specific diagnostic testing workflow for fault code {code_input} on a {vehicle}.
 
@@ -293,9 +341,11 @@ with tab3:
 
   with col_scope:
     st.markdown("#### 📸 Scope & Meter Display Capture")
-    scope_capture = st.camera_input(
-        "Capture oscilloscope screen or meter reading"
-    )
+    open_scope_cam = st.toggle("📷 Open Camera for Scope / Meter", value=False)
+    scope_capture = None
+    if open_scope_cam:
+      scope_capture = st.camera_input("Capture oscilloscope or meter")
+
     scope_file = st.file_uploader(
         "Or upload scope waveform file/image",
         type=["png", "jpg", "jpeg"],
@@ -325,7 +375,7 @@ with tab3:
           "Scope Waveform Observations:",
           placeholder=(
               "e.g., Ignition coil burn time is 0.7ms; injector kick voltage is"
-              " only 35V; CKP missing tooth has uneven spacing during crank"
+              " only 35V; CKP missing tooth has uneven spacing"
           ),
           height=70,
       )
@@ -398,3 +448,39 @@ Respond directly, practically, and concisely to the latest question. Focus on ph
         st.session_state.chat_history.append(
             {"role": "assistant", "content": bot_reply}
         )
+
+# ========================================================
+# --- TAB 4: VEHICLE & DTC LOG ---
+# ========================================================
+with tab4:
+  st.subheader("📋 Vehicle Diagnostic Scan History")
+  st.caption(
+      "Tracks vehicles decoded and diagnostic trouble codes tested on this"
+      " device."
+  )
+
+  history = load_log()
+
+  if history:
+    st.dataframe(history, use_container_width=True)
+
+    col_csv, col_del = st.columns([1, 1])
+    with col_csv:
+      # Convert history to CSV format for simple download
+      csv_data = "Timestamp,VIN,Vehicle,Fault Code (DTC)\n"
+      for r in history:
+        csv_data += f'"{r.get("Timestamp","")}","{r.get("VIN","")}","{r.get("Vehicle","")}","{r.get("Fault Code (DTC)","")}"\n'
+      st.download_button(
+          label="📥 Export Log to CSV",
+          data=csv_data,
+          file_name="diagnostic_scan_log.csv",
+          mime="text/csv",
+      )
+    with col_del:
+      if st.button("🗑️ Clear Log History"):
+        if os.path.exists(LOG_FILE):
+          os.remove(LOG_FILE)
+        st.success("Log cleared!")
+        st.rerun()
+  else:
+    st.info("No vehicles or DTCs logged yet. Run a code lookup in Tab 2 to start logging.")
