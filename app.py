@@ -1,5 +1,8 @@
+import base64
 import csv
 from datetime import datetime
+import io
+import json
 import os
 import re
 from PIL import Image, ImageEnhance, ImageOps
@@ -90,6 +93,96 @@ def load_log():
   return rows[::-1]
 
 
+# --- GEMINI VISION HELPERS ---
+def extract_vin_via_ai(pil_img: Image.Image) -> str:
+  """Uses Gemini Vision to read 17-digit printed VIN text from stickers, windshields, or paperwork."""
+  gemini_key = os.environ.get("GEMINI_API_KEY")
+  if not gemini_key and hasattr(st, "secrets"):
+    gemini_key = st.secrets.get("GEMINI_API_KEY")
+
+  if not gemini_key:
+    return ""
+
+  try:
+    buffered = io.BytesIO()
+    pil_img.convert("RGB").save(buffered, format="JPEG", quality=85)
+    img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+    payload = {
+        "contents": [{
+            "parts": [
+                {
+                    "text": (
+                        "Locate and extract the 17-character Vehicle"
+                        " Identification Number (VIN) from this vehicle image"
+                        " (door jamb sticker, windshield plate, paperwork, or"
+                        " registration). Standard VINs only use digits and"
+                        " uppercase letters excluding I, O, and Q. Return ONLY"
+                        " the 17-character VIN. If none is found, return 'NONE'."
+                    )
+                },
+                {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
+            ]
+        }]
+    }
+
+    res = requests.post(url, json=payload, timeout=20)
+    if res.status_code == 200:
+      raw_text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
+      match = re.search(r"[A-HJ-NPR-Z0-9]{17}", raw_text.upper())
+      if match:
+        return match.group(0)
+  except Exception:
+    pass
+  return ""
+
+
+def extract_customer_info(pil_img: Image.Image) -> dict:
+  """Uses Gemini Vision to extract Customer Name, Address, and Phone Number from paperwork."""
+  gemini_key = os.environ.get("GEMINI_API_KEY")
+  if not gemini_key and hasattr(st, "secrets"):
+    gemini_key = st.secrets.get("GEMINI_API_KEY")
+
+  if not gemini_key:
+    return {
+        "error": "GEMINI_API_KEY is missing from Streamlit Secrets."
+    }
+
+  buffered = io.BytesIO()
+  pil_img.convert("RGB").save(buffered, format="JPEG", quality=85)
+  img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+  url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+  payload = {
+      "contents": [{
+          "parts": [
+              {
+                  "text": (
+                      "Read this work order / invoice image. Extract ONLY: 1)"
+                      " Customer Name, 2) Address, 3) Phone Number. Return"
+                      " strictly a valid JSON object with keys:"
+                      " 'customer_name', 'address', 'phone'. Do not include"
+                      " markdown formatting."
+                  )
+              },
+              {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
+          ]
+      }],
+      "generationConfig": {"response_mime_type": "application/json"},
+  }
+
+  try:
+    res = requests.post(url, json=payload, timeout=20)
+    if res.status_code == 200:
+      raw_text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
+      return json.loads(raw_text)
+    else:
+      return {"error": f"Vision API Error ({res.status_code}): {res.text}"}
+  except Exception as e:
+    return {"error": f"Failed to extract info: {e}"}
+
+
 # --- PERPLEXITY AGENT API HELPER ---
 def query_perplexity(prompt_text: str, preset: str = "low") -> str:
   api_key = os.environ.get("PERPLEXITY_API_KEY")
@@ -143,20 +236,9 @@ def scan_vin_barcode(pil_img: Image.Image) -> str:
       return match.group(0)
 
   gray = ImageOps.grayscale(pil_img)
-  enhancer = ImageEnhance.Contrast(gray)
-  high_contrast = enhancer.enhance(2.2)
-
+  high_contrast = ImageEnhance.Contrast(gray).enhance(2.2)
   barcodes = zxingcpp.read_barcodes(
       high_contrast, try_rotate=True, try_downscale=True, try_invert=True
-  )
-  for b in barcodes:
-    match = re.search(r"[A-HJ-NPR-Z0-9]{17}", b.text.upper())
-    if match:
-      return match.group(0)
-
-  sharp = ImageEnhance.Sharpness(high_contrast).enhance(2.5)
-  barcodes = zxingcpp.read_barcodes(
-      sharp, try_rotate=True, try_downscale=True, try_invert=True
   )
   for b in barcodes:
     match = re.search(r"[A-HJ-NPR-Z0-9]{17}", b.text.upper())
@@ -203,7 +285,7 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab1:
   st.subheader("Customer & Vehicle Identification")
 
-  # --- Customer Info Inputs ---
+  # Customer Info Section
   st.markdown("#### 👤 Customer Information")
   col_c1, col_c2 = st.columns([1, 1])
   with col_c1:
@@ -229,29 +311,23 @@ with tab1:
   st.session_state.customer_phone = cust_phone.strip()
   st.session_state.customer_address = cust_address.strip()
 
-  # Display pinned summary badge if customer is entered
-  if st.session_state.customer_name:
-    st.markdown(f"""
-        <div style="background-color: #1E232A; border-left: 4px solid #00FF66; padding: 12px 16px; border-radius: 6px; margin: 0.8rem 0 1.2rem 0;">
-            <div style="font-size: 1.1rem; font-weight: 700; color: #FFFFFF;">👤 {st.session_state.customer_name}</div>
-            <div style="color: #A0AEC0; font-size: 0.95rem;">📍 {st.session_state.customer_address or 'No address provided'}</div>
-            <div style="color: #A0AEC0; font-size: 0.95rem;">📞 {st.session_state.customer_phone or 'No phone number'}</div>
-        </div>
-        """, unsafe_allow_html=True)
-
   st.write("---")
-  st.markdown("#### 🚪 Vehicle VIN Barcode Scanner")
+  st.markdown("#### 📸 Vehicle VIN Photo / Barcode Scanner")
+  st.caption(
+      "Snap or upload any photo of the door jamb sticker, windshield plate,"
+      " registration, or work order."
+  )
 
   col_cam, col_up = st.columns([1, 1])
   with col_cam:
-    open_camera = st.toggle("📷 Open Camera Scanner", value=False)
+    open_camera = st.toggle("📷 Open Camera", value=False)
     photo = None
     if open_camera:
-      photo = st.camera_input("Snap door jamb barcode")
+      photo = st.camera_input("Snap VIN sticker, plate, or paperwork")
 
   with col_up:
     uploaded_label = st.file_uploader(
-        "Or upload a photo of the barcode",
+        "Or upload photo from phone gallery",
         type=["png", "jpg", "jpeg"],
         key="vin_upload",
     )
@@ -260,19 +336,43 @@ with tab1:
   found_vin = ""
 
   if active_image:
-    st.image(
-        active_image, caption="Captured Barcode", use_container_width=True
-    )
+    st.image(active_image, caption="Captured Image", use_container_width=True)
     img = Image.open(active_image)
+
+    # 1. Try barcode first
     found_vin = scan_vin_barcode(img)
+    detection_method = "Barcode"
+
+    # 2. If no barcode found, automatically run Gemini Vision OCR
+    if not found_vin:
+      with st.spinner("Scanning photo text with AI Vision for 17-digit VIN..."):
+        found_vin = extract_vin_via_ai(img)
+        detection_method = "AI Photo Text Recognition"
 
     if found_vin:
       st.session_state.active_vin = found_vin
-      st.success(f"Barcode Detected! VIN: **{found_vin}**")
+      st.success(f"VIN Detected ({detection_method})! **{found_vin}**")
     else:
       st.warning(
-          "No barcode detected. Tilt slightly to avoid glare or type VIN below."
+          "Could not detect a 17-digit VIN. Make sure all characters are"
+          " visible and legible, or enter manually below."
       )
+
+    # Optional helper: extract customer info if it's a work order
+    if st.button("📄 Extract Customer Details from this Image"):
+      with st.spinner("Extracting customer name, address, and phone..."):
+        c_info = extract_customer_info(img)
+        if "error" in c_info:
+          st.error(c_info["error"])
+        else:
+          if c_info.get("customer_name"):
+            st.session_state.customer_name = c_info["customer_name"]
+          if c_info.get("address"):
+            st.session_state.customer_address = c_info["address"]
+          if c_info.get("phone"):
+            st.session_state.customer_phone = c_info["phone"]
+          st.success("Customer info updated!")
+          st.rerun()
 
   vin = st.text_input(
       "Enter 17-digit VIN manually:",
@@ -310,8 +410,7 @@ with tab2:
   if st.session_state.customer_name:
     st.markdown(
         f"👤 Customer: **{st.session_state.customer_name}** | 📞"
-        f" `{st.session_state.customer_phone or 'No phone'}` | 📍"
-        f" `{st.session_state.customer_address or 'No address'}`"
+        f" `{st.session_state.customer_phone or 'No phone'}`"
     )
 
   if st.session_state.vehicle_info:
@@ -354,7 +453,6 @@ with tab2:
   if code_input and lookup_clicked:
     vehicle = st.session_state.vehicle_info or "General OBD-II Vehicle"
 
-    # Automatically save Customer, Phone, VIN, Vehicle, and Code to local log
     append_to_log(
         vin=st.session_state.active_vin,
         vehicle=vehicle,
