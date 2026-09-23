@@ -93,13 +93,94 @@ def load_log():
   return rows[::-1]
 
 
-# --- GEMINI VISION HELPERS ---
+# --- GEMINI HELPERS (TEXT & VISION) ---
+def get_gemini_key() -> str:
+  key = os.environ.get("GEMINI_API_KEY")
+  if not key and hasattr(st, "secrets"):
+    key = st.secrets.get("GEMINI_API_KEY")
+  return key or ""
+
+
+def query_gemini(prompt_text: str, system_instruction: str = "") -> str:
+  """Sends text prompt to Gemini 2.5 Flash."""
+  gemini_key = get_gemini_key()
+  if not gemini_key:
+    return "Error: GEMINI_API_KEY is missing from Streamlit Secrets."
+
+  url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+  payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
+  if system_instruction:
+    payload["system_instruction"] = {
+        "parts": [{"text": system_instruction}]
+    }
+
+  try:
+    res = requests.post(url, json=payload, timeout=45)
+    if res.status_code == 200:
+      return res.json()["candidates"][0]["content"]["parts"][0]["text"]
+    else:
+      return f"Gemini API Error ({res.status_code}): {res.text}"
+  except Exception as e:
+    return f"Gemini Error: {e}"
+
+
+def analyze_scope_with_gemini(
+    pil_img: Image.Image | None, test_summary: str
+) -> str:
+  """Uses Gemini Vision to visually inspect oscilloscope / meter images alongside physical test data."""
+  gemini_key = get_gemini_key()
+  if not gemini_key:
+    return "Error: GEMINI_API_KEY is missing from Streamlit Secrets."
+
+  prompt = f"""
+You are an expert ASE Master / L1 diagnostic technician and automotive oscilloscope waveform specialist.
+Analyze this oscilloscope or multimeter capture alongside the physical test readings from the shop floor.
+
+PHYSICAL TEST DATA & CONTEXT:
+{test_summary}
+
+SCOPE / METER VISION TASK:
+- If an image is provided: identify the signal type (Secondary/Primary Ignition, Injector Voltage/Current, CKP/CMP correlation, Relative Compression, PWM, Sensor 5V/Ground drop).
+- Evaluate critical electrical signatures: peak firing/inductive spike kV, dwell/charge duration, spark burn line slope & turbulence, coil oscillations/ringing count, ground bounce, signal attenuation, or missing-tooth spacing.
+- Correlate waveform abnormalities directly with the physical readings (compression, fuel pressure, voltage drop).
+
+FORMAT STRICTLY AS:
+### 1. Scope Waveform & Electrical Findings
+- Key waveform observations, time-base / voltage scale notes, and circuit anomalies observed in the photo.
+### 2. Component Condemnation & Defect Root Cause
+- What exact component, circuit, or mechanical issue is failing based on this waveform and test data?
+### 3. Immediate Pinpoint Verification Step
+- The single next test to 100% isolate and verify before condemning the part.
+"""
+  parts = [{"text": prompt}]
+
+  if pil_img is not None:
+    try:
+      buffered = io.BytesIO()
+      pil_img.convert("RGB").save(buffered, format="JPEG", quality=85)
+      img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
+      parts.append(
+          {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
+      )
+    except Exception as e:
+      return f"Image processing error: {e}"
+
+  url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+  payload = {"contents": [{"parts": parts}]}
+
+  try:
+    res = requests.post(url, json=payload, timeout=45)
+    if res.status_code == 200:
+      return res.json()["candidates"][0]["content"]["parts"][0]["text"]
+    else:
+      return f"Gemini Vision Error ({res.status_code}): {res.text}"
+  except Exception as e:
+    return f"Scope Analysis Error: {e}"
+
+
 def extract_vin_via_ai(pil_img: Image.Image) -> str:
   """Uses Gemini Vision to read 17-digit printed VIN text from stickers, windshields, or paperwork."""
-  gemini_key = os.environ.get("GEMINI_API_KEY")
-  if not gemini_key and hasattr(st, "secrets"):
-    gemini_key = st.secrets.get("GEMINI_API_KEY")
-
+  gemini_key = get_gemini_key()
   if not gemini_key:
     return ""
 
@@ -140,10 +221,7 @@ def extract_vin_via_ai(pil_img: Image.Image) -> str:
 
 def extract_customer_info(pil_img: Image.Image) -> dict:
   """Uses Gemini Vision to extract Customer Name, Address, and Phone Number from paperwork."""
-  gemini_key = os.environ.get("GEMINI_API_KEY")
-  if not gemini_key and hasattr(st, "secrets"):
-    gemini_key = st.secrets.get("GEMINI_API_KEY")
-
+  gemini_key = get_gemini_key()
   if not gemini_key:
     return {
         "error": "GEMINI_API_KEY is missing from Streamlit Secrets."
@@ -221,7 +299,7 @@ def query_perplexity(prompt_text: str, preset: str = "low") -> str:
     else:
       return f"API Error ({res.status_code}): {res.text}"
   except requests.exceptions.Timeout:
-    return "Request timed out. Please try again or switch preset to 'Fast'."
+    return "Request timed out. Please try again."
   except Exception as e:
     return f"Unexpected error: {e}"
 
@@ -358,7 +436,6 @@ with tab1:
           " visible and legible, or enter manually below."
       )
 
-    # Optional helper: extract customer info if it's a work order
     if st.button("📄 Extract Customer Details from this Image"):
       with st.spinner("Extracting customer name, address, and phone..."):
         c_info = extract_customer_info(img)
@@ -421,7 +498,7 @@ with tab2:
   else:
     st.caption("Tip: Decode a vehicle in Tab 1 to carry vehicle specs over.")
 
-  col_input, col_preset, col_btn = st.columns([3, 2, 1.5])
+  col_input, col_engine, col_btn = st.columns([2.5, 2.5, 1.5])
   with col_input:
     code_input = (
         st.text_input(
@@ -434,18 +511,18 @@ with tab2:
     if code_input:
       st.session_state.active_dtc = code_input
 
-  with col_preset:
-    preset_choice = st.selectbox(
-        "Diagnostic Depth",
-        options=["low", "medium", "fast"],
+  with col_engine:
+    ai_engine = st.selectbox(
+        "Diagnostic AI Engine",
+        options=["gemini", "perplexity"],
         index=0,
         format_func=lambda x: {
-            "low": "Sonar Pro (Detailed TSBs & PIDs)",
-            "medium": "Reasoning Pro (Deep Scope & Logic)",
-            "fast": "Fast (Quick Overview)",
+            "gemini": "✨ Google Gemini 2.5 Flash (Deep Logic)",
+            "perplexity": "🌐 Perplexity Sonar Pro (Live Web & TSBs)",
         }[x],
-        help="Controls depth of diagnostic testing and live web research.",
+        help="Gemini provides deep circuit & mechanical logic; Perplexity checks live technical databases and TSBs.",
     )
+
   with col_btn:
     st.write("")
     lookup_clicked = st.button("Run Diagnostic Tree", use_container_width=True)
@@ -489,10 +566,11 @@ Format strictly using these Markdown sections:
 ### 5. Known Platform Pattern Failures & TSBs
 - Specific real-world failure patterns for {vehicle} on this specific system
 """
-    with st.spinner(
-        f"Querying Perplexity Agent API for {code_input} diagnostic tree..."
-    ):
-      result = query_perplexity(dtc_prompt, preset=preset_choice)
+    with st.spinner(f"Generating {code_input} strategy via {ai_engine.upper()}..."):
+      if ai_engine == "gemini":
+        result = query_gemini(dtc_prompt)
+      else:
+        result = query_perplexity(dtc_prompt, preset="low")
       st.markdown(result)
 
 # ========================================================
@@ -525,8 +603,10 @@ with tab3:
     )
 
     active_img = scope_capture or scope_file
+    pil_scope_image = None
     if active_img:
       st.image(active_img, caption="Captured Scope / Meter Display")
+      pil_scope_image = Image.open(active_img)
 
   with col_scratch:
     st.markdown("#### 📝 Test Results Scratchpad")
@@ -552,7 +632,7 @@ with tab3:
           height=70,
       )
 
-  if st.button("🔍 Analyze Entered Test Results & Scope Data"):
+  if st.button("🔍 Analyze Entered Test Results & Scope Pattern with Gemini"):
     test_summary = f"""
 Customer: {c_label}
 Vehicle: {v_label}
@@ -562,23 +642,13 @@ Fuel Pressure & Bleed-down: {fuel_data or 'Not tested'}
 Voltage Drop / Electrical: {volt_data or 'Not tested'}
 Scope Observations: {scope_notes or 'None reported'}
 """
-    copilot_prompt = f"""
-You are an expert diagnostic master technician. Analyze these real-world shop test results and scope observations:
-
-{test_summary}
-
-Provide a concise, direct diagnostic breakdown:
-1. **Critical Findings:** Identify which values fail specifications or show circuit/mechanical defects.
-2. **Component Condemnation or Next Check:** What specific part is failing, or what exact pinpoint test isolates the culprit?
-3. **Common Trap to Avoid:** What mistake or misdiagnosis frequently happens with these specific readings?
-"""
-    with st.spinner("Analyzing test data..."):
-      eval_res = query_perplexity(copilot_prompt, preset="low")
+    with st.spinner("Gemini Vision is analyzing waveform signatures and physical readings..."):
+      eval_res = analyze_scope_with_gemini(pil_scope_image, test_summary)
       st.markdown("### Diagnostic Evaluation")
       st.markdown(eval_res)
 
   st.write("---")
-  st.markdown("#### 💬 Interactive Diagnostic Copilot")
+  st.markdown("#### 💬 Interactive Diagnostic Copilot (Gemini)")
   st.caption(
       "Ask follow-up questions, request specific pinout checks, or ask how to"
       " isolate an intermittent fault."
@@ -616,8 +686,8 @@ Recent Conversation & Test Data:
 Respond directly, practically, and concisely to the latest question. Focus on physical shop tests, circuit checks, and logical isolation procedures.
 """
     with st.chat_message("assistant"):
-      with st.spinner("Thinking..."):
-        bot_reply = query_perplexity(chat_prompt, preset="low")
+      with st.spinner("Gemini Thinking..."):
+        bot_reply = query_gemini(chat_prompt)
         st.markdown(bot_reply)
         st.session_state.chat_history.append(
             {"role": "assistant", "content": bot_reply}
