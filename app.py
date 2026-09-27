@@ -607,7 +607,6 @@ with tab1:
 
             log("Connected to ECM! Ready to stream live data or sync vehicle.");
 
-            // Enable buttons
             const liveBtn = document.getElementById('liveBtn');
             liveBtn.disabled = false;
             liveBtn.style.backgroundColor = '#38BDF8';
@@ -664,7 +663,7 @@ with tab1:
     });
     </script>
     """
-  components.html(ble_bridge_html, height=220)
+  components.html(ble_bridge_html, height=450)
 
   # Customer Info Section
   st.markdown("#### 👤 Customer Information")
