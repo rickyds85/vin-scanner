@@ -614,12 +614,12 @@ with tab2:
     let txChar = null;
     let responseBuffer = "";
     let resolver = null;
+    let isBusy = false;
     let isStreaming = false;
     let unsupportedPids = new Set();
     let o2ProbeSuccess = null;
     let loopCycle = 0;
     let mode6RawData = "";
-    let gattQueue = Promise.resolve();
 
     function log(msg) {
         document.getElementById('bleStatus').innerText = "Status: " + msg;
@@ -637,32 +637,46 @@ with tab2:
         }
     }
 
-    // Strict GATT Promise Queue: eliminates "GATT operation in progress" exceptions
-    function sendCmd(cmd, timeoutMs = 1200) {
-        gattQueue = gattQueue.catch(() => {}).then(() => {
-            return new Promise(async (resolve) => {
-                resolver = resolve;
-                responseBuffer = "";
-                const timer = setTimeout(() => {
-                    if (resolver) {
-                        const fallback = responseBuffer;
-                        responseBuffer = "";
-                        resolver = null;
-                        resolve(fallback);
-                    }
-                }, timeoutMs);
+    async function sendCmd(cmd, timeoutMs = 1200) {
+        while (isBusy) {
+            await new Promise(r => setTimeout(r, 20));
+        }
+        isBusy = true;
 
-                try {
-                    const enc = new TextEncoder().encode(cmd + "\\r");
-                    await rxChar.writeValue(enc);
-                } catch (err) {
-                    clearTimeout(timer);
+        return new Promise(async (resolve) => {
+            responseBuffer = "";
+
+            const timer = setTimeout(() => {
+                if (resolver) {
+                    const fallback = responseBuffer;
+                    responseBuffer = "";
                     resolver = null;
-                    resolve("");
+                    isBusy = false;
+                    resolve(fallback);
                 }
-            });
+            }, timeoutMs);
+
+            resolver = (data) => {
+                clearTimeout(timer);
+                resolver = null;
+                isBusy = false;
+                resolve(data);
+            };
+
+            try {
+                const enc = new TextEncoder().encode(cmd + "\\r");
+                if (rxChar.writeValueWithResponse) {
+                    await rxChar.writeValueWithResponse(enc);
+                } else {
+                    await rxChar.writeValue(enc);
+                }
+            } catch (err) {
+                clearTimeout(timer);
+                resolver = null;
+                isBusy = false;
+                resolve("");
+            }
         });
-        return gattQueue;
     }
 
     function parseCleanHex(raw) {
@@ -715,10 +729,8 @@ with tab2:
         while (isStreaming) {
             loopCycle++;
             try {
-                // ==========================================
-                // TIER 1: HIGH-PRIORITY (Every Cycle ~200ms)
-                // ==========================================
-                let cRpm = await queryPid("010C", 400);
+                // Tier 1: High Priority (Every loop)
+                let cRpm = await queryPid("010C", 350);
                 let mRpm = cRpm.match(/410C([0-9A-F]{4})/);
                 if (mRpm) {
                     let a = parseInt(mRpm[1].substr(0, 2), 16);
@@ -727,32 +739,30 @@ with tab2:
                 }
                 if (!isStreaming) break;
 
-                let cLoad = await queryPid("0104", 400);
+                let cLoad = await queryPid("0104", 350);
                 let mLoad = cLoad.match(/4104([0-9A-F]{2})/);
                 if (mLoad) {
                     document.getElementById('valLoad').innerText = Math.round((parseInt(mLoad[1], 16) * 100) / 255) + "%";
                 }
                 if (!isStreaming) break;
 
-                let cTps = await queryPid("0111", 400);
+                let cTps = await queryPid("0111", 350);
                 let mTps = cTps.match(/4111([0-9A-F]{2})/);
                 if (mTps) {
                     document.getElementById('valTps').innerText = Math.round((parseInt(mTps[1], 16) * 100) / 255) + "%";
                 }
                 if (!isStreaming) break;
 
-                let cSpd = await queryPid("010D", 400);
+                let cSpd = await queryPid("010D", 350);
                 let mSpd = cSpd.match(/410D([0-9A-F]{2})/);
                 if (mSpd) {
                     document.getElementById('valSpd').innerText = Math.round(parseInt(mSpd[1], 16) * 0.621371) + " MPH";
                 }
                 if (!isStreaming) break;
 
-                // ==========================================
-                // TIER 2: FUEL TRIMS & AIR (Every 2nd Cycle)
-                // ==========================================
+                // Tier 2: Trims & Metering (Every 2nd loop)
                 if (loopCycle % 2 === 0) {
-                    let cStft = await queryPid("0106", 400);
+                    let cStft = await queryPid("0106", 350);
                     let mStft = cStft.match(/4106([0-9A-F]{2})/);
                     if (mStft) {
                         let s = (((parseInt(mStft[1], 16) - 128) * 100) / 128).toFixed(1);
@@ -760,7 +770,7 @@ with tab2:
                     }
                     if (!isStreaming) break;
 
-                    let cLtft = await queryPid("0107", 400);
+                    let cLtft = await queryPid("0107", 350);
                     let mLtft = cLtft.match(/4107([0-9A-F]{2})/);
                     if (mLtft) {
                         let l = (((parseInt(mLtft[1], 16) - 128) * 100) / 128).toFixed(1);
@@ -768,14 +778,14 @@ with tab2:
                     }
                     if (!isStreaming) break;
 
-                    let cTime = await queryPid("010E", 400);
+                    let cTime = await queryPid("010E", 350);
                     let mTime = cTime.match(/410E([0-9A-F]{2})/);
                     if (mTime) {
                         document.getElementById('valTime').innerText = ((parseInt(mTime[1], 16) / 2) - 64).toFixed(1) + "°";
                     }
                     if (!isStreaming) break;
 
-                    let cMaf = await queryPid("0110", 400);
+                    let cMaf = await queryPid("0110", 350);
                     let mMaf = cMaf.match(/4110([0-9A-F]{4})/);
                     if (mMaf) {
                         let a = parseInt(mMaf[1].substr(0, 2), 16);
@@ -786,7 +796,7 @@ with tab2:
                     }
                     if (!isStreaming) break;
 
-                    let cMap = await queryPid("010B", 400);
+                    let cMap = await queryPid("010B", 350);
                     let mMap = cMap.match(/410B([0-9A-F]{2})/);
                     if (mMap) {
                         document.getElementById('valMap').innerText = (parseInt(mMap[1], 16) * 0.145038).toFixed(1) + " PSI";
@@ -795,34 +805,35 @@ with tab2:
                     }
                     if (!isStreaming) break;
 
-                    // Upstream O2 B1S1: Auto-Detect Wideband Lambda vs Narrowband 0-1V
+                    // O2 Sensor 1 Bank 1: Auto-Detect Wideband vs Narrowband
                     if (!o2ProbeSuccess) {
-                        let c14 = await queryPid("0114", 400);
+                        let c14 = await queryPid("0114", 350);
                         if (c14.includes("4114")) {
                             o2ProbeSuccess = "14";
                         } else {
-                            let c24 = await queryPid("0124", 400);
+                            let c24 = await queryPid("0124", 350);
                             if (c24.includes("4124")) {
                                 o2ProbeSuccess = "24";
                             } else {
-                                let c34 = await queryPid("0134", 400);
+                                let c34 = await queryPid("0134", 350);
                                 if (c34.includes("4134")) o2ProbeSuccess = "34";
                             }
                         }
                     }
 
                     if (o2ProbeSuccess === "14") {
-                        let cO2 = await queryPid("0114", 400);
+                        let cO2 = await queryPid("0114", 350);
                         let mO2 = cO2.match(/4114([0-9A-F]{2})/);
                         if (mO2) document.getElementById('valO21').innerText = (parseInt(mO2[1], 16) / 200).toFixed(2) + "V";
                     } else if (o2ProbeSuccess === "24" || o2ProbeSuccess === "34") {
                         let cmd = "01" + o2ProbeSuccess;
-                        let cWb = await queryPid(cmd, 400);
+                        let cWb = await queryPid(cmd, 350);
                         let mWb = cWb.match(new RegExp("41" + o2ProbeSuccess + "([0-9A-F]{4})"));
                         if (mWb) {
                             let a = parseInt(mWb[1].substr(0, 2), 16);
                             let b = parseInt(mWb[1].substr(2, 2), 16);
                             let lambda = (((a * 256) + b) / 32768).toFixed(2);
+                            document.getElementById('lblO21').innerText = "O2 B1S1 (A/F λ)";
                             document.getElementById('valO21').innerText = "λ " + lambda;
                         }
                     } else {
@@ -831,18 +842,16 @@ with tab2:
                 }
                 if (!isStreaming) break;
 
-                // ==========================================
-                // TIER 3: SLOW TEMPERATURES & BATTERY (Every 4th Cycle)
-                // ==========================================
+                // Tier 3: Temperatures & Battery (Every 4th loop)
                 if (loopCycle % 4 === 0) {
-                    let cEct = await queryPid("0105", 400);
+                    let cEct = await queryPid("0105", 350);
                     let mEct = cEct.match(/4105([0-9A-F]{2})/);
                     if (mEct) {
                         document.getElementById('valEct').innerText = Math.round((parseInt(mEct[1], 16) - 40) * 1.8 + 32) + " °F";
                     }
                     if (!isStreaming) break;
 
-                    let cIat = await queryPid("010F", 400);
+                    let cIat = await queryPid("010F", 350);
                     let mIat = cIat.match(/410F([0-9A-F]{2})/);
                     if (mIat) {
                         document.getElementById('valIat').innerText = Math.round((parseInt(mIat[1], 16) - 40) * 1.8 + 32) + " °F";
@@ -851,7 +860,7 @@ with tab2:
                     }
                     if (!isStreaming) break;
 
-                    let cStft2 = await queryPid("0108", 400);
+                    let cStft2 = await queryPid("0108", 350);
                     let mStft2 = cStft2.match(/4108([0-9A-F]{2})/);
                     if (mStft2) {
                         let s2 = (((parseInt(mStft2[1], 16) - 128) * 100) / 128).toFixed(1);
@@ -861,7 +870,7 @@ with tab2:
                     }
                     if (!isStreaming) break;
 
-                    let cLtft2 = await queryPid("0109", 400);
+                    let cLtft2 = await queryPid("0109", 350);
                     let mLtft2 = cLtft2.match(/4109([0-9A-F]{2})/);
                     if (mLtft2) {
                         let l2 = (((parseInt(mLtft2[1], 16) - 128) * 100) / 128).toFixed(1);
@@ -871,7 +880,7 @@ with tab2:
                     }
                     if (!isStreaming) break;
 
-                    let cO22 = await queryPid("0115", 400);
+                    let cO22 = await queryPid("0115", 350);
                     let mO22 = cO22.match(/4115([0-9A-F]{2})/);
                     if (mO22) {
                         document.getElementById('valO22').innerText = (parseInt(mO22[1], 16) / 200).toFixed(2) + "V";
@@ -880,7 +889,7 @@ with tab2:
                     }
                     if (!isStreaming) break;
 
-                    let cBaro = await queryPid("0133", 400);
+                    let cBaro = await queryPid("0133", 350);
                     let mBaro = cBaro.match(/4133([0-9A-F]{2})/);
                     if (mBaro) {
                         document.getElementById('valBaro').innerText = (parseInt(mBaro[1], 16) * 0.2953).toFixed(1) + " inHg";
@@ -894,7 +903,6 @@ with tab2:
                     if (vMatch) document.getElementById('valVolt').innerText = vMatch[1] + "V";
                 }
             } catch (err) {
-                // Non-blocking catch: preserves loop continuity if a single frame drops
                 console.error("Telemetry error:", err);
             }
             await new Promise(r => setTimeout(r, 25));
@@ -930,12 +938,14 @@ with tab2:
             await txChar.startNotifications();
             txChar.addEventListener('characteristicvaluechanged', onData);
 
-            log("Initializing ELM327 protocol...");
-            await sendCmd("ATZ", 1500);
-            await sendCmd("ATE0", 600);
-            await sendCmd("ATL0", 600);
-            await sendCmd("ATSP0", 600);
-            await sendCmd("0100", 3000); // Trigger auto-protocol search
+            log("Configuring Veepeak adapter...");
+            await sendCmd("ATE0", 600);   // Echo off
+            await sendCmd("ATL0", 500);   // Linefeeds off
+            await sendCmd("ATH0", 500);   // Headers off
+            await sendCmd("ATSP0", 600);  // Protocol auto
+
+            log("Connecting to vehicle ECM...");
+            await sendCmd("0100", 4000);  // Auto-protocol bus negotiation
 
             unsupportedPids.clear();
             o2ProbeSuccess = null;
@@ -995,8 +1005,8 @@ with tab2:
         document.getElementById('liveBtn').innerText = "▶️ Start Live Data";
         document.getElementById('liveBtn').style.backgroundColor = "#38BDF8";
 
-        log("Pausing telemetry to run clean Mode $06 sweep...");
-        await new Promise(r => setTimeout(r, 100)); // Allow bus buffer to flush
+        log("Pausing telemetry to run Mode $06 scan...");
+        await new Promise(r => setTimeout(r, 100));
 
         const m6Box = document.getElementById('mode6Box');
         m6Box.innerHTML = "<div style='color: #F59E0B; padding: 4px;'>⚡ Scanning all cylinder misfire monitors (Mode $06)...</div>";
@@ -1022,7 +1032,6 @@ with tab2:
             if (clean.includes("NODATA") || clean.includes("?") || clean.length < 6) continue;
             mode6RawData += "\\n" + t.name + ": " + res;
 
-            // Matches standard CAN format: 46 [MID] [TID] [Units] [Value]
             let m = clean.match(/46(A[2-9])([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{4})/);
             if (m) {
                 foundAny = true;
@@ -1037,7 +1046,6 @@ with tab2:
             }
         }
 
-        // Catalyst Efficiency Monitor
         let catRes = await sendCmd("0621", 500);
         let cleanCat = parseCleanHex(catRes);
         if (!cleanCat.includes("NODATA") && !cleanCat.includes("?") && cleanCat.length >= 6) {
