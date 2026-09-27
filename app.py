@@ -363,25 +363,61 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab1:
   st.subheader("Customer & Vehicle Identification")
 
-  # --- VEEPEAK WEB BLUETOOTH OBD2 BRIDGE ---
-  st.markdown("#### 🔌 Veepeak OBDCheck BLE+ Direct Connect")
+  # --- VEEPEAK WEB BLUETOOTH OBD2 BRIDGE & LIVE DATA CLUSTER ---
+  st.markdown("#### 🔌 Veepeak OBDCheck BLE+ Live Dashboard")
   st.caption(
-      "Plug Veepeak into vehicle OBD-II port (Key ON/Engine Running). Tap"
-      " button to connect and pull VIN & DTCs directly."
+      "Plug Veepeak into OBD-II port (Key ON/Engine Running). Connect to view"
+      " live streaming PIDs or sync the VIN & DTCs to your diagnostic strategy."
   )
 
   ble_bridge_html = """
     <div style="background-color: #1A1F26; border: 1px solid #00FF66; padding: 14px; border-radius: 8px; margin-bottom: 1rem;">
-        <button id="bleBtn" style="background-color: #00FF66; color: #0E1117; font-weight: 700; font-size: 1rem; border: none; padding: 10px 18px; border-radius: 5px; cursor: pointer; display: flex; align-items: center; gap: 8px;">
-            <span>⚡</span> Connect Veepeak BLE+
-        </button>
-        <div id="bleStatus" style="color: #A0AEC0; font-family: monospace; font-size: 0.9rem; margin-top: 10px;">Status: Ready to pair</div>
+        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 8px;">
+            <button id="bleBtn" style="background-color: #00FF66; color: #0E1117; font-weight: 700; font-size: 0.95rem; border: none; padding: 9px 16px; border-radius: 5px; cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                <span>⚡</span> Connect Veepeak BLE+
+            </button>
+            <button id="liveBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.95rem; border: 1px solid #4A5568; padding: 9px 16px; border-radius: 5px; cursor: not-allowed;">
+                ▶️ Start Live Data
+            </button>
+            <button id="pullVinBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.95rem; border: 1px solid #4A5568; padding: 9px 16px; border-radius: 5px; cursor: not-allowed;">
+                📋 Sync VIN & DTCs to App
+            </button>
+        </div>
+        <div id="bleStatus" style="color: #A0AEC0; font-family: monospace; font-size: 0.85rem; margin-bottom: 12px;">Status: Ready to pair</div>
+
+        <!-- Real-Time Gauge HUD -->
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px;">
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 10px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.75rem; color: #A0AEC0; text-transform: uppercase;">Engine RPM</div>
+                <div id="valRpm" style="font-size: 1.4rem; font-weight: 700; color: #00FF66;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 10px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.75rem; color: #A0AEC0; text-transform: uppercase;">Coolant Temp</div>
+                <div id="valEct" style="font-size: 1.4rem; font-weight: 700; color: #38BDF8;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 10px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.75rem; color: #A0AEC0; text-transform: uppercase;">STFT (Bank 1)</div>
+                <div id="valStft" style="font-size: 1.4rem; font-weight: 700; color: #FBBF24;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 10px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.75rem; color: #A0AEC0; text-transform: uppercase;">LTFT (Bank 1)</div>
+                <div id="valLtft" style="font-size: 1.4rem; font-weight: 700; color: #FBBF24;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 10px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.75rem; color: #A0AEC0; text-transform: uppercase;">Throttle Pos</div>
+                <div id="valTps" style="font-size: 1.4rem; font-weight: 700; color: #E2E8F0;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 10px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.75rem; color: #A0AEC0; text-transform: uppercase;">Battery Voltage</div>
+                <div id="valVolt" style="font-size: 1.4rem; font-weight: 700; color: #E2E8F0;">--</div>
+            </div>
+        </div>
     </div>
 
     <script>
     const NORDIC_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-    const NORDIC_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // write to dongle
-    const NORDIC_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // notify from dongle
+    const NORDIC_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+    const NORDIC_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 
     const FFF0_SERVICE = '0000fff0-0000-1000-8000-00805f9b34fb';
     const FFF2_RX = '0000fff2-0000-1000-8000-00805f9b34fb';
@@ -391,6 +427,7 @@ with tab1:
     let txChar = null;
     let responseBuffer = "";
     let resolver = null;
+    let isStreaming = false;
 
     function log(msg) {
         document.getElementById('bleStatus').innerText = "Status: " + msg;
@@ -412,7 +449,12 @@ with tab1:
             resolver = resolve;
             responseBuffer = "";
             const enc = new TextEncoder().encode(cmd + "\\r");
-            await rxChar.writeValue(enc);
+            try {
+                await rxChar.writeValue(enc);
+            } catch (err) {
+                resolve("");
+                return;
+            }
             setTimeout(() => {
                 if (resolver) {
                     const fallback = responseBuffer;
@@ -420,12 +462,16 @@ with tab1:
                     resolver(fallback);
                     resolver = null;
                 }
-            }, 3000);
+            }, 2500);
         });
     }
 
+    function parseCleanHex(raw) {
+        return raw.replace(/\\s+/g, '').toUpperCase();
+    }
+
     function parseDTC(raw) {
-        const clean = raw.replace(/\\s+/g, '').toUpperCase();
+        const clean = parseCleanHex(raw);
         const m = clean.match(/43([0-9A-F]{4})/);
         if (m) {
             const hex = m[1];
@@ -453,6 +499,75 @@ with tab1:
         }
         const m = ascii.match(/[A-HJ-NPR-Z0-9]{17}/);
         return m ? m[0] : "";
+    }
+
+    async function runLiveLoop() {
+        while (isStreaming) {
+            // 1. RPM (010C)
+            let res = await sendCmd("010C");
+            let clean = parseCleanHex(res);
+            let m = clean.match(/410C([0-9A-F]{4})/);
+            if (m) {
+                let a = parseInt(m[1].substr(0, 2), 16);
+                let b = parseInt(m[1].substr(2, 2), 16);
+                let rpm = Math.round(((a * 256) + b) / 4);
+                document.getElementById('valRpm').innerText = rpm + " RPM";
+            }
+            if (!isStreaming) break;
+
+            // 2. Coolant Temp (0105)
+            res = await sendCmd("0105");
+            clean = parseCleanHex(res);
+            m = clean.match(/4105([0-9A-F]{2})/);
+            if (m) {
+                let a = parseInt(m[1], 16);
+                let degF = Math.round((a - 40) * 1.8 + 32);
+                document.getElementById('valEct').innerText = degF + " °F";
+            }
+            if (!isStreaming) break;
+
+            // 3. Short Term Fuel Trim (0106)
+            res = await sendCmd("0106");
+            clean = parseCleanHex(res);
+            m = clean.match(/4106([0-9A-F]{2})/);
+            if (m) {
+                let a = parseInt(m[1], 16);
+                let stft = (((a - 128) * 100) / 128).toFixed(1);
+                document.getElementById('valStft').innerText = (stft > 0 ? "+" : "") + stft + "%";
+            }
+            if (!isStreaming) break;
+
+            // 4. Long Term Fuel Trim (0107)
+            res = await sendCmd("0107");
+            clean = parseCleanHex(res);
+            m = clean.match(/4107([0-9A-F]{2})/);
+            if (m) {
+                let a = parseInt(m[1], 16);
+                let ltft = (((a - 128) * 100) / 128).toFixed(1);
+                document.getElementById('valLtft').innerText = (ltft > 0 ? "+" : "") + ltft + "%";
+            }
+            if (!isStreaming) break;
+
+            // 5. Throttle Position (0111)
+            res = await sendCmd("0111");
+            clean = parseCleanHex(res);
+            m = clean.match(/4111([0-9A-F]{2})/);
+            if (m) {
+                let a = parseInt(m[1], 16);
+                let tps = Math.round((a * 100) / 255);
+                document.getElementById('valTps').innerText = tps + "%";
+            }
+            if (!isStreaming) break;
+
+            // 6. Battery Voltage (ATRV)
+            res = await sendCmd("ATRV");
+            let vMatch = res.match(/([0-9]+\.[0-9]+)/);
+            if (vMatch) {
+                document.getElementById('valVolt').innerText = vMatch[1] + "V";
+            }
+
+            await new Promise(r => setTimeout(r, 120));
+        }
     }
 
     document.getElementById('bleBtn').addEventListener('click', async () => {
@@ -484,36 +599,72 @@ with tab1:
             await txChar.startNotifications();
             txChar.addEventListener('characteristicvaluechanged', onData);
 
-            log("Handshaking with ECU...");
+            log("Handshaking with ECM...");
             await sendCmd("ATZ");
             await sendCmd("ATE0");
             await sendCmd("ATL0");
             await sendCmd("ATSP0");
 
-            log("Requesting VIN (09 02)...");
-            const vinRaw = await sendCmd("0902");
-            const vin = parseVIN(vinRaw);
+            log("Connected to ECM! Ready to stream live data or sync vehicle.");
 
-            log("Requesting Stored Fault Codes (03)...");
-            const dtcRaw = await sendCmd("03");
-            const dtc = parseDTC(dtcRaw);
+            // Enable buttons
+            const liveBtn = document.getElementById('liveBtn');
+            liveBtn.disabled = false;
+            liveBtn.style.backgroundColor = '#38BDF8';
+            liveBtn.style.color = '#0E1117';
+            liveBtn.style.cursor = 'pointer';
 
-            log("Success! VIN: " + (vin || "Manual") + " | DTC: " + (dtc || "None") + ". Refreshing app...");
-
-            setTimeout(() => {
-                const targetUrl = new URL(window.top.location.href);
-                if (vin) targetUrl.searchParams.set("ble_vin", vin);
-                if (dtc) targetUrl.searchParams.set("ble_dtc", dtc);
-                window.top.location.href = targetUrl.toString();
-            }, 1200);
+            const pullBtn = document.getElementById('pullVinBtn');
+            pullBtn.disabled = false;
+            pullBtn.style.backgroundColor = '#A855F7';
+            pullBtn.style.color = '#FFFFFF';
+            pullBtn.style.cursor = 'pointer';
 
         } catch (err) {
             log("Error: " + err.message);
         }
     });
+
+    document.getElementById('liveBtn').addEventListener('click', () => {
+        const liveBtn = document.getElementById('liveBtn');
+        if (!isStreaming) {
+            isStreaming = true;
+            liveBtn.innerText = "⏸️ Pause Stream";
+            liveBtn.style.backgroundColor = "#EF4444";
+            liveBtn.style.color = "#FFFFFF";
+            log("Streaming live data from vehicle...");
+            runLiveLoop();
+        } else {
+            isStreaming = false;
+            liveBtn.innerText = "▶️ Start Live Data";
+            liveBtn.style.backgroundColor = "#38BDF8";
+            liveBtn.style.color = "#0E1117";
+            log("Stream paused.");
+        }
+    });
+
+    document.getElementById('pullVinBtn').addEventListener('click', async () => {
+        isStreaming = false;
+        log("Querying 17-digit VIN (09 02)...");
+        const vinRaw = await sendCmd("0902");
+        const vin = parseVIN(vinRaw);
+
+        log("Querying Stored DTCs (03)...");
+        const dtcRaw = await sendCmd("03");
+        const dtc = parseDTC(dtcRaw);
+
+        log("Success! VIN: " + (vin || "Manual") + " | DTC: " + (dtc || "None") + ". Refreshing app...");
+
+        setTimeout(() => {
+            const targetUrl = new URL(window.top.location.href);
+            if (vin) targetUrl.searchParams.set("ble_vin", vin);
+            if (dtc) targetUrl.searchParams.set("ble_dtc", dtc);
+            window.top.location.href = targetUrl.toString();
+        }, 1000);
+    });
     </script>
     """
-  components.html(ble_bridge_html, height=130)
+  components.html(ble_bridge_html, height=220)
 
   # Customer Info Section
   st.markdown("#### 👤 Customer Information")
