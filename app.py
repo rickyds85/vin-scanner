@@ -8,6 +8,7 @@ import re
 from PIL import Image, ImageEnhance, ImageOps
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 import zxingcpp
 
 st.set_page_config(
@@ -27,6 +28,12 @@ firing_line_svg = """
 </div>
 """
 st.markdown(firing_line_svg, unsafe_allow_html=True)
+
+# Read query parameters from Web Bluetooth bridge redirect
+if "ble_vin" in st.query_params and st.query_params["ble_vin"]:
+  st.session_state.active_vin = st.query_params["ble_vin"].upper().strip()
+if "ble_dtc" in st.query_params and st.query_params["ble_dtc"]:
+  st.session_state.active_dtc = st.query_params["ble_dtc"].upper().strip()
 
 # Persistent session state across tabs
 if "vehicle_info" not in st.session_state:
@@ -51,7 +58,6 @@ LOG_FILE = "scan_history.csv"
 def append_to_log(
     vin: str, vehicle: str, dtc: str, customer: str = "", phone: str = ""
 ):
-  """Appends a diagnostic entry to local CSV log with customer info."""
   file_exists = os.path.isfile(LOG_FILE)
   timestamp = datetime.now().strftime("%Y-%m-%d %I:%M %p")
   try:
@@ -79,7 +85,6 @@ def append_to_log(
 
 
 def load_log():
-  """Reads the CSV file and returns list of dictionaries."""
   if not os.path.isfile(LOG_FILE):
     return []
   rows = []
@@ -93,7 +98,7 @@ def load_log():
   return rows[::-1]
 
 
-# --- GEMINI HELPERS (TEXT & VISION) ---
+# --- GEMINI HELPERS ---
 def get_gemini_key() -> str:
   key = os.environ.get("GEMINI_API_KEY")
   if not key and hasattr(st, "secrets"):
@@ -102,7 +107,6 @@ def get_gemini_key() -> str:
 
 
 def query_gemini(prompt_text: str, system_instruction: str = "") -> str:
-  """Sends text prompt to Gemini 2.5 Flash."""
   gemini_key = get_gemini_key()
   if not gemini_key:
     return "Error: GEMINI_API_KEY is missing from Streamlit Secrets."
@@ -127,28 +131,27 @@ def query_gemini(prompt_text: str, system_instruction: str = "") -> str:
 def analyze_scope_with_gemini(
     pil_img: Image.Image | None, test_summary: str
 ) -> str:
-  """Uses Gemini Vision to visually inspect oscilloscope / meter images alongside physical test data."""
   gemini_key = get_gemini_key()
   if not gemini_key:
     return "Error: GEMINI_API_KEY is missing from Streamlit Secrets."
 
   prompt = f"""
 You are an expert ASE Master / L1 diagnostic technician and automotive oscilloscope waveform specialist.
-Analyze this oscilloscope or multimeter capture alongside the physical test readings from the shop floor.
+Analyze this oscilloscope or multimeter capture alongside physical shop test readings.
 
-PHYSICAL TEST DATA & CONTEXT:
+TEST CONTEXT:
 {test_summary}
 
 SCOPE / METER VISION TASK:
-- If an image is provided: identify the signal type (Secondary/Primary Ignition, Injector Voltage/Current, CKP/CMP correlation, Relative Compression, PWM, Sensor 5V/Ground drop).
-- Evaluate critical electrical signatures: peak firing/inductive spike kV, dwell/charge duration, spark burn line slope & turbulence, coil oscillations/ringing count, ground bounce, signal attenuation, or missing-tooth spacing.
-- Correlate waveform abnormalities directly with the physical readings (compression, fuel pressure, voltage drop).
+- Identify signal type (Secondary/Primary Ignition, Injector Voltage/Current, CKP/CMP correlation, Relative Compression, PWM, Sensor drop).
+- Evaluate critical electrical signatures: peak firing/inductive spike kV, dwell duration, spark burn line slope & turbulence, coil oscillation count, ground bounce, signal attenuation, or missing-tooth spacing.
+- Correlate waveform abnormalities directly with physical test readings.
 
 FORMAT STRICTLY AS:
 ### 1. Scope Waveform & Electrical Findings
-- Key waveform observations, time-base / voltage scale notes, and circuit anomalies observed in the photo.
+- Key observations, time-base/voltage scale notes, circuit anomalies observed in photo.
 ### 2. Component Condemnation & Defect Root Cause
-- What exact component, circuit, or mechanical issue is failing based on this waveform and test data?
+- What exact component, circuit, or mechanical issue is failing.
 ### 3. Immediate Pinpoint Verification Step
 - The single next test to 100% isolate and verify before condemning the part.
 """
@@ -179,7 +182,6 @@ FORMAT STRICTLY AS:
 
 
 def extract_vin_via_ai(pil_img: Image.Image) -> str:
-  """Uses Gemini Vision to read 17-digit printed VIN text from stickers, windshields, or paperwork."""
   gemini_key = get_gemini_key()
   if not gemini_key:
     return ""
@@ -196,11 +198,10 @@ def extract_vin_via_ai(pil_img: Image.Image) -> str:
                 {
                     "text": (
                         "Locate and extract the 17-character Vehicle"
-                        " Identification Number (VIN) from this vehicle image"
-                        " (door jamb sticker, windshield plate, paperwork, or"
-                        " registration). Standard VINs only use digits and"
-                        " uppercase letters excluding I, O, and Q. Return ONLY"
-                        " the 17-character VIN. If none is found, return 'NONE'."
+                        " Identification Number (VIN) from this vehicle image."
+                        " Standard VINs only use digits and uppercase letters"
+                        " excluding I, O, and Q. Return ONLY the 17-character"
+                        " VIN. If none is found, return 'NONE'."
                     )
                 },
                 {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
@@ -220,7 +221,6 @@ def extract_vin_via_ai(pil_img: Image.Image) -> str:
 
 
 def extract_customer_info(pil_img: Image.Image) -> dict:
-  """Uses Gemini Vision to extract Customer Name, Address, and Phone Number from paperwork."""
   gemini_key = get_gemini_key()
   if not gemini_key:
     return {
@@ -363,6 +363,158 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab1:
   st.subheader("Customer & Vehicle Identification")
 
+  # --- VEEPEAK WEB BLUETOOTH OBD2 BRIDGE ---
+  st.markdown("#### 🔌 Veepeak OBDCheck BLE+ Direct Connect")
+  st.caption(
+      "Plug Veepeak into vehicle OBD-II port (Key ON/Engine Running). Tap"
+      " button to connect and pull VIN & DTCs directly."
+  )
+
+  ble_bridge_html = """
+    <div style="background-color: #1A1F26; border: 1px solid #00FF66; padding: 14px; border-radius: 8px; margin-bottom: 1rem;">
+        <button id="bleBtn" style="background-color: #00FF66; color: #0E1117; font-weight: 700; font-size: 1rem; border: none; padding: 10px 18px; border-radius: 5px; cursor: pointer; display: flex; align-items: center; gap: 8px;">
+            <span>⚡</span> Connect Veepeak BLE+
+        </button>
+        <div id="bleStatus" style="color: #A0AEC0; font-family: monospace; font-size: 0.9rem; margin-top: 10px;">Status: Ready to pair</div>
+    </div>
+
+    <script>
+    const NORDIC_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+    const NORDIC_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e'; // write to dongle
+    const NORDIC_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e'; // notify from dongle
+
+    const FFF0_SERVICE = '0000fff0-0000-1000-8000-00805f9b34fb';
+    const FFF2_RX = '0000fff2-0000-1000-8000-00805f9b34fb';
+    const FFF1_TX = '0000fff1-0000-1000-8000-00805f9b34fb';
+
+    let rxChar = null;
+    let txChar = null;
+    let responseBuffer = "";
+    let resolver = null;
+
+    function log(msg) {
+        document.getElementById('bleStatus').innerText = "Status: " + msg;
+    }
+
+    function onData(event) {
+        const val = new TextDecoder().decode(event.target.value);
+        responseBuffer += val;
+        if (responseBuffer.includes('>') && resolver) {
+            const out = responseBuffer;
+            responseBuffer = "";
+            resolver(out);
+            resolver = null;
+        }
+    }
+
+    async function sendCmd(cmd) {
+        return new Promise(async (resolve) => {
+            resolver = resolve;
+            responseBuffer = "";
+            const enc = new TextEncoder().encode(cmd + "\\r");
+            await rxChar.writeValue(enc);
+            setTimeout(() => {
+                if (resolver) {
+                    const fallback = responseBuffer;
+                    responseBuffer = "";
+                    resolver(fallback);
+                    resolver = null;
+                }
+            }, 3000);
+        });
+    }
+
+    function parseDTC(raw) {
+        const clean = raw.replace(/\\s+/g, '').toUpperCase();
+        const m = clean.match(/43([0-9A-F]{4})/);
+        if (m) {
+            const hex = m[1];
+            const byte1 = parseInt(hex.substr(0, 2), 16);
+            let prefix = 'P';
+            const type = (byte1 & 0xC0) >> 6;
+            if (type === 1) prefix = 'C';
+            if (type === 2) prefix = 'B';
+            if (type === 3) prefix = 'U';
+            const digit1 = (byte1 & 0x30) >> 4;
+            const digit2 = (byte1 & 0x0F).toString(16);
+            const rest = hex.substr(2, 2);
+            return (prefix + digit1 + digit2 + rest).toUpperCase();
+        }
+        return "";
+    }
+
+    function parseVIN(raw) {
+        const hexMatches = raw.match(/[0-9A-Fa-f]{2}/g);
+        if (!hexMatches) return "";
+        let ascii = "";
+        for (let h of hexMatches) {
+            const code = parseInt(h, 16);
+            if (code >= 32 && code <= 126) ascii += String.fromCharCode(code);
+        }
+        const m = ascii.match(/[A-HJ-NPR-Z0-9]{17}/);
+        return m ? m[0] : "";
+    }
+
+    document.getElementById('bleBtn').addEventListener('click', async () => {
+        try {
+            log("Opening Bluetooth selector...");
+            const device = await navigator.bluetooth.requestDevice({
+                filters: [
+                    { namePrefix: 'VEEPEAK' },
+                    { namePrefix: 'OBD' },
+                    { namePrefix: 'IOS-Vlink' }
+                ],
+                optionalServices: [NORDIC_SERVICE, FFF0_SERVICE]
+            });
+
+            log("Connecting to " + device.name + "...");
+            const server = await device.gatt.connect();
+
+            let service = null;
+            try {
+                service = await server.getPrimaryService(NORDIC_SERVICE);
+                rxChar = await service.getCharacteristic(NORDIC_RX);
+                txChar = await service.getCharacteristic(NORDIC_TX);
+            } catch(e) {
+                service = await server.getPrimaryService(FFF0_SERVICE);
+                rxChar = await service.getCharacteristic(FFF2_RX);
+                txChar = await service.getCharacteristic(FFF1_TX);
+            }
+
+            await txChar.startNotifications();
+            txChar.addEventListener('characteristicvaluechanged', onData);
+
+            log("Handshaking with ECU...");
+            await sendCmd("ATZ");
+            await sendCmd("ATE0");
+            await sendCmd("ATL0");
+            await sendCmd("ATSP0");
+
+            log("Requesting VIN (09 02)...");
+            const vinRaw = await sendCmd("0902");
+            const vin = parseVIN(vinRaw);
+
+            log("Requesting Stored Fault Codes (03)...");
+            const dtcRaw = await sendCmd("03");
+            const dtc = parseDTC(dtcRaw);
+
+            log("Success! VIN: " + (vin || "Manual") + " | DTC: " + (dtc || "None") + ". Refreshing app...");
+
+            setTimeout(() => {
+                const targetUrl = new URL(window.top.location.href);
+                if (vin) targetUrl.searchParams.set("ble_vin", vin);
+                if (dtc) targetUrl.searchParams.set("ble_dtc", dtc);
+                window.top.location.href = targetUrl.toString();
+            }, 1200);
+
+        } catch (err) {
+            log("Error: " + err.message);
+        }
+    });
+    </script>
+    """
+  components.html(ble_bridge_html, height=130)
+
   # Customer Info Section
   st.markdown("#### 👤 Customer Information")
   col_c1, col_c2 = st.columns([1, 1])
@@ -390,11 +542,7 @@ with tab1:
   st.session_state.customer_address = cust_address.strip()
 
   st.write("---")
-  st.markdown("#### 📸 Vehicle VIN Photo / Barcode Scanner")
-  st.caption(
-      "Snap or upload any photo of the door jamb sticker, windshield plate,"
-      " registration, or work order."
-  )
+  st.markdown("#### 📸 Camera / Photo VIN Scanner")
 
   col_cam, col_up = st.columns([1, 1])
   with col_cam:
@@ -417,11 +565,9 @@ with tab1:
     st.image(active_image, caption="Captured Image", use_container_width=True)
     img = Image.open(active_image)
 
-    # 1. Try barcode first
     found_vin = scan_vin_barcode(img)
     detection_method = "Barcode"
 
-    # 2. If no barcode found, automatically run Gemini Vision OCR
     if not found_vin:
       with st.spinner("Scanning photo text with AI Vision for 17-digit VIN..."):
         found_vin = extract_vin_via_ai(img)
@@ -431,10 +577,7 @@ with tab1:
       st.session_state.active_vin = found_vin
       st.success(f"VIN Detected ({detection_method})! **{found_vin}**")
     else:
-      st.warning(
-          "Could not detect a 17-digit VIN. Make sure all characters are"
-          " visible and legible, or enter manually below."
-      )
+      st.warning("Could not detect a 17-digit VIN. Enter manually below.")
 
     if st.button("📄 Extract Customer Details from this Image"):
       with st.spinner("Extracting customer name, address, and phone..."):
@@ -452,7 +595,7 @@ with tab1:
           st.rerun()
 
   vin = st.text_input(
-      "Enter 17-digit VIN manually:",
+      "Vehicle VIN (17 digits):",
       value=found_vin or st.session_state.active_vin,
       max_chars=17,
   )
@@ -520,7 +663,10 @@ with tab2:
             "gemini": "✨ Google Gemini 2.5 Flash (Deep Logic)",
             "perplexity": "🌐 Perplexity Sonar Pro (Live Web & TSBs)",
         }[x],
-        help="Gemini provides deep circuit & mechanical logic; Perplexity checks live technical databases and TSBs.",
+        help=(
+            "Gemini provides deep circuit & mechanical logic; Perplexity checks"
+            " live technical databases and TSBs."
+        ),
     )
 
   with col_btn:
@@ -566,7 +712,9 @@ Format strictly using these Markdown sections:
 ### 5. Known Platform Pattern Failures & TSBs
 - Specific real-world failure patterns for {vehicle} on this specific system
 """
-    with st.spinner(f"Generating {code_input} strategy via {ai_engine.upper()}..."):
+    with st.spinner(
+        f"Generating {code_input} strategy via {ai_engine.upper()}..."
+    ):
       if ai_engine == "gemini":
         result = query_gemini(dtc_prompt)
       else:
@@ -642,7 +790,10 @@ Fuel Pressure & Bleed-down: {fuel_data or 'Not tested'}
 Voltage Drop / Electrical: {volt_data or 'Not tested'}
 Scope Observations: {scope_notes or 'None reported'}
 """
-    with st.spinner("Gemini Vision is analyzing waveform signatures and physical readings..."):
+    with st.spinner(
+        "Gemini Vision is analyzing waveform signatures and physical"
+        " readings..."
+    ):
       eval_res = analyze_scope_with_gemini(pil_scope_image, test_summary)
       st.markdown("### Diagnostic Evaluation")
       st.markdown(eval_res)
