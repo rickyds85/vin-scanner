@@ -563,7 +563,7 @@ with tab2:
                 <div id="valTime" style="font-size: 1.2rem; font-weight: 700; color: #EC4899;">--</div>
             </div>
             <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div id="lblO21" style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">O2 B1S1</div>
+                <div id="lblO21" style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">O2 B1S1 (A/F)</div>
                 <div id="valO21" style="font-size: 1.2rem; font-weight: 700; color: #A855F7;">--</div>
             </div>
             <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
@@ -614,11 +614,12 @@ with tab2:
     let txChar = null;
     let responseBuffer = "";
     let resolver = null;
-    let isBusy = false;
     let isStreaming = false;
     let unsupportedPids = new Set();
-    let o2Mode = "auto";
+    let o2ProbeSuccess = null;
+    let loopCycle = 0;
     let mode6RawData = "";
+    let gattQueue = Promise.resolve();
 
     function log(msg) {
         document.getElementById('bleStatus').innerText = "Status: " + msg;
@@ -632,39 +633,36 @@ with tab2:
             responseBuffer = "";
             const r = resolver;
             resolver = null;
-            isBusy = false;
             r(out);
         }
     }
 
-    async function sendCmd(cmd, timeoutMs = 1200) {
-        while (isBusy) {
-            await new Promise(r => setTimeout(r, 15));
-        }
-        isBusy = true;
-        return new Promise(async (resolve) => {
-            resolver = resolve;
-            responseBuffer = "";
-            const timer = setTimeout(() => {
-                if (resolver) {
-                    const fallback = responseBuffer;
-                    responseBuffer = "";
-                    resolver = null;
-                    isBusy = false;
-                    resolve(fallback);
-                }
-            }, timeoutMs);
+    // Strict GATT Promise Queue: eliminates "GATT operation in progress" exceptions
+    function sendCmd(cmd, timeoutMs = 1200) {
+        gattQueue = gattQueue.catch(() => {}).then(() => {
+            return new Promise(async (resolve) => {
+                resolver = resolve;
+                responseBuffer = "";
+                const timer = setTimeout(() => {
+                    if (resolver) {
+                        const fallback = responseBuffer;
+                        responseBuffer = "";
+                        resolver = null;
+                        resolve(fallback);
+                    }
+                }, timeoutMs);
 
-            try {
-                const enc = new TextEncoder().encode(cmd + "\\r");
-                await rxChar.writeValue(enc);
-            } catch (err) {
-                clearTimeout(timer);
-                resolver = null;
-                isBusy = false;
-                resolve("");
-            }
+                try {
+                    const enc = new TextEncoder().encode(cmd + "\\r");
+                    await rxChar.writeValue(enc);
+                } catch (err) {
+                    clearTimeout(timer);
+                    resolver = null;
+                    resolve("");
+                }
+            });
         });
+        return gattQueue;
     }
 
     function parseCleanHex(raw) {
@@ -715,192 +713,191 @@ with tab2:
 
     async function runLiveLoop() {
         while (isStreaming) {
-            // RPM (010C)
-            let cRpm = await queryPid("010C", 500);
-            let mRpm = cRpm.match(/410C([0-9A-F]{4})/);
-            if (mRpm) {
-                let a = parseInt(mRpm[1].substr(0, 2), 16);
-                let b = parseInt(mRpm[1].substr(2, 2), 16);
-                document.getElementById('valRpm').innerText = Math.round(((a * 256) + b) / 4) + " RPM";
-            }
-            if (!isStreaming) break;
-
-            // Load (0104)
-            let cLoad = await queryPid("0104", 450);
-            let mLoad = cLoad.match(/4104([0-9A-F]{2})/);
-            if (mLoad) {
-                document.getElementById('valLoad').innerText = Math.round((parseInt(mLoad[1], 16) * 100) / 255) + "%";
-            }
-            if (!isStreaming) break;
-
-            // TPS (0111)
-            let cTps = await queryPid("0111", 450);
-            let mTps = cTps.match(/4111([0-9A-F]{2})/);
-            if (mTps) {
-                document.getElementById('valTps').innerText = Math.round((parseInt(mTps[1], 16) * 100) / 255) + "%";
-            }
-            if (!isStreaming) break;
-
-            // Coolant ECT (0105)
-            let cEct = await queryPid("0105", 500);
-            let mEct = cEct.match(/4105([0-9A-F]{2})/);
-            if (mEct) {
-                document.getElementById('valEct').innerText = Math.round((parseInt(mEct[1], 16) - 40) * 1.8 + 32) + " °F";
-            }
-            if (!isStreaming) break;
-
-            // Intake Air IAT (010F)
-            let cIat = await queryPid("010F", 450);
-            let mIat = cIat.match(/410F([0-9A-F]{2})/);
-            if (mIat) {
-                document.getElementById('valIat').innerText = Math.round((parseInt(mIat[1], 16) - 40) * 1.8 + 32) + " °F";
-            } else if (unsupportedPids.has("010F")) {
-                document.getElementById('valIat').innerText = "N/A";
-            }
-            if (!isStreaming) break;
-
-            // STFT / LTFT Bank 1
-            let cStft = await queryPid("0106", 450);
-            let mStft = cStft.match(/4106([0-9A-F]{2})/);
-            if (mStft) {
-                let s = (((parseInt(mStft[1], 16) - 128) * 100) / 128).toFixed(1);
-                document.getElementById('valStft').innerText = (s > 0 ? "+" : "") + s + "%";
-            }
-            if (!isStreaming) break;
-
-            let cLtft = await queryPid("0107", 450);
-            let mLtft = cLtft.match(/4107([0-9A-F]{2})/);
-            if (mLtft) {
-                let l = (((parseInt(mLtft[1], 16) - 128) * 100) / 128).toFixed(1);
-                document.getElementById('valLtft').innerText = (l > 0 ? "+" : "") + l + "%";
-            }
-            if (!isStreaming) break;
-
-            // STFT / LTFT Bank 2
-            let cStft2 = await queryPid("0108", 450);
-            let mStft2 = cStft2.match(/4108([0-9A-F]{2})/);
-            if (mStft2) {
-                let s2 = (((parseInt(mStft2[1], 16) - 128) * 100) / 128).toFixed(1);
-                document.getElementById('valStft2').innerText = (s2 > 0 ? "+" : "") + s2 + "%";
-            } else if (unsupportedPids.has("0108")) {
-                document.getElementById('valStft2').innerText = "N/A (1 Bank)";
-            }
-            if (!isStreaming) break;
-
-            let cLtft2 = await queryPid("0109", 450);
-            let mLtft2 = cLtft2.match(/4109([0-9A-F]{2})/);
-            if (mLtft2) {
-                let l2 = (((parseInt(mLtft2[1], 16) - 128) * 100) / 128).toFixed(1);
-                document.getElementById('valLtft2').innerText = (l2 > 0 ? "+" : "") + l2 + "%";
-            } else if (unsupportedPids.has("0109")) {
-                document.getElementById('valLtft2').innerText = "N/A (1 Bank)";
-            }
-            if (!isStreaming) break;
-
-            // MAF (0110)
-            let cMaf = await queryPid("0110", 450);
-            let mMaf = cMaf.match(/4110([0-9A-F]{4})/);
-            if (mMaf) {
-                let a = parseInt(mMaf[1].substr(0, 2), 16);
-                let b = parseInt(mMaf[1].substr(2, 2), 16);
-                document.getElementById('valMaf').innerText = (((a * 256) + b) / 100).toFixed(1) + " g/s";
-            } else if (unsupportedPids.has("0110")) {
-                document.getElementById('valMaf').innerText = "N/A";
-            }
-            if (!isStreaming) break;
-
-            // MAP (010B)
-            let cMap = await queryPid("010B", 450);
-            let mMap = cMap.match(/410B([0-9A-F]{2})/);
-            if (mMap) {
-                document.getElementById('valMap').innerText = (parseInt(mMap[1], 16) * 0.145038).toFixed(1) + " PSI";
-            } else if (unsupportedPids.has("010B")) {
-                document.getElementById('valMap').innerText = "N/A";
-            }
-            if (!isStreaming) break;
-
-            // Speed (010D)
-            let cSpd = await queryPid("010D", 450);
-            let mSpd = cSpd.match(/410D([0-9A-F]{2})/);
-            if (mSpd) {
-                document.getElementById('valSpd').innerText = Math.round(parseInt(mSpd[1], 16) * 0.621371) + " MPH";
-            }
-            if (!isStreaming) break;
-
-            // Timing Advance (010E)
-            let cTime = await queryPid("010E", 450);
-            let mTime = cTime.match(/410E([0-9A-F]{2})/);
-            if (mTime) {
-                document.getElementById('valTime').innerText = ((parseInt(mTime[1], 16) / 2) - 64).toFixed(1) + "°";
-            }
-            if (!isStreaming) break;
-
-            // Upstream O2 B1S1 (Auto-Switch Narrowband 0114 vs Wideband 0124)
-            if (o2Mode === "auto" || o2Mode === "14") {
-                let cO2 = await queryPid("0114", 500);
-                let mO2 = cO2.match(/4114([0-9A-F]{2})/);
-                if (mO2) {
-                    o2Mode = "14";
-                    document.getElementById('lblO21').innerText = "O2 B1S1 (V)";
-                    document.getElementById('valO21').innerText = (parseInt(mO2[1], 16) / 200).toFixed(2) + "V";
-                } else if (unsupportedPids.has("0114")) {
-                    o2Mode = "24";
-                    unsupportedPids.delete("0124");
+            loopCycle++;
+            try {
+                // ==========================================
+                // TIER 1: HIGH-PRIORITY (Every Cycle ~200ms)
+                // ==========================================
+                let cRpm = await queryPid("010C", 400);
+                let mRpm = cRpm.match(/410C([0-9A-F]{4})/);
+                if (mRpm) {
+                    let a = parseInt(mRpm[1].substr(0, 2), 16);
+                    let b = parseInt(mRpm[1].substr(2, 2), 16);
+                    document.getElementById('valRpm').innerText = Math.round(((a * 256) + b) / 4) + " RPM";
                 }
-            }
-            if (o2Mode === "24") {
-                let cWb = await queryPid("0124", 500);
-                let mWb = cWb.match(/4124([0-9A-F]{4})/);
-                if (mWb) {
-                    let a = parseInt(mWb[1].substr(0, 2), 16);
-                    let b = parseInt(mWb[1].substr(2, 2), 16);
-                    let lambda = (((a * 256) + b) / 32768).toFixed(2);
-                    document.getElementById('lblO21').innerText = "O2 B1S1 (A/F λ)";
-                    document.getElementById('valO21').innerText = "λ " + lambda;
-                } else if (unsupportedPids.has("0124")) {
-                    let c34 = await queryPid("0134", 500);
-                    let m34 = c34.match(/4134([0-9A-F]{4})/);
-                    if (m34) {
-                        let a = parseInt(m34[1].substr(0, 2), 16);
-                        let b = parseInt(m34[1].substr(2, 2), 16);
-                        let lambda = (((a * 256) + b) / 32768).toFixed(2);
-                        document.getElementById('lblO21').innerText = "O2 B1S1 (A/F λ)";
-                        document.getElementById('valO21').innerText = "λ " + lambda;
+                if (!isStreaming) break;
+
+                let cLoad = await queryPid("0104", 400);
+                let mLoad = cLoad.match(/4104([0-9A-F]{2})/);
+                if (mLoad) {
+                    document.getElementById('valLoad').innerText = Math.round((parseInt(mLoad[1], 16) * 100) / 255) + "%";
+                }
+                if (!isStreaming) break;
+
+                let cTps = await queryPid("0111", 400);
+                let mTps = cTps.match(/4111([0-9A-F]{2})/);
+                if (mTps) {
+                    document.getElementById('valTps').innerText = Math.round((parseInt(mTps[1], 16) * 100) / 255) + "%";
+                }
+                if (!isStreaming) break;
+
+                let cSpd = await queryPid("010D", 400);
+                let mSpd = cSpd.match(/410D([0-9A-F]{2})/);
+                if (mSpd) {
+                    document.getElementById('valSpd').innerText = Math.round(parseInt(mSpd[1], 16) * 0.621371) + " MPH";
+                }
+                if (!isStreaming) break;
+
+                // ==========================================
+                // TIER 2: FUEL TRIMS & AIR (Every 2nd Cycle)
+                // ==========================================
+                if (loopCycle % 2 === 0) {
+                    let cStft = await queryPid("0106", 400);
+                    let mStft = cStft.match(/4106([0-9A-F]{2})/);
+                    if (mStft) {
+                        let s = (((parseInt(mStft[1], 16) - 128) * 100) / 128).toFixed(1);
+                        document.getElementById('valStft').innerText = (s > 0 ? "+" : "") + s + "%";
+                    }
+                    if (!isStreaming) break;
+
+                    let cLtft = await queryPid("0107", 400);
+                    let mLtft = cLtft.match(/4107([0-9A-F]{2})/);
+                    if (mLtft) {
+                        let l = (((parseInt(mLtft[1], 16) - 128) * 100) / 128).toFixed(1);
+                        document.getElementById('valLtft').innerText = (l > 0 ? "+" : "") + l + "%";
+                    }
+                    if (!isStreaming) break;
+
+                    let cTime = await queryPid("010E", 400);
+                    let mTime = cTime.match(/410E([0-9A-F]{2})/);
+                    if (mTime) {
+                        document.getElementById('valTime').innerText = ((parseInt(mTime[1], 16) / 2) - 64).toFixed(1) + "°";
+                    }
+                    if (!isStreaming) break;
+
+                    let cMaf = await queryPid("0110", 400);
+                    let mMaf = cMaf.match(/4110([0-9A-F]{4})/);
+                    if (mMaf) {
+                        let a = parseInt(mMaf[1].substr(0, 2), 16);
+                        let b = parseInt(mMaf[1].substr(2, 2), 16);
+                        document.getElementById('valMaf').innerText = (((a * 256) + b) / 100).toFixed(1) + " g/s";
+                    } else if (unsupportedPids.has("0110")) {
+                        document.getElementById('valMaf').innerText = "N/A";
+                    }
+                    if (!isStreaming) break;
+
+                    let cMap = await queryPid("010B", 400);
+                    let mMap = cMap.match(/410B([0-9A-F]{2})/);
+                    if (mMap) {
+                        document.getElementById('valMap').innerText = (parseInt(mMap[1], 16) * 0.145038).toFixed(1) + " PSI";
+                    } else if (unsupportedPids.has("010B")) {
+                        document.getElementById('valMap').innerText = "N/A";
+                    }
+                    if (!isStreaming) break;
+
+                    // Upstream O2 B1S1: Auto-Detect Wideband Lambda vs Narrowband 0-1V
+                    if (!o2ProbeSuccess) {
+                        let c14 = await queryPid("0114", 400);
+                        if (c14.includes("4114")) {
+                            o2ProbeSuccess = "14";
+                        } else {
+                            let c24 = await queryPid("0124", 400);
+                            if (c24.includes("4124")) {
+                                o2ProbeSuccess = "24";
+                            } else {
+                                let c34 = await queryPid("0134", 400);
+                                if (c34.includes("4134")) o2ProbeSuccess = "34";
+                            }
+                        }
+                    }
+
+                    if (o2ProbeSuccess === "14") {
+                        let cO2 = await queryPid("0114", 400);
+                        let mO2 = cO2.match(/4114([0-9A-F]{2})/);
+                        if (mO2) document.getElementById('valO21').innerText = (parseInt(mO2[1], 16) / 200).toFixed(2) + "V";
+                    } else if (o2ProbeSuccess === "24" || o2ProbeSuccess === "34") {
+                        let cmd = "01" + o2ProbeSuccess;
+                        let cWb = await queryPid(cmd, 400);
+                        let mWb = cWb.match(new RegExp("41" + o2ProbeSuccess + "([0-9A-F]{4})"));
+                        if (mWb) {
+                            let a = parseInt(mWb[1].substr(0, 2), 16);
+                            let b = parseInt(mWb[1].substr(2, 2), 16);
+                            let lambda = (((a * 256) + b) / 32768).toFixed(2);
+                            document.getElementById('valO21').innerText = "λ " + lambda;
+                        }
                     } else {
                         document.getElementById('valO21').innerText = "N/A";
                     }
                 }
-            }
-            if (!isStreaming) break;
+                if (!isStreaming) break;
 
-            // Downstream O2 B1S2 (0115)
-            let cO22 = await queryPid("0115", 450);
-            let mO22 = cO22.match(/4115([0-9A-F]{2})/);
-            if (mO22) {
-                document.getElementById('valO22').innerText = (parseInt(mO22[1], 16) / 200).toFixed(2) + "V";
-            } else if (unsupportedPids.has("0115")) {
-                document.getElementById('valO22').innerText = "N/A";
-            }
-            if (!isStreaming) break;
+                // ==========================================
+                // TIER 3: SLOW TEMPERATURES & BATTERY (Every 4th Cycle)
+                // ==========================================
+                if (loopCycle % 4 === 0) {
+                    let cEct = await queryPid("0105", 400);
+                    let mEct = cEct.match(/4105([0-9A-F]{2})/);
+                    if (mEct) {
+                        document.getElementById('valEct').innerText = Math.round((parseInt(mEct[1], 16) - 40) * 1.8 + 32) + " °F";
+                    }
+                    if (!isStreaming) break;
 
-            // Baro Press (0133)
-            let cBaro = await queryPid("0133", 450);
-            let mBaro = cBaro.match(/4133([0-9A-F]{2})/);
-            if (mBaro) {
-                document.getElementById('valBaro').innerText = (parseInt(mBaro[1], 16) * 0.2953).toFixed(1) + " inHg";
-            } else if (unsupportedPids.has("0133")) {
-                document.getElementById('valBaro').innerText = "N/A";
-            }
-            if (!isStreaming) break;
+                    let cIat = await queryPid("010F", 400);
+                    let mIat = cIat.match(/410F([0-9A-F]{2})/);
+                    if (mIat) {
+                        document.getElementById('valIat').innerText = Math.round((parseInt(mIat[1], 16) - 40) * 1.8 + 32) + " °F";
+                    } else if (unsupportedPids.has("010F")) {
+                        document.getElementById('valIat').innerText = "N/A";
+                    }
+                    if (!isStreaming) break;
 
-            // Battery Voltage (ATRV)
-            let resVolt = await sendCmd("ATRV", 400);
-            let vMatch = (resVolt || '').match(/([0-9]+\\.[0-9]+)/);
-            if (vMatch) {
-                document.getElementById('valVolt').innerText = vMatch[1] + "V";
-            }
+                    let cStft2 = await queryPid("0108", 400);
+                    let mStft2 = cStft2.match(/4108([0-9A-F]{2})/);
+                    if (mStft2) {
+                        let s2 = (((parseInt(mStft2[1], 16) - 128) * 100) / 128).toFixed(1);
+                        document.getElementById('valStft2').innerText = (s2 > 0 ? "+" : "") + s2 + "%";
+                    } else if (unsupportedPids.has("0108")) {
+                        document.getElementById('valStft2').innerText = "N/A (1 Bank)";
+                    }
+                    if (!isStreaming) break;
 
-            await new Promise(r => setTimeout(r, 30));
+                    let cLtft2 = await queryPid("0109", 400);
+                    let mLtft2 = cLtft2.match(/4109([0-9A-F]{2})/);
+                    if (mLtft2) {
+                        let l2 = (((parseInt(mLtft2[1], 16) - 128) * 100) / 128).toFixed(1);
+                        document.getElementById('valLtft2').innerText = (l2 > 0 ? "+" : "") + l2 + "%";
+                    } else if (unsupportedPids.has("0109")) {
+                        document.getElementById('valLtft2').innerText = "N/A (1 Bank)";
+                    }
+                    if (!isStreaming) break;
+
+                    let cO22 = await queryPid("0115", 400);
+                    let mO22 = cO22.match(/4115([0-9A-F]{2})/);
+                    if (mO22) {
+                        document.getElementById('valO22').innerText = (parseInt(mO22[1], 16) / 200).toFixed(2) + "V";
+                    } else if (unsupportedPids.has("0115")) {
+                        document.getElementById('valO22').innerText = "N/A";
+                    }
+                    if (!isStreaming) break;
+
+                    let cBaro = await queryPid("0133", 400);
+                    let mBaro = cBaro.match(/4133([0-9A-F]{2})/);
+                    if (mBaro) {
+                        document.getElementById('valBaro').innerText = (parseInt(mBaro[1], 16) * 0.2953).toFixed(1) + " inHg";
+                    } else if (unsupportedPids.has("0133")) {
+                        document.getElementById('valBaro').innerText = "N/A";
+                    }
+                    if (!isStreaming) break;
+
+                    let resVolt = await sendCmd("ATRV", 350);
+                    let vMatch = (resVolt || '').match(/([0-9]+\\.[0-9]+)/);
+                    if (vMatch) document.getElementById('valVolt').innerText = vMatch[1] + "V";
+                }
+            } catch (err) {
+                // Non-blocking catch: preserves loop continuity if a single frame drops
+                console.error("Telemetry error:", err);
+            }
+            await new Promise(r => setTimeout(r, 25));
         }
     }
 
@@ -933,21 +930,18 @@ with tab2:
             await txChar.startNotifications();
             txChar.addEventListener('characteristicvaluechanged', onData);
 
-            log("Handshaking with ECM...");
+            log("Initializing ELM327 protocol...");
             await sendCmd("ATZ", 1500);
-            await sendCmd("ATE0", 800);
-            await sendCmd("ATL0", 800);
-            await sendCmd("ATSP0", 800);
-
-            log("Establishing vehicle protocol...");
-            await sendCmd("0100", 3500);
+            await sendCmd("ATE0", 600);
+            await sendCmd("ATL0", 600);
+            await sendCmd("ATSP0", 600);
+            await sendCmd("0100", 3000); // Trigger auto-protocol search
 
             unsupportedPids.clear();
-            o2Mode = "auto";
+            o2ProbeSuccess = null;
 
             log("Connected to ECM! Telemetry & Mode $06 Ready.");
 
-            // Activate Buttons
             const liveBtn = document.getElementById('liveBtn');
             liveBtn.disabled = false;
             liveBtn.style.backgroundColor = '#38BDF8';
@@ -1001,9 +995,11 @@ with tab2:
         document.getElementById('liveBtn').innerText = "▶️ Start Live Data";
         document.getElementById('liveBtn').style.backgroundColor = "#38BDF8";
 
-        log("Running Fast Mode $06 Misfire & Monitor Scan...");
+        log("Pausing telemetry to run clean Mode $06 sweep...");
+        await new Promise(r => setTimeout(r, 100)); // Allow bus buffer to flush
+
         const m6Box = document.getElementById('mode6Box');
-        m6Box.innerHTML = "<div style='color: #F59E0B; padding: 4px;'>⚡ Fast Scanning Cylinder Misfires & Monitors (Mode $06)...</div>";
+        m6Box.innerHTML = "<div style='color: #F59E0B; padding: 4px;'>⚡ Scanning all cylinder misfire monitors (Mode $06)...</div>";
 
         const cylTests = [
             {mid: "06A2", name: "Cylinder 1"},
@@ -1021,11 +1017,12 @@ with tab2:
         mode6RawData = "";
 
         for (let t of cylTests) {
-            let res = await sendCmd(t.mid, 400);
+            let res = await sendCmd(t.mid, 600);
             let clean = parseCleanHex(res);
-            if (clean.includes("NODATA") || clean.includes("?")) continue;
+            if (clean.includes("NODATA") || clean.includes("?") || clean.length < 6) continue;
             mode6RawData += "\\n" + t.name + ": " + res;
 
+            // Matches standard CAN format: 46 [MID] [TID] [Units] [Value]
             let m = clean.match(/46(A[2-9])([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{4})/);
             if (m) {
                 foundAny = true;
@@ -1040,12 +1037,13 @@ with tab2:
             }
         }
 
-        let catRes = await sendCmd("0621", 450);
+        // Catalyst Efficiency Monitor
+        let catRes = await sendCmd("0621", 500);
         let cleanCat = parseCleanHex(catRes);
-        if (!cleanCat.includes("NODATA") && !cleanCat.includes("?")) {
-            mode6RawData += "\\nCatalyst B1: " + catRes;
+        if (!cleanCat.includes("NODATA") && !cleanCat.includes("?") && cleanCat.length >= 6) {
+            mode6RawData += "\\nCatalyst Bank 1: " + catRes;
             htmlGrid += "<div style='background: #1A1F26; border: 1px solid #10B981; padding: 8px; border-radius: 6px; text-align: center;'>";
-            htmlGrid += "<div style='color: #10B981; font-weight: 700; font-size: 0.85rem;'>Catalyst B1</div>";
+            htmlGrid += "<div style='color: #10B981; font-weight: 700; font-size: 0.85rem;'>Catalyst Bank 1</div>";
             htmlGrid += "<div style='color: #00FF66; font-size: 1.05rem; font-weight: 700;'>MONITORED</div>";
             htmlGrid += "</div>";
             m6Box.innerHTML = htmlGrid + "</div>";
@@ -1053,10 +1051,10 @@ with tab2:
         }
 
         if (!foundAny) {
-            m6Box.innerHTML = "<div style='color: #A0AEC0; padding: 4px;'>No direct MIDs returned by this ECM. Raw output:<br><pre style='white-space: pre-wrap; font-size: 0.75rem;'>" + (mode6RawData.trim() || "No response bytes.") + "</pre></div>";
+            m6Box.innerHTML = "<div style='color: #A0AEC0; padding: 4px;'>Mode $06 completed. Raw output:<br><pre style='white-space: pre-wrap; font-size: 0.75rem;'>" + (mode6RawData.trim() || "No response bytes from ECM.") + "</pre></div>";
         }
 
-        log("Mode $06 scan finished.");
+        log("Mode $06 sweep completed.");
         if (wasStreaming) {
             isStreaming = true;
             document.getElementById('liveBtn').innerText = "⏸️ Pause Stream";
