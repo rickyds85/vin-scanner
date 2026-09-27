@@ -470,10 +470,10 @@ with tab1:
       st.error("Could not find vehicle details. Check the VIN and try again.")
 
 # ========================================================
-# --- TAB 2: LIVE TELEMETRY, TEST DRIVE AI & MODE 06 ---
+# --- TAB 2: AUTO-CONNECTING TELEMETRY, MONITORS & MODE 06 ---
 # ========================================================
 with tab2:
-  st.subheader("📊 Live Telemetry, Test Drive AI & Monitors")
+  st.subheader("📊 Live Telemetry, I/M Monitors & Mode $06")
 
   c_tag = st.session_state.customer_name or "None"
   v_tag = st.session_state.vehicle_info or "No Vehicle Selected"
@@ -487,22 +487,16 @@ with tab2:
 
   ble_dashboard_template = """
     <div style="background-color: #1A1F26; border: 1px solid #00FF66; padding: 14px; border-radius: 8px; margin-bottom: 1rem;">
-        <!-- Control Action Bar -->
+        <!-- Action & Utility Bar -->
         <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px;">
-            <button id="bleBtn" style="background-color: #00FF66; color: #0E1117; font-weight: 700; font-size: 0.9rem; border: none; padding: 9px 15px; border-radius: 5px; cursor: pointer; display: flex; align-items: center; gap: 6px;">
-                <span>⚡</span> Connect Veepeak BLE+
+            <button id="bleBtn" style="background-color: #00FF66; color: #0E1117; font-weight: 700; font-size: 0.95rem; border: none; padding: 10px 18px; border-radius: 5px; cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                <span>⚡</span> Connect & Auto-Scan
             </button>
-            <button id="liveBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
-                ▶️ Start Live Data
+            <button id="pauseBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
+                ⏸️ Pause Stream
             </button>
             <button id="testDriveBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
-                🚗 Start Test Drive AI
-            </button>
-            <button id="monBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
-                📋 I/M Readiness (01 01)
-            </button>
-            <button id="mode6Btn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
-                🔍 Run Full Mode $06
+                🚗 Test Drive Audio
             </button>
             <button id="clearDtcBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
                 🗑️ Clear DTCs (Mode 04)
@@ -514,22 +508,16 @@ with tab2:
                 📋 Sync VIN & DTCs
             </button>
         </div>
-        <div id="bleStatus" style="color: #A0AEC0; font-family: monospace; font-size: 0.85rem; margin-bottom: 12px;">Status: Ready to pair</div>
+        <div id="bleStatus" style="color: #A0AEC0; font-family: monospace; font-size: 0.85rem; margin-bottom: 12px;">Status: Ready to pair. Connect once to automatically load Monitors, Mode $06, and start live telemetry.</div>
 
         <!-- TEST DRIVE AI ACTIVE BANNER -->
         <div id="driveBanner" style="display: none; background: #0F172A; border-left: 4px solid #38BDF8; padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; font-size: 0.85rem; color: #38BDF8;">
-            🚗 <strong>Test Drive AI Active:</strong> Screen Wake Lock ON (screen will not sleep). Real-time speech alerts active over speaker for Fuel Trim skews, thermal spikes, or misfires. Rolling AI telemetry check every 45 seconds.
+            🚗 <strong>Test Drive AI Active:</strong> Screen Wake Lock ON (screen will not sleep). Real-time speech alerts active for Fuel Trim skews, thermal spikes, or misfires.
         </div>
 
-        <!-- I/M READINESS MONITORS (MODE 01 01) -->
-        <div style="font-weight: 700; font-size: 0.9rem; color: #38BDF8; margin-bottom: 6px;">📋 EMISSIONS INSPECTION (I/M) READINESS MONITORS</div>
-        <div id="readinessBox" style="background: #111418; border: 1px solid #2D3748; border-radius: 6px; padding: 10px; margin-bottom: 14px;">
-            <div style="color: #A0AEC0; font-size: 0.85rem;">Tap "I/M Readiness (01 01)" to check monitor completion status.</div>
-        </div>
-
-        <!-- COMPREHENSIVE LIVE TELEMETRY (MODE 01) -->
-        <div style="font-weight: 700; font-size: 0.9rem; color: #00FF66; margin-bottom: 6px;">📈 ALL AVAILABLE LIVE SENSOR TELEMETRY (MODE 01)</div>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(115px, 1fr)); gap: 8px; max-height: 280px; overflow-y: auto; padding-right: 4px; margin-bottom: 14px;">
+        <!-- 1. LIVE SENSOR TELEMETRY (TOP) -->
+        <div style="font-weight: 700; font-size: 0.95rem; color: #00FF66; margin-bottom: 6px;">📈 LIVE SENSOR TELEMETRY (MODE 01)</div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(115px, 1fr)); gap: 8px; max-height: 280px; overflow-y: auto; padding-right: 4px; margin-bottom: 16px;">
             <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
                 <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Engine RPM</div>
                 <div id="valRpm" style="font-size: 1.15rem; font-weight: 700; color: #00FF66;">--</div>
@@ -632,16 +620,22 @@ with tab2:
             </div>
         </div>
 
-        <!-- FULL MODE $06 ON-BOARD MONITORS -->
-        <div style="font-weight: 700; font-size: 0.9rem; color: #38BDF8; margin-bottom: 6px;">📊 COMPLETE ON-BOARD DIAGNOSTIC MONITORS (MODE $06)</div>
-        <div id="mode6Box" style="background: #111418; border: 1px solid #2D3748; border-radius: 6px; padding: 10px; min-height: 80px; max-height: 240px; overflow-y: auto; font-family: monospace; font-size: 0.85rem; color: #A0AEC0; margin-bottom: 14px;">
-            Tap "Run Full Mode $06" to pull all available vehicle monitors.
+        <!-- 2. I/M READINESS MONITORS (UNDER LIVE DATA) -->
+        <div style="font-weight: 700; font-size: 0.95rem; color: #38BDF8; margin-bottom: 6px;">📋 EMISSIONS INSPECTION (I/M) READINESS MONITORS</div>
+        <div id="readinessBox" style="background: #111418; border: 1px solid #2D3748; border-radius: 6px; padding: 10px; margin-bottom: 16px;">
+            <div style="color: #A0AEC0; font-size: 0.85rem;">Monitors will auto-load immediately upon connection.</div>
         </div>
 
-        <!-- AI Diagnostic Verdict Display Card -->
-        <div style="font-weight: 700; font-size: 0.9rem; color: #F59E0B; margin-bottom: 6px;">🤖 AI MASTER TECH TELEMETRY EVALUATION</div>
+        <!-- 3. FULL MODE $06 ON-BOARD MONITORS (UNDER READINESS) -->
+        <div style="font-weight: 700; font-size: 0.95rem; color: #38BDF8; margin-bottom: 6px;">📊 COMPLETE ON-BOARD DIAGNOSTIC MONITORS (MODE $06)</div>
+        <div id="mode6Box" style="background: #111418; border: 1px solid #2D3748; border-radius: 6px; padding: 10px; min-height: 80px; max-height: 240px; overflow-y: auto; font-family: monospace; font-size: 0.85rem; color: #A0AEC0; margin-bottom: 16px;">
+            Mode $06 monitors will auto-load immediately upon connection.
+        </div>
+
+        <!-- 4. AI DIAGNOSTIC VERDICT (BOTTOM) -->
+        <div style="font-weight: 700; font-size: 0.95rem; color: #F59E0B; margin-bottom: 6px;">🤖 AI MASTER TECH TELEMETRY EVALUATION</div>
         <div id="aiVerdictBox" style="background: #111418; border: 1px solid #F59E0B; border-radius: 6px; padding: 12px; min-height: 90px; max-height: 320px; overflow-y: auto; font-size: 0.9rem; line-height: 1.45; color: #FFFFFF;">
-            Click "AI Check Now" or activate "Start Test Drive AI" for continuous hands-free evaluation and audible alerts.
+            Connect adapter to automatically analyze live telemetry and diagnostic monitors.
         </div>
     </div>
 
@@ -779,10 +773,9 @@ with tab2:
         return clean;
     }
 
-    // Hands-Free Audio Voice Alert System (Web Speech API)
     function speakAlert(text) {
         const now = Date.now();
-        if (now - lastVoiceAlertTime < 18000) return; // Limit alerts to once per 18 seconds
+        if (now - lastVoiceAlertTime < 18000) return;
         lastVoiceAlertTime = now;
         if ('speechSynthesis' in window) {
             window.speechSynthesis.cancel();
@@ -793,7 +786,6 @@ with tab2:
         }
     }
 
-    // Wake Lock to keep phone screen awake in car mount
     async function enableWakeLock() {
         try {
             if ('wakeLock' in navigator) {
@@ -809,7 +801,6 @@ with tab2:
         }
     }
 
-    // Automated Trigger & Rolling Evaluation Engine
     async function evaluateTestDriveTriggers(s1, l1, s2, l2, ectVal, voltVal) {
         if (!isTestDriveActive) return;
 
@@ -823,7 +814,6 @@ with tab2:
         else if (ectVal >= 225) speakAlert("High Coolant Temperature: " + ectVal + " degrees.");
         else if (voltVal > 0 && voltVal < 12.8) speakAlert("Low Battery Voltage under load: " + voltVal.toFixed(1) + " volts.");
 
-        // Periodic Rolling AI Check every 45 seconds during drive
         const now = Date.now();
         if (now - lastAiSnapshotTime >= 45000) {
             lastAiSnapshotTime = now;
@@ -884,6 +874,128 @@ Keep it strictly under 100 words.
                 vBox.innerHTML = "<div style='color: #00FF66; font-size: 0.8rem; margin-bottom: 4px;'>[Live Drive AI Check - " + pids.Time + "]</div>" + text;
             }
         } catch (e) {}
+    }
+
+    // --- REUSABLE READINESS MONITORS FETCHER ---
+    async function loadReadinessMonitors() {
+        const rBox = document.getElementById('readinessBox');
+        rBox.innerHTML = "<div style='color: #F59E0B;'>Reading emissions monitor status from ECM...</div>";
+
+        let res = await sendCmd("0101", 1500);
+        let clean = parseCleanHex(res);
+        let m = clean.match(/4101([0-9A-F]{8})/);
+
+        if (m) {
+            let bB = parseInt(m[1].substr(2, 2), 16);
+            let bC = parseInt(m[1].substr(4, 2), 16);
+            let bD = parseInt(m[1].substr(6, 2), 16);
+
+            const monitors = [
+                {name: "Misfire Monitor", sup: (bB & 0x01) !== 0, rdy: (bB & 0x10) === 0},
+                {name: "Fuel System", sup: (bB & 0x02) !== 0, rdy: (bB & 0x20) === 0},
+                {name: "Comprehensive Components", sup: (bB & 0x04) !== 0, rdy: (bB & 0x40) === 0},
+                {name: "Catalyst Monitor", sup: (bC & 0x01) !== 0, rdy: (bD & 0x01) === 0},
+                {name: "Heated Catalyst", sup: (bC & 0x02) !== 0, rdy: (bD & 0x02) === 0},
+                {name: "EVAP System", sup: (bC & 0x04) !== 0, rdy: (bD & 0x04) === 0},
+                {name: "Secondary Air", sup: (bC & 0x08) !== 0, rdy: (bD & 0x08) === 0},
+                {name: "O2 Sensor", sup: (bC & 0x20) !== 0, rdy: (bD & 0x20) === 0},
+                {name: "O2 Sensor Heater", sup: (bC & 0x40) !== 0, rdy: (bD & 0x40) === 0},
+                {name: "EGR / VVT System", sup: (bC & 0x80) !== 0, rdy: (bD & 0x80) === 0}
+            ];
+
+            let html = "<div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px;'>";
+            readinessSummary = "";
+
+            for (let mon of monitors) {
+                let badge = "";
+                let color = "";
+                if (!mon.sup) {
+                    badge = "N/A";
+                    color = "#64748B";
+                } else if (mon.rdy) {
+                    badge = "READY / COMPLETE";
+                    color = "#00FF66";
+                } else {
+                    badge = "NOT READY";
+                    color = "#EF4444";
+                }
+                readinessSummary += `${mon.name}: ${badge}; `;
+                html += `<div style='background: #1A1F26; border: 1px solid ${color}; padding: 6px; border-radius: 5px; text-align: center;'>
+                    <div style='font-size: 0.75rem; color: #A0AEC0;'>${mon.name}</div>
+                    <div style='font-size: 0.9rem; font-weight: 700; color: ${color};'>${badge}</div>
+                </div>`;
+            }
+            html += "</div>";
+            rBox.innerHTML = html;
+        } else {
+            rBox.innerHTML = "<div style='color: #EF4444;'>Could not read I/M monitors. Raw response: " + res + "</div>";
+        }
+    }
+
+    // --- REUSABLE FULL MODE $06 FETCHER ---
+    async function loadMode6Data() {
+        const m6Box = document.getElementById('mode6Box');
+        m6Box.innerHTML = "<div style='color: #F59E0B; padding: 4px;'>⚡ Scanning all supported vehicle monitors (Cylinders 1-8+, Catalyst Bank 1 & 2, O2 Sensors, EVAP, VVT, EGR)...</div>";
+
+        const allMonitors = [
+            {mid: "06A2", name: "Cylinder 1 Misfires", isCyl: true},
+            {mid: "06A3", name: "Cylinder 2 Misfires", isCyl: true},
+            {mid: "06A4", name: "Cylinder 3 Misfires", isCyl: true},
+            {mid: "06A5", name: "Cylinder 4 Misfires", isCyl: true},
+            {mid: "06A6", name: "Cylinder 5 Misfires", isCyl: true},
+            {mid: "06A7", name: "Cylinder 6 Misfires", isCyl: true},
+            {mid: "06A8", name: "Cylinder 7 Misfires", isCyl: true},
+            {mid: "06A9", name: "Cylinder 8 Misfires", isCyl: true},
+            {mid: "0621", name: "Catalyst Bank 1", isCyl: false},
+            {mid: "0622", name: "Catalyst Bank 2", isCyl: false},
+            {mid: "0601", name: "O2 Sensor B1S1 Monitor", isCyl: false},
+            {mid: "0602", name: "O2 Sensor B1S2 Monitor", isCyl: false},
+            {mid: "0605", name: "O2 Sensor B2S1 Monitor", isCyl: false},
+            {mid: "0606", name: "O2 Sensor B2S2 Monitor", isCyl: false},
+            {mid: "0635", name: "VVT / Cam Phasing Bank 1", isCyl: false},
+            {mid: "0636", name: "VVT / Cam Phasing Bank 2", isCyl: false},
+            {mid: "0639", name: "EVAP 0.040 Monitor", isCyl: false},
+            {mid: "063A", name: "EVAP 0.020 Leak Monitor", isCyl: false},
+            {mid: "063B", name: "EVAP Purge Flow Monitor", isCyl: false},
+            {mid: "0651", name: "EGR Flow / Lift Monitor", isCyl: false}
+        ];
+
+        let htmlGrid = "<div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px;'>";
+        let foundAny = false;
+        mode6RawData = "";
+
+        for (let t of allMonitors) {
+            let res = await sendCmd(t.mid, 600);
+            let clean = parseCleanHex(res);
+            if (clean.includes("NODATA") || clean.includes("?") || clean.length < 6) continue;
+            mode6RawData += `\\n${t.name} (${t.mid}): ${res}`;
+
+            let color = "#00FF66";
+            let statusText = "PASS";
+
+            if (t.isCyl) {
+                let m = clean.match(/46(A[2-9])([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{4})/);
+                if (m) {
+                    let count = parseInt(m[4], 16);
+                    color = count === 0 ? "#00FF66" : "#EF4444";
+                    statusText = count === 0 ? "PASS (0 ct)" : "MISFIRES: " + count;
+                }
+            } else {
+                statusText = "MONITORED";
+                color = "#38BDF8";
+            }
+
+            foundAny = true;
+            htmlGrid += `<div style='background: #1A1F26; border: 1px solid ${color}; padding: 8px; border-radius: 6px; text-align: center;'>
+                <div style='color: #A0AEC0; font-weight: 700; font-size: 0.8rem;'>${t.name}</div>
+                <div style='color: ${color}; font-size: 1rem; font-weight: 700;'>${statusText}</div>
+            </div>`;
+            m6Box.innerHTML = htmlGrid + "</div>";
+        }
+
+        if (!foundAny) {
+            m6Box.innerHTML = "<div style='color: #A0AEC0; padding: 4px;'>Raw Mode $06 Output:<br><pre style='white-space: pre-wrap; font-size: 0.75rem;'>" + (mode6RawData.trim() || "No response bytes from ECM.") + "</pre></div>";
+        }
     }
 
     async function runLiveLoop() {
@@ -1132,7 +1244,6 @@ Keep it strictly under 100 words.
                         document.getElementById('valVolt').innerText = lastVolt.toFixed(1) + "V";
                     }
 
-                    // Run Test Drive Threshold Watchdog & Trigger Logic
                     evaluateTestDriveTriggers(lastS1, lastL1, lastS2, lastL2, lastEct, lastVolt);
                 }
             } catch (err) {
@@ -1142,6 +1253,7 @@ Keep it strictly under 100 words.
         }
     }
 
+    // --- ONE-TAP AUTOMATED CONNECTION, SCAN & STREAM SEQUENCE ---
     document.getElementById('bleBtn').addEventListener('click', async () => {
         try {
             log("Opening Bluetooth selector...");
@@ -1184,22 +1296,16 @@ Keep it strictly under 100 words.
             o2B1Probe = null;
             o2B2Probe = null;
 
-            log("Connected to ECM! Telemetry, Monitors & Mode $06 Ready.");
-
-            // Activate All Buttons
-            ['liveBtn', 'testDriveBtn', 'monBtn', 'mode6Btn', 'clearDtcBtn', 'aiCheckBtn', 'pullVinBtn'].forEach(id => {
+            // Activate All Utility Buttons
+            ['pauseBtn', 'testDriveBtn', 'clearDtcBtn', 'aiCheckBtn', 'pullVinBtn'].forEach(id => {
                 const b = document.getElementById(id);
                 b.disabled = false;
                 b.style.cursor = 'pointer';
             });
-            document.getElementById('liveBtn').style.backgroundColor = '#38BDF8';
-            document.getElementById('liveBtn').style.color = '#0E1117';
+            document.getElementById('pauseBtn').style.backgroundColor = '#EF4444';
+            document.getElementById('pauseBtn').style.color = '#FFFFFF';
             document.getElementById('testDriveBtn').style.backgroundColor = '#10B981';
             document.getElementById('testDriveBtn').style.color = '#0E1117';
-            document.getElementById('monBtn').style.backgroundColor = '#06B6D4';
-            document.getElementById('monBtn').style.color = '#0E1117';
-            document.getElementById('mode6Btn').style.backgroundColor = '#38BDF8';
-            document.getElementById('mode6Btn').style.color = '#0E1117';
             document.getElementById('clearDtcBtn').style.backgroundColor = '#EF4444';
             document.getElementById('clearDtcBtn').style.color = '#FFFFFF';
             document.getElementById('aiCheckBtn').style.backgroundColor = '#F59E0B';
@@ -1207,26 +1313,40 @@ Keep it strictly under 100 words.
             document.getElementById('pullVinBtn').style.backgroundColor = '#A855F7';
             document.getElementById('pullVinBtn').style.color = '#FFFFFF';
 
+            // 1. AUTO-LOAD I/M READINESS MONITORS
+            log("Auto-loading I/M Readiness monitors (Mode 01 01)...");
+            await loadReadinessMonitors();
+
+            // 2. AUTO-LOAD MODE $06 ON-BOARD MONITORS
+            log("Auto-scanning Mode $06 monitors & cylinder misfire counts...");
+            await loadMode6Data();
+
+            // 3. AUTO-START LIVE TELEMETRY STREAM
+            log("All diagnostic monitors loaded! Starting live telemetry stream...");
+            isStreaming = true;
+            runLiveLoop();
+
         } catch (err) {
             log("Error: " + err.message);
         }
     });
 
-    document.getElementById('liveBtn').addEventListener('click', () => {
-        const liveBtn = document.getElementById('liveBtn');
-        if (!isStreaming) {
+    // --- PAUSE / RESUME STREAM BUTTON ---
+    document.getElementById('pauseBtn').addEventListener('click', () => {
+        const btn = document.getElementById('pauseBtn');
+        if (isStreaming) {
+            isStreaming = false;
+            btn.innerText = "▶️ Resume Live Stream";
+            btn.style.backgroundColor = "#38BDF8";
+            btn.style.color = "#0E1117";
+            log("Live telemetry stream paused.");
+        } else {
             isStreaming = true;
-            liveBtn.innerText = "⏸️ Pause Stream";
-            liveBtn.style.backgroundColor = "#EF4444";
-            liveBtn.style.color = "#FFFFFF";
+            btn.innerText = "⏸️ Pause Stream";
+            btn.style.backgroundColor = "#EF4444";
+            btn.style.color = "#FFFFFF";
             log("Streaming live telemetry...");
             runLiveLoop();
-        } else {
-            isStreaming = false;
-            liveBtn.innerText = "▶️ Start Live Data";
-            liveBtn.style.backgroundColor = "#38BDF8";
-            liveBtn.style.color = "#0E1117";
-            log("Stream paused.");
         }
     });
 
@@ -1244,181 +1364,22 @@ Keep it strictly under 100 words.
             enableWakeLock();
             speakAlert("Test Drive AI Activated. Telemetry watchdog and speech alerts active.");
 
-            // Ensure telemetry is streaming
             if (!isStreaming) {
                 isStreaming = true;
-                const liveBtn = document.getElementById('liveBtn');
-                liveBtn.innerText = "⏸️ Pause Stream";
-                liveBtn.style.backgroundColor = "#EF4444";
-                liveBtn.style.color = "#FFFFFF";
+                const pauseBtn = document.getElementById('pauseBtn');
+                pauseBtn.innerText = "⏸️ Pause Stream";
+                pauseBtn.style.backgroundColor = "#EF4444";
+                pauseBtn.style.color = "#FFFFFF";
                 runLiveLoop();
             }
         } else {
             isTestDriveActive = false;
-            btn.innerText = "🚗 Start Test Drive AI";
+            btn.innerText = "🚗 Test Drive Audio";
             btn.style.backgroundColor = "#10B981";
             btn.style.color = "#0E1117";
             banner.style.display = "none";
             disableWakeLock();
             speakAlert("Test Drive AI Deactivated.");
-        }
-    });
-
-    // --- I/M READINESS CHECK (MODE 01 01) ---
-    document.getElementById('monBtn').addEventListener('click', async () => {
-        const wasStreaming = isStreaming;
-        isStreaming = false;
-        document.getElementById('liveBtn').innerText = "▶️ Start Live Data";
-        document.getElementById('liveBtn').style.backgroundColor = "#38BDF8";
-
-        log("Reading I/M Readiness monitors (Mode 01 01)...");
-        const rBox = document.getElementById('readinessBox');
-        rBox.innerHTML = "<div style='color: #F59E0B;'>Reading emissions monitor status from ECM...</div>";
-
-        let res = await sendCmd("0101", 1500);
-        let clean = parseCleanHex(res);
-        let m = clean.match(/4101([0-9A-F]{8})/);
-
-        if (m) {
-            let bB = parseInt(m[1].substr(2, 2), 16);
-            let bC = parseInt(m[1].substr(4, 2), 16);
-            let bD = parseInt(m[1].substr(6, 2), 16);
-
-            const monitors = [
-                {name: "Misfire Monitor", sup: (bB & 0x01) !== 0, rdy: (bB & 0x10) === 0},
-                {name: "Fuel System", sup: (bB & 0x02) !== 0, rdy: (bB & 0x20) === 0},
-                {name: "Comprehensive Components", sup: (bB & 0x04) !== 0, rdy: (bB & 0x40) === 0},
-                {name: "Catalyst Monitor", sup: (bC & 0x01) !== 0, rdy: (bD & 0x01) === 0},
-                {name: "Heated Catalyst", sup: (bC & 0x02) !== 0, rdy: (bD & 0x02) === 0},
-                {name: "EVAP System", sup: (bC & 0x04) !== 0, rdy: (bD & 0x04) === 0},
-                {name: "Secondary Air", sup: (bC & 0x08) !== 0, rdy: (bD & 0x08) === 0},
-                {name: "O2 Sensor", sup: (bC & 0x20) !== 0, rdy: (bD & 0x20) === 0},
-                {name: "O2 Sensor Heater", sup: (bC & 0x40) !== 0, rdy: (bD & 0x40) === 0},
-                {name: "EGR / VVT System", sup: (bC & 0x80) !== 0, rdy: (bD & 0x80) === 0}
-            ];
-
-            let html = "<div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px;'>";
-            readinessSummary = "";
-
-            for (let mon of monitors) {
-                let badge = "";
-                let color = "";
-                if (!mon.sup) {
-                    badge = "N/A";
-                    color = "#64748B";
-                } else if (mon.rdy) {
-                    badge = "READY / COMPLETE";
-                    color = "#00FF66";
-                } else {
-                    badge = "NOT READY";
-                    color = "#EF4444";
-                }
-                readinessSummary += `${mon.name}: ${badge}; `;
-                html += `<div style='background: #1A1F26; border: 1px solid ${color}; padding: 6px; border-radius: 5px; text-align: center;'>
-                    <div style='font-size: 0.75rem; color: #A0AEC0;'>${mon.name}</div>
-                    <div style='font-size: 0.9rem; font-weight: 700; color: ${color};'>${badge}</div>
-                </div>`;
-            }
-            html += "</div>";
-            rBox.innerHTML = html;
-            log("I/M Readiness check complete.");
-        } else {
-            rBox.innerHTML = "<div style='color: #EF4444;'>Could not read I/M monitors. Raw response: " + res + "</div>";
-        }
-
-        if (wasStreaming) {
-            isStreaming = true;
-            document.getElementById('liveBtn').innerText = "⏸️ Pause Stream";
-            document.getElementById('liveBtn').style.backgroundColor = "#EF4444";
-            runLiveLoop();
-        }
-    });
-
-    // --- FULL MODE $06 SCAN (ALL CYLINDERS, CATALYST B1/B2, O2, EVAP, VVT, EGR) ---
-    document.getElementById('mode6Btn').addEventListener('click', async () => {
-        const wasStreaming = isStreaming;
-        isStreaming = false;
-        document.getElementById('liveBtn').innerText = "▶️ Start Live Data";
-        document.getElementById('liveBtn').style.backgroundColor = "#38BDF8";
-
-        log("Running complete multi-subsystem Mode $06 scan...");
-        await new Promise(r => setTimeout(r, 100));
-
-        const m6Box = document.getElementById('mode6Box');
-        m6Box.innerHTML = "<div style='color: #F59E0B; padding: 4px;'>⚡ Scanning all supported vehicle monitors (Cylinders 1-8+, Catalyst Bank 1 & 2, O2 Sensors, EVAP, VVT, EGR)...</div>";
-
-        const allMonitors = [
-            // Cylinders 1 - 8 Misfires
-            {mid: "06A2", name: "Cylinder 1 Misfires", isCyl: true},
-            {mid: "06A3", name: "Cylinder 2 Misfires", isCyl: true},
-            {mid: "06A4", name: "Cylinder 3 Misfires", isCyl: true},
-            {mid: "06A5", name: "Cylinder 4 Misfires", isCyl: true},
-            {mid: "06A6", name: "Cylinder 5 Misfires", isCyl: true},
-            {mid: "06A7", name: "Cylinder 6 Misfires", isCyl: true},
-            {mid: "06A8", name: "Cylinder 7 Misfires", isCyl: true},
-            {mid: "06A9", name: "Cylinder 8 Misfires", isCyl: true},
-            // Catalysts
-            {mid: "0621", name: "Catalyst Bank 1", isCyl: false},
-            {mid: "0622", name: "Catalyst Bank 2", isCyl: false},
-            // O2 Sensors
-            {mid: "0601", name: "O2 Sensor B1S1 Monitor", isCyl: false},
-            {mid: "0602", name: "O2 Sensor B1S2 Monitor", isCyl: false},
-            {mid: "0605", name: "O2 Sensor B2S1 Monitor", isCyl: false},
-            {mid: "0606", name: "O2 Sensor B2S2 Monitor", isCyl: false},
-            // VVT & Cam Phasing
-            {mid: "0635", name: "VVT / Cam Phasing Bank 1", isCyl: false},
-            {mid: "0636", name: "VVT / Cam Phasing Bank 2", isCyl: false},
-            // EVAP Leak Check
-            {mid: "0639", name: "EVAP 0.040 Monitor", isCyl: false},
-            {mid: "063A", name: "EVAP 0.020 Leak Monitor", isCyl: false},
-            {mid: "063B", name: "EVAP Purge Flow Monitor", isCyl: false},
-            // EGR
-            {mid: "0651", name: "EGR Flow / Lift Monitor", isCyl: false}
-        ];
-
-        let htmlGrid = "<div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px;'>";
-        let foundAny = false;
-        mode6RawData = "";
-
-        for (let t of allMonitors) {
-            let res = await sendCmd(t.mid, 600);
-            let clean = parseCleanHex(res);
-            if (clean.includes("NODATA") || clean.includes("?") || clean.length < 6) continue;
-            mode6RawData += `\\n${t.name} (${t.mid}): ${res}`;
-
-            let color = "#00FF66";
-            let statusText = "PASS";
-
-            if (t.isCyl) {
-                let m = clean.match(/46(A[2-9])([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{4})/);
-                if (m) {
-                    let count = parseInt(m[4], 16);
-                    color = count === 0 ? "#00FF66" : "#EF4444";
-                    statusText = count === 0 ? "PASS (0 ct)" : "MISFIRES: " + count;
-                }
-            } else {
-                statusText = "MONITORED";
-                color = "#38BDF8";
-            }
-
-            foundAny = true;
-            htmlGrid += `<div style='background: #1A1F26; border: 1px solid ${color}; padding: 8px; border-radius: 6px; text-align: center;'>
-                <div style='color: #A0AEC0; font-weight: 700; font-size: 0.8rem;'>${t.name}</div>
-                <div style='color: ${color}; font-size: 1rem; font-weight: 700;'>${statusText}</div>
-            </div>`;
-            m6Box.innerHTML = htmlGrid + "</div>";
-        }
-
-        if (!foundAny) {
-            m6Box.innerHTML = "<div style='color: #A0AEC0; padding: 4px;'>Raw Mode $06 Output:<br><pre style='white-space: pre-wrap; font-size: 0.75rem;'>" + (mode6RawData.trim() || "No response bytes from ECM.") + "</pre></div>";
-        }
-
-        log("Full Mode $06 scan completed.");
-        if (wasStreaming) {
-            isStreaming = true;
-            document.getElementById('liveBtn').innerText = "⏸️ Pause Stream";
-            document.getElementById('liveBtn').style.backgroundColor = "#EF4444";
-            runLiveLoop();
         }
     });
 
@@ -1430,8 +1391,8 @@ Keep it strictly under 100 words.
 
         const wasStreaming = isStreaming;
         isStreaming = false;
-        document.getElementById('liveBtn').innerText = "▶️ Start Live Data";
-        document.getElementById('liveBtn').style.backgroundColor = "#38BDF8";
+        document.getElementById('pauseBtn').innerText = "▶️ Resume Live Stream";
+        document.getElementById('pauseBtn').style.backgroundColor = "#38BDF8";
 
         log("Sending Mode 04 Clear DTCs command to ECM...");
         let res = await sendCmd("04", 3000);
@@ -1440,7 +1401,7 @@ Keep it strictly under 100 words.
         if (clean.includes("44") || clean.includes("OK") || clean.includes(">")) {
             log("SUCCESS: Fault codes cleared and readiness monitors reset!");
             alert("✅ Mode 04 Successful: Fault codes cleared and emissions monitors reset.");
-            document.getElementById('readinessBox').innerHTML = "<div style='color: #EF4444; font-weight: 700;'>Monitors have been RESET by Mode 04 command. Re-run Readiness Check to verify.</div>";
+            document.getElementById('readinessBox').innerHTML = "<div style='color: #EF4444; font-weight: 700;'>Monitors have been RESET by Mode 04 command. Re-run or reconnect to verify.</div>";
         } else {
             log("Mode 04 command response: " + res);
             alert("Result: " + res);
@@ -1448,8 +1409,8 @@ Keep it strictly under 100 words.
 
         if (wasStreaming) {
             isStreaming = true;
-            document.getElementById('liveBtn').innerText = "⏸️ Pause Stream";
-            document.getElementById('liveBtn').style.backgroundColor = "#EF4444";
+            document.getElementById('pauseBtn').innerText = "⏸️ Pause Stream";
+            document.getElementById('pauseBtn').style.backgroundColor = "#EF4444";
             runLiveLoop();
         }
     });
@@ -1578,7 +1539,7 @@ Format with clean bold sections and direct shop-floor language.
       (st.session_state.active_dtc or "None").replace('"', ""),
   )
 
-  components.html(ble_html, height=1150)
+  components.html(ble_html, height=1250)
 
 # ========================================================
 # --- TAB 3: IN-DEPTH DTC DIAGNOSTIC STRATEGY ---
