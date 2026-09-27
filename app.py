@@ -470,10 +470,10 @@ with tab1:
       st.error("Could not find vehicle details. Check the VIN and try again.")
 
 # ========================================================
-# --- TAB 2: LIVE TELEMETRY, MODE $06, MONITORS & MODE 04 ---
+# --- TAB 2: LIVE TELEMETRY, TEST DRIVE AI & MODE 06 ---
 # ========================================================
 with tab2:
-  st.subheader("📊 Live Telemetry, Mode $06, I/M Monitors & Reset")
+  st.subheader("📊 Live Telemetry, Test Drive AI & Monitors")
 
   c_tag = st.session_state.customer_name or "None"
   v_tag = st.session_state.vehicle_info or "No Vehicle Selected"
@@ -495,6 +495,9 @@ with tab2:
             <button id="liveBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
                 ▶️ Start Live Data
             </button>
+            <button id="testDriveBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
+                🚗 Start Test Drive AI
+            </button>
             <button id="monBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
                 📋 I/M Readiness (01 01)
             </button>
@@ -505,7 +508,7 @@ with tab2:
                 🗑️ Clear DTCs (Mode 04)
             </button>
             <button id="aiCheckBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
-                🤖 AI Check All Data
+                🤖 AI Check Now
             </button>
             <button id="pullVinBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
                 📋 Sync VIN & DTCs
@@ -513,13 +516,18 @@ with tab2:
         </div>
         <div id="bleStatus" style="color: #A0AEC0; font-family: monospace; font-size: 0.85rem; margin-bottom: 12px;">Status: Ready to pair</div>
 
+        <!-- TEST DRIVE AI ACTIVE BANNER -->
+        <div id="driveBanner" style="display: none; background: #0F172A; border-left: 4px solid #38BDF8; padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; font-size: 0.85rem; color: #38BDF8;">
+            🚗 <strong>Test Drive AI Active:</strong> Screen Wake Lock ON (screen will not sleep). Real-time speech alerts active over speaker for Fuel Trim skews, thermal spikes, or misfires. Rolling AI telemetry check every 45 seconds.
+        </div>
+
         <!-- I/M READINESS MONITORS (MODE 01 01) -->
         <div style="font-weight: 700; font-size: 0.9rem; color: #38BDF8; margin-bottom: 6px;">📋 EMISSIONS INSPECTION (I/M) READINESS MONITORS</div>
         <div id="readinessBox" style="background: #111418; border: 1px solid #2D3748; border-radius: 6px; padding: 10px; margin-bottom: 14px;">
-            <div style="color: #A0AEC0; font-size: 0.85rem;">Connect adapter and tap "I/M Readiness (01 01)" to check monitor completion status.</div>
+            <div style="color: #A0AEC0; font-size: 0.85rem;">Tap "I/M Readiness (01 01)" to check monitor completion status.</div>
         </div>
 
-        <!-- COMPREHENSIVE LIVE TELEMETRY (MODE 01) INCLUDING FULL BANK 1 & BANK 2 -->
+        <!-- COMPREHENSIVE LIVE TELEMETRY (MODE 01) -->
         <div style="font-weight: 700; font-size: 0.9rem; color: #00FF66; margin-bottom: 6px;">📈 ALL AVAILABLE LIVE SENSOR TELEMETRY (MODE 01)</div>
         <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(115px, 1fr)); gap: 8px; max-height: 280px; overflow-y: auto; padding-right: 4px; margin-bottom: 14px;">
             <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
@@ -627,13 +635,13 @@ with tab2:
         <!-- FULL MODE $06 ON-BOARD MONITORS -->
         <div style="font-weight: 700; font-size: 0.9rem; color: #38BDF8; margin-bottom: 6px;">📊 COMPLETE ON-BOARD DIAGNOSTIC MONITORS (MODE $06)</div>
         <div id="mode6Box" style="background: #111418; border: 1px solid #2D3748; border-radius: 6px; padding: 10px; min-height: 80px; max-height: 240px; overflow-y: auto; font-family: monospace; font-size: 0.85rem; color: #A0AEC0; margin-bottom: 14px;">
-            Tap "Run Full Mode $06" to pull all available vehicle monitors (Cylinders 1-8+, Catalyst Bank 1 & 2, O2 Sensors, EVAP, VVT, EGR).
+            Tap "Run Full Mode $06" to pull all available vehicle monitors.
         </div>
 
         <!-- AI Diagnostic Verdict Display Card -->
         <div style="font-weight: 700; font-size: 0.9rem; color: #F59E0B; margin-bottom: 6px;">🤖 AI MASTER TECH TELEMETRY EVALUATION</div>
         <div id="aiVerdictBox" style="background: #111418; border: 1px solid #F59E0B; border-radius: 6px; padding: 12px; min-height: 90px; max-height: 320px; overflow-y: auto; font-size: 0.9rem; line-height: 1.45; color: #FFFFFF;">
-            Click "AI Check All Data" to run instantaneous Master Tech cross-correlation on all active PIDs, I/M Readiness, and Mode $06 results.
+            Click "AI Check Now" or activate "Start Test Drive AI" for continuous hands-free evaluation and audible alerts.
         </div>
     </div>
 
@@ -656,12 +664,16 @@ with tab2:
     let resolver = null;
     let isBusy = false;
     let isStreaming = false;
+    let isTestDriveActive = false;
     let unsupportedPids = new Set();
     let o2B1Probe = null;
     let o2B2Probe = null;
     let loopCycle = 0;
     let mode6RawData = "";
     let readinessSummary = "";
+    let wakeLockSentinel = null;
+    let lastVoiceAlertTime = 0;
+    let lastAiSnapshotTime = 0;
 
     function log(msg) {
         document.getElementById('bleStatus').innerText = "Status: " + msg;
@@ -767,7 +779,116 @@ with tab2:
         return clean;
     }
 
+    // Hands-Free Audio Voice Alert System (Web Speech API)
+    function speakAlert(text) {
+        const now = Date.now();
+        if (now - lastVoiceAlertTime < 18000) return; // Limit alerts to once per 18 seconds
+        lastVoiceAlertTime = now;
+        if ('speechSynthesis' in window) {
+            window.speechSynthesis.cancel();
+            const utter = new SpeechSynthesisUtterance(text);
+            utter.rate = 1.05;
+            utter.pitch = 1.0;
+            window.speechSynthesis.speak(utter);
+        }
+    }
+
+    // Wake Lock to keep phone screen awake in car mount
+    async function enableWakeLock() {
+        try {
+            if ('wakeLock' in navigator) {
+                wakeLockSentinel = await navigator.wakeLock.request('screen');
+            }
+        } catch (e) {}
+    }
+
+    function disableWakeLock() {
+        if (wakeLockSentinel) {
+            wakeLockSentinel.release().catch(() => {});
+            wakeLockSentinel = null;
+        }
+    }
+
+    // Automated Trigger & Rolling Evaluation Engine
+    async function evaluateTestDriveTriggers(s1, l1, s2, l2, ectVal, voltVal) {
+        if (!isTestDriveActive) return;
+
+        const total1 = s1 + l1;
+        const total2 = s2 + l2;
+
+        if (total1 > 16.0) speakAlert("Alert: Bank 1 Total Fuel Trim plus " + Math.round(total1) + " percent lean.");
+        else if (total1 < -16.0) speakAlert("Alert: Bank 1 Total Fuel Trim negative " + Math.abs(Math.round(total1)) + " percent rich.");
+        else if (total2 > 16.0 && s2 !== 0) speakAlert("Alert: Bank 2 Total Fuel Trim plus " + Math.round(total2) + " percent lean.");
+        else if (total2 < -16.0 && s2 !== 0) speakAlert("Alert: Bank 2 Total Fuel Trim negative " + Math.abs(Math.round(total2)) + " percent rich.");
+        else if (ectVal >= 225) speakAlert("High Coolant Temperature: " + ectVal + " degrees.");
+        else if (voltVal > 0 && voltVal < 12.8) speakAlert("Low Battery Voltage under load: " + voltVal.toFixed(1) + " volts.");
+
+        // Periodic Rolling AI Check every 45 seconds during drive
+        const now = Date.now();
+        if (now - lastAiSnapshotTime >= 45000) {
+            lastAiSnapshotTime = now;
+            triggerBackgroundAiEvaluation();
+        }
+    }
+
+    async function triggerBackgroundAiEvaluation() {
+        if (!GEMINI_API_KEY) return;
+        const vBox = document.getElementById('aiVerdictBox');
+        
+        const pids = {
+            "Time": new Date().toLocaleTimeString(),
+            "RPM": document.getElementById('valRpm').innerText,
+            "Load": document.getElementById('valLoad').innerText,
+            "Speed": document.getElementById('valSpd').innerText,
+            "TPS": document.getElementById('valTps').innerText,
+            "ECT": document.getElementById('valEct').innerText,
+            "IAT": document.getElementById('valIat').innerText,
+            "MAP": document.getElementById('valMap').innerText,
+            "MAF": document.getElementById('valMaf').innerText,
+            "STFT1": document.getElementById('valStft').innerText,
+            "LTFT1": document.getElementById('valLtft').innerText,
+            "STFT2": document.getElementById('valStft2').innerText,
+            "LTFT2": document.getElementById('valLtft2').innerText,
+            "Timing": document.getElementById('valTime').innerText,
+            "O2_B1S1": document.getElementById('valO21').innerText,
+            "O2_B1S2": document.getElementById('valO22').innerText,
+            "Voltage": document.getElementById('valVolt').innerText
+        };
+
+        const prompt = `
+You are an expert ASE Master / L1 Diagnostic Technician monitoring a live vehicle test drive in real time.
+Vehicle: ${VEHICLE_CONTEXT}
+Active DTC: ${DTC_CONTEXT}
+
+LATEST TELEMETRY SNAPSHOT DURING ROAD LOAD:
+${JSON.stringify(pids, null, 2)}
+
+Provide a concise 3-bullet live assessment:
+1. Dynamic Fuel Delivery & Trim State (Bank 1 vs 2 balance under current load).
+2. Plausibility of sensors (O2 switching, MAF vs load, coolant temp).
+3. Any immediate anomaly to inspect upon returning to the bay.
+Keep it strictly under 100 words.
+`;
+        try {
+            const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + GEMINI_API_KEY;
+            const res = await fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+            });
+            const data = await res.json();
+            if (data.candidates && data.candidates[0].content.parts[0].text) {
+                const text = data.candidates[0].content.parts[0].text
+                    .replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>')
+                    .replace(/\\n/g, '<br>');
+                vBox.innerHTML = "<div style='color: #00FF66; font-size: 0.8rem; margin-bottom: 4px;'>[Live Drive AI Check - " + pids.Time + "]</div>" + text;
+            }
+        } catch (e) {}
+    }
+
     async function runLiveLoop() {
+        let lastS1 = 0, lastL1 = 0, lastS2 = 0, lastL2 = 0, lastEct = 0, lastVolt = 0;
+
         while (isStreaming) {
             loopCycle++;
             try {
@@ -802,16 +923,16 @@ with tab2:
                     let cStft = await queryPid("0106", 350);
                     let mStft = cStft.match(/4106([0-9A-F]{2})/);
                     if (mStft) {
-                        let s = (((parseInt(mStft[1], 16) - 128) * 100) / 128).toFixed(1);
-                        document.getElementById('valStft').innerText = (s > 0 ? "+" : "") + s + "%";
+                        lastS1 = ((parseInt(mStft[1], 16) - 128) * 100) / 128;
+                        document.getElementById('valStft').innerText = (lastS1 > 0 ? "+" : "") + lastS1.toFixed(1) + "%";
                     }
                     if (!isStreaming) break;
 
                     let cLtft = await queryPid("0107", 350);
                     let mLtft = cLtft.match(/4107([0-9A-F]{2})/);
                     if (mLtft) {
-                        let l = (((parseInt(mLtft[1], 16) - 128) * 100) / 128).toFixed(1);
-                        document.getElementById('valLtft').innerText = (l > 0 ? "+" : "") + l + "%";
+                        lastL1 = ((parseInt(mLtft[1], 16) - 128) * 100) / 128;
+                        document.getElementById('valLtft').innerText = (lastL1 > 0 ? "+" : "") + lastL1.toFixed(1) + "%";
                     }
                     if (!isStreaming) break;
 
@@ -819,8 +940,8 @@ with tab2:
                     let cStft2 = await queryPid("0108", 350);
                     let mStft2 = cStft2.match(/4108([0-9A-F]{2})/);
                     if (mStft2) {
-                        let s2 = (((parseInt(mStft2[1], 16) - 128) * 100) / 128).toFixed(1);
-                        document.getElementById('valStft2').innerText = (s2 > 0 ? "+" : "") + s2 + "%";
+                        lastS2 = ((parseInt(mStft2[1], 16) - 128) * 100) / 128;
+                        document.getElementById('valStft2').innerText = (lastS2 > 0 ? "+" : "") + lastS2.toFixed(1) + "%";
                     } else if (unsupportedPids.has("0108")) {
                         document.getElementById('valStft2').innerText = "N/A";
                     }
@@ -829,8 +950,8 @@ with tab2:
                     let cLtft2 = await queryPid("0109", 350);
                     let mLtft2 = cLtft2.match(/4109([0-9A-F]{2})/);
                     if (mLtft2) {
-                        let l2 = (((parseInt(mLtft2[1], 16) - 128) * 100) / 128).toFixed(1);
-                        document.getElementById('valLtft2').innerText = (l2 > 0 ? "+" : "") + l2 + "%";
+                        lastL2 = ((parseInt(mLtft2[1], 16) - 128) * 100) / 128;
+                        document.getElementById('valLtft2').innerText = (lastL2 > 0 ? "+" : "") + lastL2.toFixed(1) + "%";
                     } else if (unsupportedPids.has("0109")) {
                         document.getElementById('valLtft2').innerText = "N/A";
                     }
@@ -947,7 +1068,10 @@ with tab2:
                 if (loopCycle % 4 === 0) {
                     let cEct = await queryPid("0105", 350);
                     let mEct = cEct.match(/4105([0-9A-F]{2})/);
-                    if (mEct) document.getElementById('valEct').innerText = Math.round((parseInt(mEct[1], 16) - 40) * 1.8 + 32) + " °F";
+                    if (mEct) {
+                        lastEct = Math.round((parseInt(mEct[1], 16) - 40) * 1.8 + 32);
+                        document.getElementById('valEct').innerText = lastEct + " °F";
+                    }
                     if (!isStreaming) break;
 
                     let cIat = await queryPid("010F", 300);
@@ -968,7 +1092,7 @@ with tab2:
                     else if (unsupportedPids.has("015C")) document.getElementById('valEot').innerText = "N/A";
                     if (!isStreaming) break;
 
-                    // Fuel Rail Pressure (0122, 0123, or 010A)
+                    // Fuel Rail Pressure (0123 or 010A)
                     let cFrp = await queryPid("0123", 300);
                     let mFrp = cFrp.match(/4123([0-9A-F]{4})/);
                     if (mFrp) {
@@ -983,14 +1107,12 @@ with tab2:
                     }
                     if (!isStreaming) break;
 
-                    // Fuel Level Input (012F)
                     let cFli = await queryPid("012F", 300);
                     let mFli = cFli.match(/412F([0-9A-F]{2})/);
                     if (mFli) document.getElementById('valFli').innerText = Math.round((parseInt(mFli[1], 16) * 100) / 255) + "%";
                     else if (unsupportedPids.has("012F")) document.getElementById('valFli').innerText = "N/A";
                     if (!isStreaming) break;
 
-                    // Evap Purge (012E)
                     let cEvp = await queryPid("012E", 300);
                     let mEvp = cEvp.match(/412E([0-9A-F]{2})/);
                     if (mEvp) document.getElementById('valEvap').innerText = Math.round((parseInt(mEvp[1], 16) * 100) / 255) + "%";
@@ -1005,7 +1127,13 @@ with tab2:
 
                     let resVolt = await sendCmd("ATRV", 350);
                     let vMatch = (resVolt || '').match(/([0-9]+\\.[0-9]+)/);
-                    if (vMatch) document.getElementById('valVolt').innerText = vMatch[1] + "V";
+                    if (vMatch) {
+                        lastVolt = parseFloat(vMatch[1]);
+                        document.getElementById('valVolt').innerText = lastVolt.toFixed(1) + "V";
+                    }
+
+                    // Run Test Drive Threshold Watchdog & Trigger Logic
+                    evaluateTestDriveTriggers(lastS1, lastL1, lastS2, lastL2, lastEct, lastVolt);
                 }
             } catch (err) {
                 console.error("Telemetry error:", err);
@@ -1059,16 +1187,18 @@ with tab2:
             log("Connected to ECM! Telemetry, Monitors & Mode $06 Ready.");
 
             // Activate All Buttons
-            ['liveBtn', 'monBtn', 'mode6Btn', 'clearDtcBtn', 'aiCheckBtn', 'pullVinBtn'].forEach(id => {
+            ['liveBtn', 'testDriveBtn', 'monBtn', 'mode6Btn', 'clearDtcBtn', 'aiCheckBtn', 'pullVinBtn'].forEach(id => {
                 const b = document.getElementById(id);
                 b.disabled = false;
                 b.style.cursor = 'pointer';
             });
             document.getElementById('liveBtn').style.backgroundColor = '#38BDF8';
             document.getElementById('liveBtn').style.color = '#0E1117';
+            document.getElementById('testDriveBtn').style.backgroundColor = '#10B981';
+            document.getElementById('testDriveBtn').style.color = '#0E1117';
             document.getElementById('monBtn').style.backgroundColor = '#06B6D4';
             document.getElementById('monBtn').style.color = '#0E1117';
-            document.getElementById('mode6Btn').style.backgroundColor = '#10B981';
+            document.getElementById('mode6Btn').style.backgroundColor = '#38BDF8';
             document.getElementById('mode6Btn').style.color = '#0E1117';
             document.getElementById('clearDtcBtn').style.backgroundColor = '#EF4444';
             document.getElementById('clearDtcBtn').style.color = '#FFFFFF';
@@ -1097,6 +1227,40 @@ with tab2:
             liveBtn.style.backgroundColor = "#38BDF8";
             liveBtn.style.color = "#0E1117";
             log("Stream paused.");
+        }
+    });
+
+    // --- TEST DRIVE AI WATCHDOG TOGGLE ---
+    document.getElementById('testDriveBtn').addEventListener('click', () => {
+        const btn = document.getElementById('testDriveBtn');
+        const banner = document.getElementById('driveBanner');
+
+        if (!isTestDriveActive) {
+            isTestDriveActive = true;
+            btn.innerText = "⏹️ Stop Test Drive AI";
+            btn.style.backgroundColor = "#EF4444";
+            btn.style.color = "#FFFFFF";
+            banner.style.display = "block";
+            enableWakeLock();
+            speakAlert("Test Drive AI Activated. Telemetry watchdog and speech alerts active.");
+
+            // Ensure telemetry is streaming
+            if (!isStreaming) {
+                isStreaming = true;
+                const liveBtn = document.getElementById('liveBtn');
+                liveBtn.innerText = "⏸️ Pause Stream";
+                liveBtn.style.backgroundColor = "#EF4444";
+                liveBtn.style.color = "#FFFFFF";
+                runLiveLoop();
+            }
+        } else {
+            isTestDriveActive = false;
+            btn.innerText = "🚗 Start Test Drive AI";
+            btn.style.backgroundColor = "#10B981";
+            btn.style.color = "#0E1117";
+            banner.style.display = "none";
+            disableWakeLock();
+            speakAlert("Test Drive AI Deactivated.");
         }
     });
 
@@ -1290,7 +1454,7 @@ with tab2:
         }
     });
 
-    // --- AI TELEMETRY, READINESS & MODE 06 EVALUATION ---
+    // --- MANUAL AI TELEMETRY, READINESS & MODE 06 EVALUATION ---
     document.getElementById('aiCheckBtn').addEventListener('click', async () => {
         const vBox = document.getElementById('aiVerdictBox');
         if (!GEMINI_API_KEY) {
@@ -1414,7 +1578,7 @@ Format with clean bold sections and direct shop-floor language.
       (st.session_state.active_dtc or "None").replace('"', ""),
   )
 
-  components.html(ble_html, height=1100)
+  components.html(ble_html, height=1150)
 
 # ========================================================
 # --- TAB 3: IN-DEPTH DTC DIAGNOSTIC STRATEGY ---
