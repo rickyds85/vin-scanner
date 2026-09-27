@@ -363,11 +363,12 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab1:
   st.subheader("Customer & Vehicle Identification")
 
-  # --- VEEPEAK WEB BLUETOOTH OBD2 BRIDGE & LIVE DATA CLUSTER ---
+  # --- VEEPEAK WEB BLUETOOTH OBD2 BRIDGE & FULL LIVE DATA CLUSTER ---
   st.markdown("#### 🔌 Veepeak OBDCheck BLE+ Live Dashboard")
   st.caption(
-      "Plug Veepeak into OBD-II port (Key ON/Engine Running). Connect to view"
-      " live streaming PIDs or sync the VIN & DTCs to your diagnostic strategy."
+      "Plug Veepeak into OBD-II port (Key ON/Engine Running). Connect to stream"
+      " live diagnostic telemetry or sync VIN & DTCs to your diagnostic"
+      " strategy."
   )
 
   ble_bridge_html = """
@@ -385,31 +386,79 @@ with tab1:
         </div>
         <div id="bleStatus" style="color: #A0AEC0; font-family: monospace; font-size: 0.85rem; margin-bottom: 12px;">Status: Ready to pair</div>
 
-        <!-- Real-Time Gauge HUD -->
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px;">
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 10px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.75rem; color: #A0AEC0; text-transform: uppercase;">Engine RPM</div>
-                <div id="valRpm" style="font-size: 1.4rem; font-weight: 700; color: #00FF66;">--</div>
+        <!-- Comprehensive Diagnostic PID HUD Grid -->
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(115px, 1fr)); gap: 8px; max-height: 460px; overflow-y: auto; padding-right: 4px;">
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Engine RPM</div>
+                <div id="valRpm" style="font-size: 1.25rem; font-weight: 700; color: #00FF66;">--</div>
             </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 10px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.75rem; color: #A0AEC0; text-transform: uppercase;">Coolant Temp</div>
-                <div id="valEct" style="font-size: 1.4rem; font-weight: 700; color: #38BDF8;">--</div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Engine Load</div>
+                <div id="valLoad" style="font-size: 1.25rem; font-weight: 700; color: #38BDF8;">--</div>
             </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 10px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.75rem; color: #A0AEC0; text-transform: uppercase;">STFT (Bank 1)</div>
-                <div id="valStft" style="font-size: 1.4rem; font-weight: 700; color: #FBBF24;">--</div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Vehicle Speed</div>
+                <div id="valSpd" style="font-size: 1.25rem; font-weight: 700; color: #38BDF8;">--</div>
             </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 10px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.75rem; color: #A0AEC0; text-transform: uppercase;">LTFT (Bank 1)</div>
-                <div id="valLtft" style="font-size: 1.4rem; font-weight: 700; color: #FBBF24;">--</div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Throttle (TPS)</div>
+                <div id="valTps" style="font-size: 1.25rem; font-weight: 700; color: #E2E8F0;">--</div>
             </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 10px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.75rem; color: #A0AEC0; text-transform: uppercase;">Throttle Pos</div>
-                <div id="valTps" style="font-size: 1.4rem; font-weight: 700; color: #E2E8F0;">--</div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Coolant (ECT)</div>
+                <div id="valEct" style="font-size: 1.25rem; font-weight: 700; color: #F59E0B;">--</div>
             </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 10px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.75rem; color: #A0AEC0; text-transform: uppercase;">Battery Voltage</div>
-                <div id="valVolt" style="font-size: 1.4rem; font-weight: 700; color: #E2E8F0;">--</div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Intake Air (IAT)</div>
+                <div id="valIat" style="font-size: 1.25rem; font-weight: 700; color: #F59E0B;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">MAP Sensor</div>
+                <div id="valMap" style="font-size: 1.25rem; font-weight: 700; color: #00FF66;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">MAF Flow</div>
+                <div id="valMaf" style="font-size: 1.25rem; font-weight: 700; color: #00FF66;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">STFT Bank 1</div>
+                <div id="valStft" style="font-size: 1.25rem; font-weight: 700; color: #FBBF24;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">LTFT Bank 1</div>
+                <div id="valLtft" style="font-size: 1.25rem; font-weight: 700; color: #FBBF24;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">STFT Bank 2</div>
+                <div id="valStft2" style="font-size: 1.25rem; font-weight: 700; color: #FBBF24;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">LTFT Bank 2</div>
+                <div id="valLtft2" style="font-size: 1.25rem; font-weight: 700; color: #FBBF24;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Ign Timing</div>
+                <div id="valTime" style="font-size: 1.25rem; font-weight: 700; color: #EC4899;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">O2 B1S1 (V)</div>
+                <div id="valO21" style="font-size: 1.25rem; font-weight: 700; color: #A855F7;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">O2 B1S2 (V)</div>
+                <div id="valO22" style="font-size: 1.25rem; font-weight: 700; color: #A855F7;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Fuel Pressure</div>
+                <div id="valFp" style="font-size: 1.25rem; font-weight: 700; color: #10B981;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Baro Press</div>
+                <div id="valBaro" style="font-size: 1.25rem; font-weight: 700; color: #64748B;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Battery Volt</div>
+                <div id="valVolt" style="font-size: 1.25rem; font-weight: 700; color: #E2E8F0;">--</div>
             </div>
         </div>
     </div>
@@ -428,6 +477,7 @@ with tab1:
     let responseBuffer = "";
     let resolver = null;
     let isStreaming = false;
+    let loopCount = 0;
 
     function log(msg) {
         document.getElementById('bleStatus').innerText = "Status: " + msg;
@@ -503,70 +553,142 @@ with tab1:
 
     async function runLiveLoop() {
         while (isStreaming) {
-            // 1. RPM (010C)
-            let res = await sendCmd("010C");
+            loopCount++;
+
+            // --- 1. HIGH-FREQUENCY PIDs (Polled Every Loop) ---
+            let res = await sendCmd("010C"); // Engine RPM
             let clean = parseCleanHex(res);
             let m = clean.match(/410C([0-9A-F]{4})/);
             if (m) {
                 let a = parseInt(m[1].substr(0, 2), 16);
                 let b = parseInt(m[1].substr(2, 2), 16);
-                let rpm = Math.round(((a * 256) + b) / 4);
-                document.getElementById('valRpm').innerText = rpm + " RPM";
+                document.getElementById('valRpm').innerText = Math.round(((a * 256) + b) / 4) + " RPM";
             }
             if (!isStreaming) break;
 
-            // 2. Coolant Temp (0105)
-            res = await sendCmd("0105");
-            clean = parseCleanHex(res);
-            m = clean.match(/4105([0-9A-F]{2})/);
-            if (m) {
-                let a = parseInt(m[1], 16);
-                let degF = Math.round((a - 40) * 1.8 + 32);
-                document.getElementById('valEct').innerText = degF + " °F";
-            }
-            if (!isStreaming) break;
-
-            // 3. Short Term Fuel Trim (0106)
-            res = await sendCmd("0106");
-            clean = parseCleanHex(res);
-            m = clean.match(/4106([0-9A-F]{2})/);
-            if (m) {
-                let a = parseInt(m[1], 16);
-                let stft = (((a - 128) * 100) / 128).toFixed(1);
-                document.getElementById('valStft').innerText = (stft > 0 ? "+" : "") + stft + "%";
-            }
-            if (!isStreaming) break;
-
-            // 4. Long Term Fuel Trim (0107)
-            res = await sendCmd("0107");
-            clean = parseCleanHex(res);
-            m = clean.match(/4107([0-9A-F]{2})/);
-            if (m) {
-                let a = parseInt(m[1], 16);
-                let ltft = (((a - 128) * 100) / 128).toFixed(1);
-                document.getElementById('valLtft').innerText = (ltft > 0 ? "+" : "") + ltft + "%";
-            }
-            if (!isStreaming) break;
-
-            // 5. Throttle Position (0111)
-            res = await sendCmd("0111");
+            res = await sendCmd("0111"); // Throttle Position
             clean = parseCleanHex(res);
             m = clean.match(/4111([0-9A-F]{2})/);
-            if (m) {
-                let a = parseInt(m[1], 16);
-                let tps = Math.round((a * 100) / 255);
-                document.getElementById('valTps').innerText = tps + "%";
-            }
+            if (m) document.getElementById('valTps').innerText = Math.round((parseInt(m[1], 16) * 100) / 255) + "%";
             if (!isStreaming) break;
 
-            // 6. Battery Voltage (ATRV)
-            res = await sendCmd("ATRV");
-            let vMatch = res.match(/([0-9]+\.[0-9]+)/);
-            if (vMatch) {
-                document.getElementById('valVolt').innerText = vMatch[1] + "V";
+            res = await sendCmd("0104"); // Engine Load
+            clean = parseCleanHex(res);
+            m = clean.match(/4104([0-9A-F]{2})/);
+            if (m) document.getElementById('valLoad').innerText = Math.round((parseInt(m[1], 16) * 100) / 255) + "%";
+            if (!isStreaming) break;
+
+            res = await sendCmd("010B"); // MAP Sensor
+            clean = parseCleanHex(res);
+            m = clean.match(/410B([0-9A-F]{2})/);
+            if (m) document.getElementById('valMap').innerText = (parseInt(m[1], 16) * 0.145038).toFixed(1) + " PSI";
+            if (!isStreaming) break;
+
+            // --- 2. MEDIUM-FREQUENCY PIDs (Polled Every 2nd Loop) ---
+            if (loopCount % 2 === 0) {
+                res = await sendCmd("010D"); // Speed
+                clean = parseCleanHex(res);
+                m = clean.match(/410D([0-9A-F]{2})/);
+                if (m) document.getElementById('valSpd').innerText = Math.round(parseInt(m[1], 16) * 0.621371) + " MPH";
+                if (!isStreaming) break;
+
+                res = await sendCmd("0106"); // STFT Bank 1
+                clean = parseCleanHex(res);
+                m = clean.match(/4106([0-9A-F]{2})/);
+                if (m) {
+                    let stft = (((parseInt(m[1], 16) - 128) * 100) / 128).toFixed(1);
+                    document.getElementById('valStft').innerText = (stft > 0 ? "+" : "") + stft + "%";
+                }
+                if (!isStreaming) break;
+
+                res = await sendCmd("0107"); // LTFT Bank 1
+                clean = parseCleanHex(res);
+                m = clean.match(/4107([0-9A-F]{2})/);
+                if (m) {
+                    let ltft = (((parseInt(m[1], 16) - 128) * 100) / 128).toFixed(1);
+                    document.getElementById('valLtft').innerText = (ltft > 0 ? "+" : "") + ltft + "%";
+                }
+                if (!isStreaming) break;
+
+                res = await sendCmd("0110"); // MAF Air Flow
+                clean = parseCleanHex(res);
+                m = clean.match(/4110([0-9A-F]{4})/);
+                if (m) {
+                    let a = parseInt(m[1].substr(0, 2), 16);
+                    let b = parseInt(m[1].substr(2, 2), 16);
+                    document.getElementById('valMaf').innerText = (((a * 256) + b) / 100).toFixed(1) + " g/s";
+                }
+                if (!isStreaming) break;
+
+                res = await sendCmd("010E"); // Timing Advance
+                clean = parseCleanHex(res);
+                m = clean.match(/410E([0-9A-F]{2})/);
+                if (m) document.getElementById('valTime').innerText = ((parseInt(m[1], 16) / 2) - 64).toFixed(1) + "°";
+                if (!isStreaming) break;
+
+                res = await sendCmd("0114"); // O2 B1S1 Voltage
+                clean = parseCleanHex(res);
+                m = clean.match(/4114([0-9A-F]{2})/);
+                if (m) document.getElementById('valO21').innerText = (parseInt(m[1], 16) / 200).toFixed(2) + "V";
+                if (!isStreaming) break;
             }
 
-            await new Promise(r => setTimeout(r, 120));
+            // --- 3. LOWER-FREQUENCY PIDs (Polled Every 4th Loop) ---
+            if (loopCount % 4 === 0) {
+                res = await sendCmd("0105"); // Coolant Temp
+                clean = parseCleanHex(res);
+                m = clean.match(/4105([0-9A-F]{2})/);
+                if (m) document.getElementById('valEct').innerText = Math.round((parseInt(m[1], 16) - 40) * 1.8 + 32) + " °F";
+                if (!isStreaming) break;
+
+                res = await sendCmd("010F"); // Intake Air Temp
+                clean = parseCleanHex(res);
+                m = clean.match(/410F([0-9A-F]{2})/);
+                if (m) document.getElementById('valIat').innerText = Math.round((parseInt(m[1], 16) - 40) * 1.8 + 32) + " °F";
+                if (!isStreaming) break;
+
+                res = await sendCmd("0108"); // STFT Bank 2
+                clean = parseCleanHex(res);
+                m = clean.match(/4108([0-9A-F]{2})/);
+                if (m) {
+                    let s2 = (((parseInt(m[1], 16) - 128) * 100) / 128).toFixed(1);
+                    document.getElementById('valStft2').innerText = (s2 > 0 ? "+" : "") + s2 + "%";
+                }
+                if (!isStreaming) break;
+
+                res = await sendCmd("0109"); // LTFT Bank 2
+                clean = parseCleanHex(res);
+                m = clean.match(/4109([0-9A-F]{2})/);
+                if (m) {
+                    let l2 = (((parseInt(m[1], 16) - 128) * 100) / 128).toFixed(1);
+                    document.getElementById('valLtft2').innerText = (l2 > 0 ? "+" : "") + l2 + "%";
+                }
+                if (!isStreaming) break;
+
+                res = await sendCmd("0115"); // O2 B1S2 Voltage
+                clean = parseCleanHex(res);
+                m = clean.match(/4115([0-9A-F]{2})/);
+                if (m) document.getElementById('valO22').innerText = (parseInt(m[1], 16) / 200).toFixed(2) + "V";
+                if (!isStreaming) break;
+
+                res = await sendCmd("010A"); // Fuel Pressure
+                clean = parseCleanHex(res);
+                m = clean.match(/410A([0-9A-F]{2})/);
+                if (m) document.getElementById('valFp').innerText = Math.round(parseInt(m[1], 16) * 3 * 0.145038) + " PSI";
+                if (!isStreaming) break;
+
+                res = await sendCmd("0133"); // Barometric Pressure
+                clean = parseCleanHex(res);
+                m = clean.match(/4133([0-9A-F]{2})/);
+                if (m) document.getElementById('valBaro').innerText = (parseInt(m[1], 16) * 0.2953).toFixed(1) + " inHg";
+                if (!isStreaming) break;
+
+                res = await sendCmd("ATRV"); // Battery Voltage
+                let vMatch = res.match(/([0-9]+\.[0-9]+)/);
+                if (vMatch) document.getElementById('valVolt').innerText = vMatch[1] + "V";
+            }
+
+            await new Promise(r => setTimeout(r, 60));
         }
     }
 
@@ -663,7 +785,7 @@ with tab1:
     });
     </script>
     """
-  components.html(ble_bridge_html, height=450)
+  components.html(ble_bridge_html, height=580)
 
   # Customer Info Section
   st.markdown("#### 👤 Customer Information")
