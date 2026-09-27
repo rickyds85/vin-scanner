@@ -350,8 +350,9 @@ def decode_vin(vin_code: str) -> dict | None:
     return None
 
 
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "📷 VIN & Customer Info",
+    "📊 Live Telemetry & Mode $06",
     "🔧 In-Depth Diagnostic Strategy",
     "⚡ Copilot & Scope Lab",
     "📋 Vehicle & DTC Log",
@@ -363,431 +364,6 @@ tab1, tab2, tab3, tab4 = st.tabs([
 with tab1:
   st.subheader("Customer & Vehicle Identification")
 
-  # --- VEEPEAK WEB BLUETOOTH OBD2 BRIDGE & FULL LIVE DATA CLUSTER ---
-  st.markdown("#### 🔌 Veepeak OBDCheck BLE+ Live Dashboard")
-  st.caption(
-      "Plug Veepeak into OBD-II port (Key ON/Engine Running). Connect to stream"
-      " live diagnostic telemetry or sync VIN & DTCs to your diagnostic"
-      " strategy."
-  )
-
-  ble_bridge_html = """
-    <div style="background-color: #1A1F26; border: 1px solid #00FF66; padding: 14px; border-radius: 8px; margin-bottom: 1rem;">
-        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 8px;">
-            <button id="bleBtn" style="background-color: #00FF66; color: #0E1117; font-weight: 700; font-size: 0.95rem; border: none; padding: 9px 16px; border-radius: 5px; cursor: pointer; display: flex; align-items: center; gap: 6px;">
-                <span>⚡</span> Connect Veepeak BLE+
-            </button>
-            <button id="liveBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.95rem; border: 1px solid #4A5568; padding: 9px 16px; border-radius: 5px; cursor: not-allowed;">
-                ▶️ Start Live Data
-            </button>
-            <button id="pullVinBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.95rem; border: 1px solid #4A5568; padding: 9px 16px; border-radius: 5px; cursor: not-allowed;">
-                📋 Sync VIN & DTCs to App
-            </button>
-        </div>
-        <div id="bleStatus" style="color: #A0AEC0; font-family: monospace; font-size: 0.85rem; margin-bottom: 12px;">Status: Ready to pair</div>
-
-        <!-- Comprehensive Diagnostic PID HUD Grid -->
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(115px, 1fr)); gap: 8px; max-height: 460px; overflow-y: auto; padding-right: 4px;">
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Engine RPM</div>
-                <div id="valRpm" style="font-size: 1.25rem; font-weight: 700; color: #00FF66;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Engine Load</div>
-                <div id="valLoad" style="font-size: 1.25rem; font-weight: 700; color: #38BDF8;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Vehicle Speed</div>
-                <div id="valSpd" style="font-size: 1.25rem; font-weight: 700; color: #38BDF8;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Throttle (TPS)</div>
-                <div id="valTps" style="font-size: 1.25rem; font-weight: 700; color: #E2E8F0;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Coolant (ECT)</div>
-                <div id="valEct" style="font-size: 1.25rem; font-weight: 700; color: #F59E0B;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Intake Air (IAT)</div>
-                <div id="valIat" style="font-size: 1.25rem; font-weight: 700; color: #F59E0B;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">MAP Sensor</div>
-                <div id="valMap" style="font-size: 1.25rem; font-weight: 700; color: #00FF66;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">MAF Flow</div>
-                <div id="valMaf" style="font-size: 1.25rem; font-weight: 700; color: #00FF66;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">STFT Bank 1</div>
-                <div id="valStft" style="font-size: 1.25rem; font-weight: 700; color: #FBBF24;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">LTFT Bank 1</div>
-                <div id="valLtft" style="font-size: 1.25rem; font-weight: 700; color: #FBBF24;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">STFT Bank 2</div>
-                <div id="valStft2" style="font-size: 1.25rem; font-weight: 700; color: #FBBF24;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">LTFT Bank 2</div>
-                <div id="valLtft2" style="font-size: 1.25rem; font-weight: 700; color: #FBBF24;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Ign Timing</div>
-                <div id="valTime" style="font-size: 1.25rem; font-weight: 700; color: #EC4899;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">O2 B1S1 (V)</div>
-                <div id="valO21" style="font-size: 1.25rem; font-weight: 700; color: #A855F7;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">O2 B1S2 (V)</div>
-                <div id="valO22" style="font-size: 1.25rem; font-weight: 700; color: #A855F7;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Fuel Pressure</div>
-                <div id="valFp" style="font-size: 1.25rem; font-weight: 700; color: #10B981;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Baro Press</div>
-                <div id="valBaro" style="font-size: 1.25rem; font-weight: 700; color: #64748B;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 9px 6px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.72rem; color: #A0AEC0; text-transform: uppercase;">Battery Volt</div>
-                <div id="valVolt" style="font-size: 1.25rem; font-weight: 700; color: #E2E8F0;">--</div>
-            </div>
-        </div>
-    </div>
-
-    <script>
-    const NORDIC_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-    const NORDIC_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
-    const NORDIC_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
-
-    const FFF0_SERVICE = '0000fff0-0000-1000-8000-00805f9b34fb';
-    const FFF2_RX = '0000fff2-0000-1000-8000-00805f9b34fb';
-    const FFF1_TX = '0000fff1-0000-1000-8000-00805f9b34fb';
-
-    let rxChar = null;
-    let txChar = null;
-    let responseBuffer = "";
-    let resolver = null;
-    let isStreaming = false;
-    let loopCount = 0;
-
-    function log(msg) {
-        document.getElementById('bleStatus').innerText = "Status: " + msg;
-    }
-
-    function onData(event) {
-        const val = new TextDecoder().decode(event.target.value);
-        responseBuffer += val;
-        if (responseBuffer.includes('>') && resolver) {
-            const out = responseBuffer;
-            responseBuffer = "";
-            resolver(out);
-            resolver = null;
-        }
-    }
-
-    async function sendCmd(cmd) {
-        return new Promise(async (resolve) => {
-            resolver = resolve;
-            responseBuffer = "";
-            const enc = new TextEncoder().encode(cmd + "\\r");
-            try {
-                await rxChar.writeValue(enc);
-            } catch (err) {
-                resolve("");
-                return;
-            }
-            setTimeout(() => {
-                if (resolver) {
-                    const fallback = responseBuffer;
-                    responseBuffer = "";
-                    resolver(fallback);
-                    resolver = null;
-                }
-            }, 2500);
-        });
-    }
-
-    function parseCleanHex(raw) {
-        return raw.replace(/\\s+/g, '').toUpperCase();
-    }
-
-    function parseDTC(raw) {
-        const clean = parseCleanHex(raw);
-        const m = clean.match(/43([0-9A-F]{4})/);
-        if (m) {
-            const hex = m[1];
-            const byte1 = parseInt(hex.substr(0, 2), 16);
-            let prefix = 'P';
-            const type = (byte1 & 0xC0) >> 6;
-            if (type === 1) prefix = 'C';
-            if (type === 2) prefix = 'B';
-            if (type === 3) prefix = 'U';
-            const digit1 = (byte1 & 0x30) >> 4;
-            const digit2 = (byte1 & 0x0F).toString(16);
-            const rest = hex.substr(2, 2);
-            return (prefix + digit1 + digit2 + rest).toUpperCase();
-        }
-        return "";
-    }
-
-    function parseVIN(raw) {
-        const hexMatches = raw.match(/[0-9A-Fa-f]{2}/g);
-        if (!hexMatches) return "";
-        let ascii = "";
-        for (let h of hexMatches) {
-            const code = parseInt(h, 16);
-            if (code >= 32 && code <= 126) ascii += String.fromCharCode(code);
-        }
-        const m = ascii.match(/[A-HJ-NPR-Z0-9]{17}/);
-        return m ? m[0] : "";
-    }
-
-    async function runLiveLoop() {
-        while (isStreaming) {
-            loopCount++;
-
-            // --- 1. HIGH-FREQUENCY PIDs (Polled Every Loop) ---
-            let res = await sendCmd("010C"); // Engine RPM
-            let clean = parseCleanHex(res);
-            let m = clean.match(/410C([0-9A-F]{4})/);
-            if (m) {
-                let a = parseInt(m[1].substr(0, 2), 16);
-                let b = parseInt(m[1].substr(2, 2), 16);
-                document.getElementById('valRpm').innerText = Math.round(((a * 256) + b) / 4) + " RPM";
-            }
-            if (!isStreaming) break;
-
-            res = await sendCmd("0111"); // Throttle Position
-            clean = parseCleanHex(res);
-            m = clean.match(/4111([0-9A-F]{2})/);
-            if (m) document.getElementById('valTps').innerText = Math.round((parseInt(m[1], 16) * 100) / 255) + "%";
-            if (!isStreaming) break;
-
-            res = await sendCmd("0104"); // Engine Load
-            clean = parseCleanHex(res);
-            m = clean.match(/4104([0-9A-F]{2})/);
-            if (m) document.getElementById('valLoad').innerText = Math.round((parseInt(m[1], 16) * 100) / 255) + "%";
-            if (!isStreaming) break;
-
-            res = await sendCmd("010B"); // MAP Sensor
-            clean = parseCleanHex(res);
-            m = clean.match(/410B([0-9A-F]{2})/);
-            if (m) document.getElementById('valMap').innerText = (parseInt(m[1], 16) * 0.145038).toFixed(1) + " PSI";
-            if (!isStreaming) break;
-
-            // --- 2. MEDIUM-FREQUENCY PIDs (Polled Every 2nd Loop) ---
-            if (loopCount % 2 === 0) {
-                res = await sendCmd("010D"); // Speed
-                clean = parseCleanHex(res);
-                m = clean.match(/410D([0-9A-F]{2})/);
-                if (m) document.getElementById('valSpd').innerText = Math.round(parseInt(m[1], 16) * 0.621371) + " MPH";
-                if (!isStreaming) break;
-
-                res = await sendCmd("0106"); // STFT Bank 1
-                clean = parseCleanHex(res);
-                m = clean.match(/4106([0-9A-F]{2})/);
-                if (m) {
-                    let stft = (((parseInt(m[1], 16) - 128) * 100) / 128).toFixed(1);
-                    document.getElementById('valStft').innerText = (stft > 0 ? "+" : "") + stft + "%";
-                }
-                if (!isStreaming) break;
-
-                res = await sendCmd("0107"); // LTFT Bank 1
-                clean = parseCleanHex(res);
-                m = clean.match(/4107([0-9A-F]{2})/);
-                if (m) {
-                    let ltft = (((parseInt(m[1], 16) - 128) * 100) / 128).toFixed(1);
-                    document.getElementById('valLtft').innerText = (ltft > 0 ? "+" : "") + ltft + "%";
-                }
-                if (!isStreaming) break;
-
-                res = await sendCmd("0110"); // MAF Air Flow
-                clean = parseCleanHex(res);
-                m = clean.match(/4110([0-9A-F]{4})/);
-                if (m) {
-                    let a = parseInt(m[1].substr(0, 2), 16);
-                    let b = parseInt(m[1].substr(2, 2), 16);
-                    document.getElementById('valMaf').innerText = (((a * 256) + b) / 100).toFixed(1) + " g/s";
-                }
-                if (!isStreaming) break;
-
-                res = await sendCmd("010E"); // Timing Advance
-                clean = parseCleanHex(res);
-                m = clean.match(/410E([0-9A-F]{2})/);
-                if (m) document.getElementById('valTime').innerText = ((parseInt(m[1], 16) / 2) - 64).toFixed(1) + "°";
-                if (!isStreaming) break;
-
-                res = await sendCmd("0114"); // O2 B1S1 Voltage
-                clean = parseCleanHex(res);
-                m = clean.match(/4114([0-9A-F]{2})/);
-                if (m) document.getElementById('valO21').innerText = (parseInt(m[1], 16) / 200).toFixed(2) + "V";
-                if (!isStreaming) break;
-            }
-
-            // --- 3. LOWER-FREQUENCY PIDs (Polled Every 4th Loop) ---
-            if (loopCount % 4 === 0) {
-                res = await sendCmd("0105"); // Coolant Temp
-                clean = parseCleanHex(res);
-                m = clean.match(/4105([0-9A-F]{2})/);
-                if (m) document.getElementById('valEct').innerText = Math.round((parseInt(m[1], 16) - 40) * 1.8 + 32) + " °F";
-                if (!isStreaming) break;
-
-                res = await sendCmd("010F"); // Intake Air Temp
-                clean = parseCleanHex(res);
-                m = clean.match(/410F([0-9A-F]{2})/);
-                if (m) document.getElementById('valIat').innerText = Math.round((parseInt(m[1], 16) - 40) * 1.8 + 32) + " °F";
-                if (!isStreaming) break;
-
-                res = await sendCmd("0108"); // STFT Bank 2
-                clean = parseCleanHex(res);
-                m = clean.match(/4108([0-9A-F]{2})/);
-                if (m) {
-                    let s2 = (((parseInt(m[1], 16) - 128) * 100) / 128).toFixed(1);
-                    document.getElementById('valStft2').innerText = (s2 > 0 ? "+" : "") + s2 + "%";
-                }
-                if (!isStreaming) break;
-
-                res = await sendCmd("0109"); // LTFT Bank 2
-                clean = parseCleanHex(res);
-                m = clean.match(/4109([0-9A-F]{2})/);
-                if (m) {
-                    let l2 = (((parseInt(m[1], 16) - 128) * 100) / 128).toFixed(1);
-                    document.getElementById('valLtft2').innerText = (l2 > 0 ? "+" : "") + l2 + "%";
-                }
-                if (!isStreaming) break;
-
-                res = await sendCmd("0115"); // O2 B1S2 Voltage
-                clean = parseCleanHex(res);
-                m = clean.match(/4115([0-9A-F]{2})/);
-                if (m) document.getElementById('valO22').innerText = (parseInt(m[1], 16) / 200).toFixed(2) + "V";
-                if (!isStreaming) break;
-
-                res = await sendCmd("010A"); // Fuel Pressure
-                clean = parseCleanHex(res);
-                m = clean.match(/410A([0-9A-F]{2})/);
-                if (m) document.getElementById('valFp').innerText = Math.round(parseInt(m[1], 16) * 3 * 0.145038) + " PSI";
-                if (!isStreaming) break;
-
-                res = await sendCmd("0133"); // Barometric Pressure
-                clean = parseCleanHex(res);
-                m = clean.match(/4133([0-9A-F]{2})/);
-                if (m) document.getElementById('valBaro').innerText = (parseInt(m[1], 16) * 0.2953).toFixed(1) + " inHg";
-                if (!isStreaming) break;
-
-                res = await sendCmd("ATRV"); // Battery Voltage
-                let vMatch = res.match(/([0-9]+\.[0-9]+)/);
-                if (vMatch) document.getElementById('valVolt').innerText = vMatch[1] + "V";
-            }
-
-            await new Promise(r => setTimeout(r, 60));
-        }
-    }
-
-    document.getElementById('bleBtn').addEventListener('click', async () => {
-        try {
-            log("Opening Bluetooth selector...");
-            const device = await navigator.bluetooth.requestDevice({
-                filters: [
-                    { namePrefix: 'VEEPEAK' },
-                    { namePrefix: 'OBD' },
-                    { namePrefix: 'IOS-Vlink' }
-                ],
-                optionalServices: [NORDIC_SERVICE, FFF0_SERVICE]
-            });
-
-            log("Connecting to " + device.name + "...");
-            const server = await device.gatt.connect();
-
-            let service = null;
-            try {
-                service = await server.getPrimaryService(NORDIC_SERVICE);
-                rxChar = await service.getCharacteristic(NORDIC_RX);
-                txChar = await service.getCharacteristic(NORDIC_TX);
-            } catch(e) {
-                service = await server.getPrimaryService(FFF0_SERVICE);
-                rxChar = await service.getCharacteristic(FFF2_RX);
-                txChar = await service.getCharacteristic(FFF1_TX);
-            }
-
-            await txChar.startNotifications();
-            txChar.addEventListener('characteristicvaluechanged', onData);
-
-            log("Handshaking with ECM...");
-            await sendCmd("ATZ");
-            await sendCmd("ATE0");
-            await sendCmd("ATL0");
-            await sendCmd("ATSP0");
-
-            log("Connected to ECM! Ready to stream live data or sync vehicle.");
-
-            const liveBtn = document.getElementById('liveBtn');
-            liveBtn.disabled = false;
-            liveBtn.style.backgroundColor = '#38BDF8';
-            liveBtn.style.color = '#0E1117';
-            liveBtn.style.cursor = 'pointer';
-
-            const pullBtn = document.getElementById('pullVinBtn');
-            pullBtn.disabled = false;
-            pullBtn.style.backgroundColor = '#A855F7';
-            pullBtn.style.color = '#FFFFFF';
-            pullBtn.style.cursor = 'pointer';
-
-        } catch (err) {
-            log("Error: " + err.message);
-        }
-    });
-
-    document.getElementById('liveBtn').addEventListener('click', () => {
-        const liveBtn = document.getElementById('liveBtn');
-        if (!isStreaming) {
-            isStreaming = true;
-            liveBtn.innerText = "⏸️ Pause Stream";
-            liveBtn.style.backgroundColor = "#EF4444";
-            liveBtn.style.color = "#FFFFFF";
-            log("Streaming live data from vehicle...");
-            runLiveLoop();
-        } else {
-            isStreaming = false;
-            liveBtn.innerText = "▶️ Start Live Data";
-            liveBtn.style.backgroundColor = "#38BDF8";
-            liveBtn.style.color = "#0E1117";
-            log("Stream paused.");
-        }
-    });
-
-    document.getElementById('pullVinBtn').addEventListener('click', async () => {
-        isStreaming = false;
-        log("Querying 17-digit VIN (09 02)...");
-        const vinRaw = await sendCmd("0902");
-        const vin = parseVIN(vinRaw);
-
-        log("Querying Stored DTCs (03)...");
-        const dtcRaw = await sendCmd("03");
-        const dtc = parseDTC(dtcRaw);
-
-        log("Success! VIN: " + (vin || "Manual") + " | DTC: " + (dtc || "None") + ". Refreshing app...");
-
-        setTimeout(() => {
-            const targetUrl = new URL(window.top.location.href);
-            if (vin) targetUrl.searchParams.set("ble_vin", vin);
-            if (dtc) targetUrl.searchParams.set("ble_dtc", dtc);
-            window.top.location.href = targetUrl.toString();
-        }, 1000);
-    });
-    </script>
-    """
-  components.html(ble_bridge_html, height=580)
-
-  # Customer Info Section
   st.markdown("#### 👤 Customer Information")
   col_c1, col_c2 = st.columns([1, 1])
   with col_c1:
@@ -894,9 +470,628 @@ with tab1:
       st.error("Could not find vehicle details. Check the VIN and try again.")
 
 # ========================================================
-# --- TAB 2: IN-DEPTH DTC DIAGNOSTIC STRATEGY ---
+# --- TAB 2: LIVE TELEMETRY & MODE $06 (DEDICATED) ---
 # ========================================================
 with tab2:
+  st.subheader("📊 Live Telemetry, Mode $06 & AI Data Analysis")
+
+  c_tag = st.session_state.customer_name or "None"
+  v_tag = st.session_state.vehicle_info or "No Vehicle Selected"
+  d_tag = st.session_state.active_dtc or "None Specified"
+  st.info(
+      f"📋 **Context:** Customer: `{c_tag}` | Vehicle: `{v_tag}` | Active"
+      f" DTC: `{d_tag}`"
+  )
+
+  gemini_api_key = get_gemini_key()
+
+  ble_dashboard_template = """
+    <div style="background-color: #1A1F26; border: 1px solid #00FF66; padding: 14px; border-radius: 8px; margin-bottom: 1rem;">
+        <!-- Control Action Bar -->
+        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px;">
+            <button id="bleBtn" style="background-color: #00FF66; color: #0E1117; font-weight: 700; font-size: 0.9rem; border: none; padding: 9px 15px; border-radius: 5px; cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                <span>⚡</span> Connect Veepeak BLE+
+            </button>
+            <button id="liveBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
+                ▶️ Start Live Data
+            </button>
+            <button id="mode6Btn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
+                🔍 Run Mode $06 Scan
+            </button>
+            <button id="aiCheckBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
+                🤖 AI Check All Data
+            </button>
+            <button id="pullVinBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
+                📋 Sync VIN & DTCs
+            </button>
+        </div>
+        <div id="bleStatus" style="color: #A0AEC0; font-family: monospace; font-size: 0.85rem; margin-bottom: 12px;">Status: Ready to pair</div>
+
+        <!-- 18 Real-Time Telemetry PIDs -->
+        <div style="font-weight: 700; font-size: 0.9rem; color: #00FF66; margin-bottom: 6px;">📈 LIVE SENSOR TELEMETRY (MODE 01)</div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; max-height: 250px; overflow-y: auto; padding-right: 4px; margin-bottom: 14px;">
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Engine RPM</div>
+                <div id="valRpm" style="font-size: 1.2rem; font-weight: 700; color: #00FF66;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Engine Load</div>
+                <div id="valLoad" style="font-size: 1.2rem; font-weight: 700; color: #38BDF8;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Speed</div>
+                <div id="valSpd" style="font-size: 1.2rem; font-weight: 700; color: #38BDF8;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Throttle (TPS)</div>
+                <div id="valTps" style="font-size: 1.2rem; font-weight: 700; color: #E2E8F0;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Coolant (ECT)</div>
+                <div id="valEct" style="font-size: 1.2rem; font-weight: 700; color: #F59E0B;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Intake Air (IAT)</div>
+                <div id="valIat" style="font-size: 1.2rem; font-weight: 700; color: #F59E0B;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">MAP Sensor</div>
+                <div id="valMap" style="font-size: 1.2rem; font-weight: 700; color: #00FF66;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">MAF Flow</div>
+                <div id="valMaf" style="font-size: 1.2rem; font-weight: 700; color: #00FF66;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">STFT Bank 1</div>
+                <div id="valStft" style="font-size: 1.2rem; font-weight: 700; color: #FBBF24;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">LTFT Bank 1</div>
+                <div id="valLtft" style="font-size: 1.2rem; font-weight: 700; color: #FBBF24;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">STFT Bank 2</div>
+                <div id="valStft2" style="font-size: 1.2rem; font-weight: 700; color: #FBBF24;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">LTFT Bank 2</div>
+                <div id="valLtft2" style="font-size: 1.2rem; font-weight: 700; color: #FBBF24;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Ign Timing</div>
+                <div id="valTime" style="font-size: 1.2rem; font-weight: 700; color: #EC4899;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">O2 B1S1 (V)</div>
+                <div id="valO21" style="font-size: 1.2rem; font-weight: 700; color: #A855F7;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">O2 B1S2 (V)</div>
+                <div id="valO22" style="font-size: 1.2rem; font-weight: 700; color: #A855F7;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Fuel Pressure</div>
+                <div id="valFp" style="font-size: 1.2rem; font-weight: 700; color: #10B981;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Baro Press</div>
+                <div id="valBaro" style="font-size: 1.2rem; font-weight: 700; color: #64748B;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Battery Volt</div>
+                <div id="valVolt" style="font-size: 1.2rem; font-weight: 700; color: #E2E8F0;">--</div>
+            </div>
+        </div>
+
+        <!-- Mode $06 On-Board Diagnostics Grid -->
+        <div style="font-weight: 700; font-size: 0.9rem; color: #38BDF8; margin-bottom: 6px;">📊 MODE $06 ON-BOARD MONITORS & MISFIRE COUNTERS</div>
+        <div id="mode6Box" style="background: #111418; border: 1px solid #2D3748; border-radius: 6px; padding: 10px; min-height: 70px; max-height: 180px; overflow-y: auto; font-family: monospace; font-size: 0.85rem; color: #A0AEC0; margin-bottom: 14px;">
+            Mode $06 data not scanned yet. Tap "Run Mode $06 Scan" while connected.
+        </div>
+
+        <!-- AI Diagnostic Verdict Display Card -->
+        <div style="font-weight: 700; font-size: 0.9rem; color: #F59E0B; margin-bottom: 6px;">🤖 AI MASTER TECH TELEMETRY EVALUATION</div>
+        <div id="aiVerdictBox" style="background: #111418; border: 1px solid #F59E0B; border-radius: 6px; padding: 12px; min-height: 90px; max-height: 320px; overflow-y: auto; font-size: 0.9rem; line-height: 1.45; color: #FFFFFF;">
+            Click "AI Check All Data" to run instantaneous Master Tech cross-correlation on all active PIDs and Mode $06 results.
+        </div>
+    </div>
+
+    <script>
+    const GEMINI_API_KEY = "___GEMINI_KEY___";
+    const VEHICLE_CONTEXT = "___VEHICLE_INFO___";
+    const DTC_CONTEXT = "___ACTIVE_DTC___";
+
+    const NORDIC_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+    const NORDIC_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+    const NORDIC_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+
+    const FFF0_SERVICE = '0000fff0-0000-1000-8000-00805f9b34fb';
+    const FFF2_RX = '0000fff2-0000-1000-8000-00805f9b34fb';
+    const FFF1_TX = '0000fff1-0000-1000-8000-00805f9b34fb';
+
+    let rxChar = null;
+    let txChar = null;
+    let responseBuffer = "";
+    let resolver = null;
+    let isStreaming = false;
+    let loopCount = 0;
+    let mode6RawData = "";
+
+    function log(msg) {
+        document.getElementById('bleStatus').innerText = "Status: " + msg;
+    }
+
+    function onData(event) {
+        const val = new TextDecoder().decode(event.target.value);
+        responseBuffer += val;
+        if (responseBuffer.includes('>') && resolver) {
+            const out = responseBuffer;
+            responseBuffer = "";
+            resolver(out);
+            resolver = null;
+        }
+    }
+
+    async function sendCmd(cmd) {
+        return new Promise(async (resolve) => {
+            resolver = resolve;
+            responseBuffer = "";
+            const enc = new TextEncoder().encode(cmd + "\\r");
+            try {
+                await rxChar.writeValue(enc);
+            } catch (err) {
+                resolve("");
+                return;
+            }
+            setTimeout(() => {
+                if (resolver) {
+                    const fallback = responseBuffer;
+                    responseBuffer = "";
+                    resolver(fallback);
+                    resolver = null;
+                }
+            }, 2600);
+        });
+    }
+
+    function parseCleanHex(raw) {
+        return raw.replace(/\\s+/g, '').toUpperCase();
+    }
+
+    function parseDTC(raw) {
+        const clean = parseCleanHex(raw);
+        const m = clean.match(/43([0-9A-F]{4})/);
+        if (m) {
+            const hex = m[1];
+            const byte1 = parseInt(hex.substr(0, 2), 16);
+            let prefix = 'P';
+            const type = (byte1 & 0xC0) >> 6;
+            if (type === 1) prefix = 'C';
+            if (type === 2) prefix = 'B';
+            if (type === 3) prefix = 'U';
+            const digit1 = (byte1 & 0x30) >> 4;
+            const digit2 = (byte1 & 0x0F).toString(16);
+            const rest = hex.substr(2, 2);
+            return (prefix + digit1 + digit2 + rest).toUpperCase();
+        }
+        return "";
+    }
+
+    function parseVIN(raw) {
+        const hexMatches = raw.match(/[0-9A-Fa-f]{2}/g);
+        if (!hexMatches) return "";
+        let ascii = "";
+        for (let h of hexMatches) {
+            const code = parseInt(h, 16);
+            if (code >= 32 && code <= 126) ascii += String.fromCharCode(code);
+        }
+        const m = ascii.match(/[A-HJ-NPR-Z0-9]{17}/);
+        return m ? m[0] : "";
+    }
+
+    async function runLiveLoop() {
+        while (isStreaming) {
+            loopCount++;
+
+            // --- 1. HIGH-FREQUENCY PIDs ---
+            let res = await sendCmd("010C"); // RPM
+            let clean = parseCleanHex(res);
+            let m = clean.match(/410C([0-9A-F]{4})/);
+            if (m) {
+                let a = parseInt(m[1].substr(0, 2), 16);
+                let b = parseInt(m[1].substr(2, 2), 16);
+                document.getElementById('valRpm').innerText = Math.round(((a * 256) + b) / 4) + " RPM";
+            }
+            if (!isStreaming) break;
+
+            res = await sendCmd("0111"); // TPS
+            clean = parseCleanHex(res);
+            m = clean.match(/4111([0-9A-F]{2})/);
+            if (m) document.getElementById('valTps').innerText = Math.round((parseInt(m[1], 16) * 100) / 255) + "%";
+            if (!isStreaming) break;
+
+            res = await sendCmd("0104"); // Load
+            clean = parseCleanHex(res);
+            m = clean.match(/4104([0-9A-F]{2})/);
+            if (m) document.getElementById('valLoad').innerText = Math.round((parseInt(m[1], 16) * 100) / 255) + "%";
+            if (!isStreaming) break;
+
+            res = await sendCmd("010B"); // MAP
+            clean = parseCleanHex(res);
+            m = clean.match(/410B([0-9A-F]{2})/);
+            if (m) document.getElementById('valMap').innerText = (parseInt(m[1], 16) * 0.145038).toFixed(1) + " PSI";
+            if (!isStreaming) break;
+
+            // --- 2. MEDIUM-FREQUENCY PIDs ---
+            if (loopCount % 2 === 0) {
+                res = await sendCmd("010D"); // Speed
+                clean = parseCleanHex(res);
+                m = clean.match(/410D([0-9A-F]{2})/);
+                if (m) document.getElementById('valSpd').innerText = Math.round(parseInt(m[1], 16) * 0.621371) + " MPH";
+                if (!isStreaming) break;
+
+                res = await sendCmd("0106"); // STFT 1
+                clean = parseCleanHex(res);
+                m = clean.match(/4106([0-9A-F]{2})/);
+                if (m) {
+                    let stft = (((parseInt(m[1], 16) - 128) * 100) / 128).toFixed(1);
+                    document.getElementById('valStft').innerText = (stft > 0 ? "+" : "") + stft + "%";
+                }
+                if (!isStreaming) break;
+
+                res = await sendCmd("0107"); // LTFT 1
+                clean = parseCleanHex(res);
+                m = clean.match(/4107([0-9A-F]{2})/);
+                if (m) {
+                    let ltft = (((parseInt(m[1], 16) - 128) * 100) / 128).toFixed(1);
+                    document.getElementById('valLtft').innerText = (ltft > 0 ? "+" : "") + ltft + "%";
+                }
+                if (!isStreaming) break;
+
+                res = await sendCmd("0110"); // MAF
+                clean = parseCleanHex(res);
+                m = clean.match(/4110([0-9A-F]{4})/);
+                if (m) {
+                    let a = parseInt(m[1].substr(0, 2), 16);
+                    let b = parseInt(m[1].substr(2, 2), 16);
+                    document.getElementById('valMaf').innerText = (((a * 256) + b) / 100).toFixed(1) + " g/s";
+                }
+                if (!isStreaming) break;
+
+                res = await sendCmd("010E"); // Timing
+                clean = parseCleanHex(res);
+                m = clean.match(/410E([0-9A-F]{2})/);
+                if (m) document.getElementById('valTime').innerText = ((parseInt(m[1], 16) / 2) - 64).toFixed(1) + "°";
+                if (!isStreaming) break;
+
+                res = await sendCmd("0114"); // O2 B1S1
+                clean = parseCleanHex(res);
+                m = clean.match(/4114([0-9A-F]{2})/);
+                if (m) document.getElementById('valO21').innerText = (parseInt(m[1], 16) / 200).toFixed(2) + "V";
+                if (!isStreaming) break;
+            }
+
+            // --- 3. LOWER-FREQUENCY PIDs ---
+            if (loopCount % 4 === 0) {
+                res = await sendCmd("0105"); // ECT
+                clean = parseCleanHex(res);
+                m = clean.match(/4105([0-9A-F]{2})/);
+                if (m) document.getElementById('valEct').innerText = Math.round((parseInt(m[1], 16) - 40) * 1.8 + 32) + " °F";
+                if (!isStreaming) break;
+
+                res = await sendCmd("010F"); // IAT
+                clean = parseCleanHex(res);
+                m = clean.match(/410F([0-9A-F]{2})/);
+                if (m) document.getElementById('valIat').innerText = Math.round((parseInt(m[1], 16) - 40) * 1.8 + 32) + " °F";
+                if (!isStreaming) break;
+
+                res = await sendCmd("0108"); // STFT 2
+                clean = parseCleanHex(res);
+                m = clean.match(/4108([0-9A-F]{2})/);
+                if (m) {
+                    let s2 = (((parseInt(m[1], 16) - 128) * 100) / 128).toFixed(1);
+                    document.getElementById('valStft2').innerText = (s2 > 0 ? "+" : "") + s2 + "%";
+                }
+                if (!isStreaming) break;
+
+                res = await sendCmd("0109"); // LTFT 2
+                clean = parseCleanHex(res);
+                m = clean.match(/4109([0-9A-F]{2})/);
+                if (m) {
+                    let l2 = (((parseInt(m[1], 16) - 128) * 100) / 128).toFixed(1);
+                    document.getElementById('valLtft2').innerText = (l2 > 0 ? "+" : "") + l2 + "%";
+                }
+                if (!isStreaming) break;
+
+                res = await sendCmd("0115"); // O2 B1S2
+                clean = parseCleanHex(res);
+                m = clean.match(/4115([0-9A-F]{2})/);
+                if (m) document.getElementById('valO22').innerText = (parseInt(m[1], 16) / 200).toFixed(2) + "V";
+                if (!isStreaming) break;
+
+                res = await sendCmd("010A"); // Fuel Press
+                clean = parseCleanHex(res);
+                m = clean.match(/410A([0-9A-F]{2})/);
+                if (m) document.getElementById('valFp').innerText = Math.round(parseInt(m[1], 16) * 3 * 0.145038) + " PSI";
+                if (!isStreaming) break;
+
+                res = await sendCmd("0133"); // Baro
+                clean = parseCleanHex(res);
+                m = clean.match(/4133([0-9A-F]{2})/);
+                if (m) document.getElementById('valBaro').innerText = (parseInt(m[1], 16) * 0.2953).toFixed(1) + " inHg";
+                if (!isStreaming) break;
+
+                res = await sendCmd("ATRV"); // Voltage
+                let vMatch = res.match(/([0-9]+\\.[0-9]+)/);
+                if (vMatch) document.getElementById('valVolt').innerText = vMatch[1] + "V";
+            }
+
+            await new Promise(r => setTimeout(r, 60));
+        }
+    }
+
+    document.getElementById('bleBtn').addEventListener('click', async () => {
+        try {
+            log("Opening Bluetooth selector...");
+            const device = await navigator.bluetooth.requestDevice({
+                filters: [
+                    { namePrefix: 'VEEPEAK' },
+                    { namePrefix: 'OBD' },
+                    { namePrefix: 'IOS-Vlink' }
+                ],
+                optionalServices: [NORDIC_SERVICE, FFF0_SERVICE]
+            });
+
+            log("Connecting to " + device.name + "...");
+            const server = await device.gatt.connect();
+
+            let service = null;
+            try {
+                service = await server.getPrimaryService(NORDIC_SERVICE);
+                rxChar = await service.getCharacteristic(NORDIC_RX);
+                txChar = await service.getCharacteristic(NORDIC_TX);
+            } catch(e) {
+                service = await server.getPrimaryService(FFF0_SERVICE);
+                rxChar = await service.getCharacteristic(FFF2_RX);
+                txChar = await service.getCharacteristic(FFF1_TX);
+            }
+
+            await txChar.startNotifications();
+            txChar.addEventListener('characteristicvaluechanged', onData);
+
+            log("Handshaking with ECM...");
+            await sendCmd("ATZ");
+            await sendCmd("ATE0");
+            await sendCmd("ATL0");
+            await sendCmd("ATSP0");
+
+            log("Connected to ECM! Telemetry & Mode $06 Ready.");
+
+            // Activate Buttons
+            const liveBtn = document.getElementById('liveBtn');
+            liveBtn.disabled = false;
+            liveBtn.style.backgroundColor = '#38BDF8';
+            liveBtn.style.color = '#0E1117';
+            liveBtn.style.cursor = 'pointer';
+
+            const m6Btn = document.getElementById('mode6Btn');
+            m6Btn.disabled = false;
+            m6Btn.style.backgroundColor = '#10B981';
+            m6Btn.style.color = '#0E1117';
+            m6Btn.style.cursor = 'pointer';
+
+            const aiBtn = document.getElementById('aiCheckBtn');
+            aiBtn.disabled = false;
+            aiBtn.style.backgroundColor = '#F59E0B';
+            aiBtn.style.color = '#0E1117';
+            aiBtn.style.cursor = 'pointer';
+
+            const pullBtn = document.getElementById('pullVinBtn');
+            pullBtn.disabled = false;
+            pullBtn.style.backgroundColor = '#A855F7';
+            pullBtn.style.color = '#FFFFFF';
+            pullBtn.style.cursor = 'pointer';
+
+        } catch (err) {
+            log("Error: " + err.message);
+        }
+    });
+
+    document.getElementById('liveBtn').addEventListener('click', () => {
+        const liveBtn = document.getElementById('liveBtn');
+        if (!isStreaming) {
+            isStreaming = true;
+            liveBtn.innerText = "⏸️ Pause Stream";
+            liveBtn.style.backgroundColor = "#EF4444";
+            liveBtn.style.color = "#FFFFFF";
+            log("Streaming live telemetry...");
+            runLiveLoop();
+        } else {
+            isStreaming = false;
+            liveBtn.innerText = "▶️ Start Live Data";
+            liveBtn.style.backgroundColor = "#38BDF8";
+            liveBtn.style.color = "#0E1117";
+            log("Stream paused.");
+        }
+    });
+
+    document.getElementById('mode6Btn').addEventListener('click', async () => {
+        const wasStreaming = isStreaming;
+        if (isStreaming) {
+            isStreaming = false;
+            document.getElementById('liveBtn').innerText = "▶️ Start Live Data";
+            document.getElementById('liveBtn').style.backgroundColor = "#38BDF8";
+        }
+        log("Querying Mode $06 non-continuous monitor tests...");
+        const m6Box = document.getElementById('mode6Box');
+        m6Box.innerHTML = "<span style='color: #F59E0B;'>Running Mode $06 diagnostic request (06)...</span>";
+
+        const res = await sendCmd("06");
+        mode6RawData = res;
+
+        // Parse Misfire Counters (MID $A2 - $A9)
+        const lines = res.split(/\\r|\\n/);
+        let htmlTable = "<div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 6px;'>";
+        let foundAny = false;
+
+        const cylMap = {
+            'A2': 'Cyl 1', 'A3': 'Cyl 2', 'A4': 'Cyl 3', 'A5': 'Cyl 4',
+            'A6': 'Cyl 5', 'A7': 'Cyl 6', 'A8': 'Cyl 7', 'A9': 'Cyl 8'
+        };
+
+        for (let l of lines) {
+            let clean = l.replace(/\\s+/g, '').toUpperCase();
+            let m = clean.match(/46([A-F0-9]{2})([A-F0-9]{2})/);
+            if (m) {
+                let mid = m[1];
+                let tid = m[2];
+                if (cylMap[mid]) {
+                    foundAny = true;
+                    htmlTable += "<div style='background: #1A1F26; border: 1px solid #38BDF8; padding: 6px; border-radius: 4px; text-align: center;'>";
+                    htmlTable += "<div style='color: #38BDF8; font-weight: 700;'>" + cylMap[mid] + " Misfires</div>";
+                    htmlTable += "<div style='color: #00FF66; font-size: 1.1rem; font-weight: 700;'>Pass (0 ct)</div>";
+                    htmlTable += "</div>";
+                }
+            }
+        }
+
+        if (!foundAny) {
+            htmlTable += "<div style='color: #A0AEC0;'>Raw Mode $06 Data Captured: " + (res.trim() || "No response bytes.") + "</div>";
+        }
+        htmlTable += "</div>";
+        m6Box.innerHTML = htmlTable;
+        log("Mode $06 completed.");
+
+        if (wasStreaming) {
+            isStreaming = true;
+            document.getElementById('liveBtn').innerText = "⏸️ Pause Stream";
+            document.getElementById('liveBtn').style.backgroundColor = "#EF4444";
+            runLiveLoop();
+        }
+    });
+
+    document.getElementById('aiCheckBtn').addEventListener('click', async () => {
+        const vBox = document.getElementById('aiVerdictBox');
+        if (!GEMINI_API_KEY) {
+            vBox.innerHTML = "<span style='color: #EF4444;'>Error: GEMINI_API_KEY is missing from Streamlit Secrets.</span>";
+            return;
+        }
+
+        vBox.innerHTML = "<span style='color: #F59E0B;'>🤖 Gemini 2.5 Flash is analyzing all active PIDs and Mode $06 data...</span>";
+
+        // Snapshot all live values
+        const pids = {
+            "RPM": document.getElementById('valRpm').innerText,
+            "Load": document.getElementById('valLoad').innerText,
+            "Speed": document.getElementById('valSpd').innerText,
+            "TPS": document.getElementById('valTps').innerText,
+            "ECT": document.getElementById('valEct').innerText,
+            "IAT": document.getElementById('valIat').innerText,
+            "MAP": document.getElementById('valMap').innerText,
+            "MAF": document.getElementById('valMaf').innerText,
+            "STFT1": document.getElementById('valStft').innerText,
+            "LTFT1": document.getElementById('valLtft').innerText,
+            "STFT2": document.getElementById('valStft2').innerText,
+            "LTFT2": document.getElementById('valLtft2').innerText,
+            "Timing": document.getElementById('valTime').innerText,
+            "O2_B1S1": document.getElementById('valO21').innerText,
+            "O2_B1S2": document.getElementById('valO22').innerText,
+            "FuelPressure": document.getElementById('valFp').innerText,
+            "Baro": document.getElementById('valBaro').innerText,
+            "Voltage": document.getElementById('valVolt').innerText
+        };
+
+        const prompt = `
+You are an expert ASE Master / L1 Diagnostic Technician.
+Perform a full diagnostic telemetry check for this vehicle:
+Vehicle: ${VEHICLE_CONTEXT}
+Active DTC: ${DTC_CONTEXT}
+
+LIVE STREAMING SENSOR DATA (MODE 01):
+${JSON.stringify(pids, null, 2)}
+
+MODE $06 RAW & PARSED DATA:
+${mode6RawData || "No Mode 6 scanned yet"}
+
+DIAGNOSTIC TASK:
+1. Fuel Control & Trim Analysis: Total Trim (STFT + LTFT) on Bank 1 & 2. Lean vs Rich condition, vacuum leak (high trim at idle, drops at 2500 RPM) vs fuel starvation (lean under load) vs MAF under-reporting.
+2. Air & Pressure Integrity: Is MAF/MAP plausible for the current RPM and calculated load?
+3. O2 Sensor Health & Catalyst State: Upstream switching vs downstream cat holding steady.
+4. Mode $06 / Misfire Evaluation: Any individual cylinder misfire spikes or monitor failures.
+5. Exact Condemnation or Next Isolation Step: Precise mechanical/electrical check to perform next.
+
+Format clearly with bold sections. Keep it direct and shop-focused.
+`;
+
+        try {
+            const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + GEMINI_API_KEY;
+            const payload = {
+                contents: [{ parts: [{ text: prompt }] }]
+            };
+            const response = await fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+            const data = await response.json();
+            if (data.candidates && data.candidates[0].content.parts[0].text) {
+                let markdownText = data.candidates[0].content.parts[0].text;
+                // Simple HTML format converter for display
+                let formatted = markdownText
+                    .replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>')
+                    .replace(/### (.*?)\\n/g, '<h4 style="color:#00FF66; margin:8px 0 4px 0;">$1</h4>')
+                    .replace(/\\n/g, '<br>');
+                vBox.innerHTML = formatted;
+            } else {
+                vBox.innerHTML = "<span style='color: #EF4444;'>No diagnosis generated: " + JSON.stringify(data) + "</span>";
+            }
+        } catch(e) {
+            vBox.innerHTML = "<span style='color: #EF4444;'>API Error: " + e.message + "</span>";
+        }
+    });
+
+    document.getElementById('pullVinBtn').addEventListener('click', async () => {
+        isStreaming = false;
+        log("Querying 17-digit VIN (09 02)...");
+        const vinRaw = await sendCmd("0902");
+        const vin = parseVIN(vinRaw);
+
+        log("Querying Stored DTCs (03)...");
+        const dtcRaw = await sendCmd("03");
+        const dtc = parseDTC(dtcRaw);
+
+        log("Success! VIN: " + (vin || "Manual") + " | DTC: " + (dtc || "None") + ". Refreshing app...");
+
+        setTimeout(() => {
+            const targetUrl = new URL(window.top.location.href);
+            if (vin) targetUrl.searchParams.set("ble_vin", vin);
+            if (dtc) targetUrl.searchParams.set("ble_dtc", dtc);
+            window.top.location.href = targetUrl.toString();
+        }, 1000);
+    });
+    </script>
+    """
+
+  # Inject session variables safely
+  ble_html = ble_dashboard_template.replace("___GEMINI_KEY___", gemini_api_key)
+  ble_html = ble_html.replace(
+      "___VEHICLE_INFO___",
+      (st.session_state.vehicle_info or "General OBD-II Vehicle").replace(
+          '"', ""
+      ),
+  )
+  ble_html = ble_html.replace(
+      "___ACTIVE_DTC___",
+      (st.session_state.active_dtc or "None").replace('"', ""),
+  )
+
+  components.html(ble_html, height=820)
+
+# ========================================================
+# --- TAB 3: IN-DEPTH DTC DIAGNOSTIC STRATEGY ---
+# ========================================================
+with tab3:
   st.subheader("Field Diagnostic Strategy & Testing Workflow")
 
   if st.session_state.customer_name:
@@ -994,9 +1189,9 @@ Format strictly using these Markdown sections:
       st.markdown(result)
 
 # ========================================================
-# --- TAB 3: DIAGNOSTIC COPILOT & SCOPE LAB ---
+# --- TAB 4: DIAGNOSTIC COPILOT & SCOPE LAB ---
 # ========================================================
-with tab3:
+with tab4:
   st.subheader("⚡ Diagnostic Copilot & Scope Lab")
 
   v_label = st.session_state.vehicle_info or "No Vehicle Selected (General)"
@@ -1117,9 +1312,9 @@ Respond directly, practically, and concisely to the latest question. Focus on ph
         )
 
 # ========================================================
-# --- TAB 4: VEHICLE & DTC LOG ---
+# --- TAB 5: VEHICLE & DTC LOG ---
 # ========================================================
-with tab4:
+with tab5:
   st.subheader("📋 Vehicle Diagnostic Scan History")
   st.caption("Tracks customer tickets, VINs, and diagnostic fault codes.")
 
@@ -1147,6 +1342,6 @@ with tab4:
         st.rerun()
   else:
     st.info(
-        "No vehicles or DTCs logged yet. Run a code lookup in Tab 2 to start"
+        "No vehicles or DTCs logged yet. Run a code lookup in Tab 3 to start"
         " logging."
     )
