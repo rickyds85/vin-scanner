@@ -563,7 +563,7 @@ with tab2:
                 <div id="valTime" style="font-size: 1.2rem; font-weight: 700; color: #EC4899;">--</div>
             </div>
             <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">O2 B1S1 (V)</div>
+                <div id="lblO21" style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">O2 B1S1 (V)</div>
                 <div id="valO21" style="font-size: 1.2rem; font-weight: 700; color: #A855F7;">--</div>
             </div>
             <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
@@ -617,6 +617,8 @@ with tab2:
     let isBusy = false;
     let isStreaming = false;
     let supportedPids = new Set();
+    let activeO2Cmd = null;
+    let activeO2Type = null;
     let mode6RawData = "";
 
     function log(msg) {
@@ -636,9 +638,9 @@ with tab2:
         }
     }
 
-    async function sendCmd(cmd, timeoutMs = 2500) {
+    async function sendCmd(cmd, timeoutMs = 1500) {
         while (isBusy) {
-            await new Promise(r => setTimeout(r, 25));
+            await new Promise(r => setTimeout(r, 20));
         }
         isBusy = true;
         return new Promise(async (resolve) => {
@@ -720,9 +722,9 @@ with tab2:
 
     async function runLiveLoop() {
         while (isStreaming) {
-            // --- PRIORITY 1: CRITICAL POWERTRAIN & FUEL CONTROLS ---
+            // RPM
             if (supportedPids.has("0C") || supportedPids.size === 0) {
-                let res = await sendCmd("010C");
+                let res = await sendCmd("010C", 600);
                 let m = parseCleanHex(res).match(/410C([0-9A-F]{4})/);
                 if (m) {
                     let a = parseInt(m[1].substr(0, 2), 16);
@@ -732,15 +734,17 @@ with tab2:
             }
             if (!isStreaming) break;
 
+            // Load
             if (supportedPids.has("04")) {
-                let res = await sendCmd("0104");
+                let res = await sendCmd("0104", 600);
                 let m = parseCleanHex(res).match(/4104([0-9A-F]{2})/);
                 if (m) document.getElementById('valLoad').innerText = Math.round((parseInt(m[1], 16) * 100) / 255) + "%";
             }
             if (!isStreaming) break;
 
+            // TPS
             if (supportedPids.has("11")) {
-                let res = await sendCmd("0111");
+                let res = await sendCmd("0111", 600);
                 let m = parseCleanHex(res).match(/4111([0-9A-F]{2})/);
                 if (m) document.getElementById('valTps').innerText = Math.round((parseInt(m[1], 16) * 100) / 255) + "%";
             }
@@ -748,7 +752,7 @@ with tab2:
 
             // ECT (Coolant)
             if (supportedPids.has("05") || supportedPids.size === 0) {
-                let res = await sendCmd("0105");
+                let res = await sendCmd("0105", 600);
                 let m = parseCleanHex(res).match(/4105([0-9A-F]{2})/);
                 if (m) document.getElementById('valEct').innerText = Math.round((parseInt(m[1], 16) - 40) * 1.8 + 32) + " °F";
             }
@@ -756,7 +760,7 @@ with tab2:
 
             // IAT (Intake Air)
             if (supportedPids.has("0F")) {
-                let res = await sendCmd("010F");
+                let res = await sendCmd("010F", 600);
                 let m = parseCleanHex(res).match(/410F([0-9A-F]{2})/);
                 if (m) document.getElementById('valIat').innerText = Math.round((parseInt(m[1], 16) - 40) * 1.8 + 32) + " °F";
             }
@@ -764,7 +768,7 @@ with tab2:
 
             // STFT / LTFT Bank 1
             if (supportedPids.has("06")) {
-                let res = await sendCmd("0106");
+                let res = await sendCmd("0106", 600);
                 let m = parseCleanHex(res).match(/4106([0-9A-F]{2})/);
                 if (m) {
                     let s = (((parseInt(m[1], 16) - 128) * 100) / 128).toFixed(1);
@@ -774,7 +778,7 @@ with tab2:
             if (!isStreaming) break;
 
             if (supportedPids.has("07")) {
-                let res = await sendCmd("0107");
+                let res = await sendCmd("0107", 600);
                 let m = parseCleanHex(res).match(/4107([0-9A-F]{2})/);
                 if (m) {
                     let l = (((parseInt(m[1], 16) - 128) * 100) / 128).toFixed(1);
@@ -783,35 +787,9 @@ with tab2:
             }
             if (!isStreaming) break;
 
-            // --- PRIORITY 2: AIR METERING & SPEED ---
-            if (supportedPids.has("10")) {
-                let res = await sendCmd("0110");
-                let m = parseCleanHex(res).match(/4110([0-9A-F]{4})/);
-                if (m) {
-                    let a = parseInt(m[1].substr(0, 2), 16);
-                    let b = parseInt(m[1].substr(2, 2), 16);
-                    document.getElementById('valMaf').innerText = (((a * 256) + b) / 100).toFixed(1) + " g/s";
-                }
-            }
-            if (!isStreaming) break;
-
-            if (supportedPids.has("0B")) {
-                let res = await sendCmd("010B");
-                let m = parseCleanHex(res).match(/410B([0-9A-F]{2})/);
-                if (m) document.getElementById('valMap').innerText = (parseInt(m[1], 16) * 0.145038).toFixed(1) + " PSI";
-            }
-            if (!isStreaming) break;
-
-            if (supportedPids.has("0D")) {
-                let res = await sendCmd("010D");
-                let m = parseCleanHex(res).match(/410D([0-9A-F]{2})/);
-                if (m) document.getElementById('valSpd').innerText = Math.round(parseInt(m[1], 16) * 0.621371) + " MPH";
-            }
-            if (!isStreaming) break;
-
-            // STFT / LTFT Bank 2 (Only if supported!)
+            // STFT / LTFT Bank 2
             if (supportedPids.has("08")) {
-                let res = await sendCmd("0108");
+                let res = await sendCmd("0108", 600);
                 let m = parseCleanHex(res).match(/4108([0-9A-F]{2})/);
                 if (m) {
                     let s2 = (((parseInt(m[1], 16) - 128) * 100) / 128).toFixed(1);
@@ -821,7 +799,7 @@ with tab2:
             if (!isStreaming) break;
 
             if (supportedPids.has("09")) {
-                let res = await sendCmd("0109");
+                let res = await sendCmd("0109", 600);
                 let m = parseCleanHex(res).match(/4109([0-9A-F]{2})/);
                 if (m) {
                     let l2 = (((parseInt(m[1], 16) - 128) * 100) / 128).toFixed(1);
@@ -830,57 +808,75 @@ with tab2:
             }
             if (!isStreaming) break;
 
+            // MAF & Speed
+            if (supportedPids.has("10")) {
+                let res = await sendCmd("0110", 600);
+                let m = parseCleanHex(res).match(/4110([0-9A-F]{4})/);
+                if (m) {
+                    let a = parseInt(m[1].substr(0, 2), 16);
+                    let b = parseInt(m[1].substr(2, 2), 16);
+                    document.getElementById('valMaf').innerText = (((a * 256) + b) / 100).toFixed(1) + " g/s";
+                }
+            }
+            if (!isStreaming) break;
+
+            if (supportedPids.has("0D")) {
+                let res = await sendCmd("010D", 600);
+                let m = parseCleanHex(res).match(/410D([0-9A-F]{2})/);
+                if (m) document.getElementById('valSpd').innerText = Math.round(parseInt(m[1], 16) * 0.621371) + " MPH";
+            }
+            if (!isStreaming) break;
+
             // Timing Advance
             if (supportedPids.has("0E")) {
-                let res = await sendCmd("010E");
+                let res = await sendCmd("010E", 600);
                 let m = parseCleanHex(res).match(/410E([0-9A-F]{2})/);
                 if (m) document.getElementById('valTime').innerText = ((parseInt(m[1], 16) / 2) - 64).toFixed(1) + "°";
             }
             if (!isStreaming) break;
 
-            // O2 Sensors (Standard 0114 vs Wideband 0124)
-            if (supportedPids.has("14")) {
-                let res = await sendCmd("0114");
-                let m = parseCleanHex(res).match(/4114([0-9A-F]{2})/);
-                if (m) document.getElementById('valO21').innerText = (parseInt(m[1], 16) / 200).toFixed(2) + "V";
-            } else if (supportedPids.has("24")) {
-                let res = await sendCmd("0124");
-                let m = parseCleanHex(res).match(/4124([0-9A-F]{4})/);
-                if (m) {
-                    let lambda = (((parseInt(m[1].substr(0,2),16)*256)+parseInt(m[1].substr(2,2),16))/32768).toFixed(2);
-                    document.getElementById('valO21').innerText = "λ " + lambda;
+            // Upstream O2 B1S1 (Narrowband or Wideband Lambda)
+            if (activeO2Cmd) {
+                let res = await sendCmd(activeO2Cmd, 600);
+                let clean = parseCleanHex(res);
+                if (activeO2Type === "14") {
+                    let m = clean.match(/4114([0-9A-F]{2})/);
+                    if (m) document.getElementById('valO21').innerText = (parseInt(m[1], 16) / 200).toFixed(2) + "V";
+                } else {
+                    let pfx = "41" + activeO2Cmd.substr(2, 2);
+                    let m = clean.match(new RegExp(pfx + "([0-9A-F]{4})"));
+                    if (m) {
+                        let a = parseInt(m[1].substr(0, 2), 16);
+                        let b = parseInt(m[1].substr(2, 2), 16);
+                        let lambda = (((a * 256) + b) / 32768).toFixed(2);
+                        document.getElementById('valO21').innerText = "λ " + lambda;
+                    }
                 }
             }
             if (!isStreaming) break;
 
+            // Downstream O2 B1S2
             if (supportedPids.has("15")) {
-                let res = await sendCmd("0115");
+                let res = await sendCmd("0115", 600);
                 let m = parseCleanHex(res).match(/4115([0-9A-F]{2})/);
                 if (m) document.getElementById('valO22').innerText = (parseInt(m[1], 16) / 200).toFixed(2) + "V";
             }
             if (!isStreaming) break;
 
-            // Fuel Pressure & Baro
-            if (supportedPids.has("0A")) {
-                let res = await sendCmd("010A");
-                let m = parseCleanHex(res).match(/410A([0-9A-F]{2})/);
-                if (m) document.getElementById('valFp').innerText = Math.round(parseInt(m[1], 16) * 3 * 0.145038) + " PSI";
-            }
-            if (!isStreaming) break;
-
+            // Baro Press
             if (supportedPids.has("33")) {
-                let res = await sendCmd("0133");
+                let res = await sendCmd("0133", 600);
                 let m = parseCleanHex(res).match(/4133([0-9A-F]{2})/);
                 if (m) document.getElementById('valBaro').innerText = (parseInt(m[1], 16) * 0.2953).toFixed(1) + " inHg";
             }
             if (!isStreaming) break;
 
             // Charging Voltage
-            let resVolt = await sendCmd("ATRV", 1000);
+            let resVolt = await sendCmd("ATRV", 600);
             let vMatch = resVolt.match(/([0-9]+\.[0-9]+)/);
             if (vMatch) document.getElementById('valVolt').innerText = vMatch[1] + "V";
 
-            await new Promise(r => setTimeout(r, 60));
+            await new Promise(r => setTimeout(r, 40));
         }
     }
 
@@ -918,15 +914,37 @@ with tab2:
             await sendCmd("ATE0");
             await sendCmd("ATL0");
             await sendCmd("ATSP0");
+            await sendCmd("ATST32"); // fast response timeout
 
             log("Detecting vehicle supported PIDs...");
             supportedPids.clear();
-            let p00 = await sendCmd("0100");
+            let p00 = await sendCmd("0100", 1000);
             parsePidBytes(p00, "00");
-            let p20 = await sendCmd("0120");
+            let p20 = await sendCmd("0120", 1000);
             parsePidBytes(p20, "20");
 
-            // Mark unsupported PIDs as N/A on UI
+            // Auto-Detect Upstream O2 Sensor Format (Narrowband vs Wideband Lambda)
+            activeO2Cmd = null;
+            activeO2Type = null;
+            for (let probe of [
+                {cmd: "0114", type: "14", isWide: false},
+                {cmd: "0124", type: "24", isWide: true},
+                {cmd: "0134", type: "34", isWide: true},
+                {cmd: "0122", type: "22", isWide: true},
+                {cmd: "0132", type: "32", isWide: true}
+            ]) {
+                let r = await sendCmd(probe.cmd, 700);
+                if (parseCleanHex(r).includes("41" + probe.cmd.substr(2, 2))) {
+                    activeO2Cmd = probe.cmd;
+                    activeO2Type = probe.type;
+                    if (probe.isWide) {
+                        document.getElementById('lblO21').innerText = "O2 B1S1 (A/F λ)";
+                    }
+                    break;
+                }
+            }
+
+            // Mark truly unsupported PIDs as N/A on UI
             if (supportedPids.size > 0) {
                 if (!supportedPids.has("0B")) document.getElementById('valMap').innerText = "N/A";
                 if (!supportedPids.has("10")) document.getElementById('valMaf').innerText = "N/A";
@@ -934,7 +952,7 @@ with tab2:
                 if (!supportedPids.has("09")) document.getElementById('valLtft2').innerText = "N/A (1 Bank)";
                 if (!supportedPids.has("0A")) document.getElementById('valFp').innerText = "N/A";
                 if (!supportedPids.has("33")) document.getElementById('valBaro').innerText = "N/A";
-                if (!supportedPids.has("14") && !supportedPids.has("24")) document.getElementById('valO21').innerText = "N/A";
+                if (!activeO2Cmd) document.getElementById('valO21').innerText = "N/A";
                 if (!supportedPids.has("15")) document.getElementById('valO22').innerText = "N/A";
             }
 
@@ -994,70 +1012,78 @@ with tab2:
         document.getElementById('liveBtn').innerText = "▶️ Start Live Data";
         document.getElementById('liveBtn').style.backgroundColor = "#38BDF8";
 
-        log("Pausing telemetry and waiting for bus to clear...");
+        log("Pausing telemetry to scan Mode $06...");
         while (isBusy) {
-            await new Promise(r => setTimeout(r, 40));
+            await new Promise(r => setTimeout(r, 25));
         }
 
         const m6Box = document.getElementById('mode6Box');
-        m6Box.innerHTML = "<span style='color: #F59E0B;'>Running Mode $06 scan (querying monitors & misfire counters)...</span>";
+        m6Box.innerHTML = "<div style='color: #F59E0B; padding: 4px;'>⚡ Fast Scanning Cylinder Misfire Monitors (Mode $06)...</div>";
 
-        // Extend timeout for multi-frame CAN responses
-        await sendCmd("ATST64", 1500);
+        await sendCmd("ATST32", 500);
 
-        log("Querying Mode 06 monitors from ECM...");
-        let res = await sendCmd("06", 5000);
+        // Step 1: Query which cylinder MIDs exist via $A0 bitmask
+        let a0Res = await sendCmd("06A0", 800);
+        let cleanA0 = a0Res.replace(/^[0-9A-F]{1,2}:/gm, '').replace(/[\\r\\n\\s>]+/g, '').toUpperCase();
+        let targetMids = [];
 
-        // Fallback: If naked 06 was rejected by CAN ECM, query misfire MIDs directly
-        if (!res || res.includes("NO DATA") || res.includes("?")) {
-            log("Querying individual misfire MIDs ($A2-$A8)...");
-            let mRes = "";
-            for (let mid of ["06A2", "06A3", "06A4", "06A5", "06A6", "06A7", "06A8"]) {
-                let r = await sendCmd(mid, 2000);
-                if (r && !r.includes("NO DATA") && !r.includes("?")) {
-                    mRes += "\\n" + r;
-                }
-            }
-            if (mRes) res = mRes;
+        let a0Match = cleanA0.match(/46A0([0-9A-F]{8})/);
+        if (a0Match) {
+            let b1 = parseInt(a0Match[1].substr(0, 2), 16);
+            let b2 = parseInt(a0Match[1].substr(2, 2), 16);
+            if ((b1 & 0x40) !== 0) targetMids.push("06A2");
+            if ((b1 & 0x20) !== 0) targetMids.push("06A3");
+            if ((b1 & 0x10) !== 0) targetMids.push("06A4");
+            if ((b1 & 0x08) !== 0) targetMids.push("06A5");
+            if ((b1 & 0x04) !== 0) targetMids.push("06A6");
+            if ((b1 & 0x02) !== 0) targetMids.push("06A7");
+            if ((b1 & 0x01) !== 0) targetMids.push("06A8");
+            if ((b2 & 0x80) !== 0) targetMids.push("06A9");
         }
 
-        // Restore standard response timeout
-        await sendCmd("ATST32", 1500);
-        mode6RawData = res;
+        // Fallback: If 06A0 bitmask wasn't returned, query cylinders matching engine bank layout
+        if (targetMids.length === 0) {
+            let hasBank2 = supportedPids.has("08") || supportedPids.has("09") || (document.getElementById('valStft2').innerText !== "N/A" && document.getElementById('valStft2').innerText !== "--");
+            targetMids = hasBank2 ? ["06A2", "06A3", "06A4", "06A5", "06A6", "06A7"] : ["06A2", "06A3", "06A4", "06A5"];
+        }
 
-        // Parse Cylinder Misfire Counters
         const cylMap = {
             'A2': 'Cylinder 1', 'A3': 'Cylinder 2', 'A4': 'Cylinder 3', 'A5': 'Cylinder 4',
             'A6': 'Cylinder 5', 'A7': 'Cylinder 6', 'A8': 'Cylinder 7', 'A9': 'Cylinder 8'
         };
 
-        let htmlTable = "<div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px;'>";
+        let htmlGrid = "<div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px;'>";
         let foundAny = false;
+        mode6RawData = "";
 
-        // Clean out CAN frame line tags
-        const lines = res.split(/\\r|\\n/);
-        for (let l of lines) {
-            let clean = l.replace(/^[0-9A-F]{1,2}:/g, '').replace(/\\s+/g, '').toUpperCase();
+        for (let midCmd of targetMids) {
+            let midCode = midCmd.substr(2, 2);
+            log("Reading " + cylMap[midCode] + " misfires (" + midCmd + ")...");
+
+            let res = await sendCmd(midCmd, 900);
+            mode6RawData += "\\n" + res;
+
+            let clean = res.replace(/^[0-9A-F]{1,2}:/gm, '').replace(/[\\r\\n\\s>]+/g, '').toUpperCase();
             let m = clean.match(/46(A[2-9])([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{4})/);
+
             if (m) {
-                let mid = m[1];
-                let count = parseInt(m[4], 16);
                 foundAny = true;
+                let count = parseInt(m[4], 16);
                 let color = count === 0 ? "#00FF66" : "#EF4444";
                 let statusText = count === 0 ? "PASS (0 ct)" : "MISFIRES: " + count;
-                htmlTable += "<div style='background: #1A1F26; border: 1px solid " + color + "; padding: 8px; border-radius: 6px; text-align: center;'>";
-                htmlTable += "<div style='color: #38BDF8; font-weight: 700; font-size: 0.85rem;'>" + cylMap[mid] + "</div>";
-                htmlTable += "<div style='color: " + color + "; font-size: 1.05rem; font-weight: 700;'>" + statusText + "</div>";
-                htmlTable += "</div>";
+                htmlGrid += "<div style='background: #1A1F26; border: 1px solid " + color + "; padding: 8px; border-radius: 6px; text-align: center;'>";
+                htmlGrid += "<div style='color: #38BDF8; font-weight: 700; font-size: 0.85rem;'>" + cylMap[m[1]] + "</div>";
+                htmlGrid += "<div style='color: " + color + "; font-size: 1.05rem; font-weight: 700;'>" + statusText + "</div>";
+                htmlGrid += "</div>";
+                m6Box.innerHTML = htmlGrid + "</div>";
             }
         }
 
         if (!foundAny) {
-            htmlTable += "<div style='color: #A0AEC0; padding: 4px;'>Raw Mode $06 Output:<br><pre style='white-space: pre-wrap; font-size: 0.75rem;'>" + (res.trim() || "No response bytes from ECM.") + "</pre></div>";
+            m6Box.innerHTML = "<div style='color: #A0AEC0; padding: 4px;'>Raw Mode $06 Output:<br><pre style='white-space: pre-wrap; font-size: 0.75rem;'>" + (mode6RawData.trim() || "No response bytes from ECM.") + "</pre></div>";
         }
-        htmlTable += "</div>";
-        m6Box.innerHTML = htmlTable;
-        log("Mode $06 completed.");
+
+        log("Mode $06 complete. " + (foundAny ? "All misfire monitors verified." : ""));
 
         if (wasStreaming) {
             isStreaming = true;
@@ -1148,11 +1174,11 @@ Format clearly with bold sections. Keep it direct and shop-focused.
     document.getElementById('pullVinBtn').addEventListener('click', async () => {
         isStreaming = false;
         log("Querying 17-digit VIN (09 02)...");
-        const vinRaw = await sendCmd("0902");
+        const vinRaw = await sendCmd("0902", 1500);
         const vin = parseVIN(vinRaw);
 
         log("Querying Stored DTCs (03)...");
-        const dtcRaw = await sendCmd("03");
+        const dtcRaw = await sendCmd("03", 1500);
         const dtc = parseDTC(dtcRaw);
 
         log("Success! VIN: " + (vin || "Manual") + " | DTC: " + (dtc || "None") + ". Refreshing app...");
