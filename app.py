@@ -503,16 +503,108 @@ with tab2:
         ]
     ):
       detected_make = "HONDA"
-    elif any(m in v_upper for m in ["FORD", "LINCOLN", "MERCURY"]):
-      detected_make = "FORD"
     elif any(
-        m in v_upper for m in ["CHEVROLET", "CHEVY", "GMC", "CADILLAC", "BUICK"]
+        m in v_upper
+        for m in [
+            "TOYOTA",
+            "LEXUS",
+            "SCION",
+            "CAMRY",
+            "COROLLA",
+            "RAV4",
+            "HIGHLANDER",
+            "TACOMA",
+            "TUNDRA",
+        ]
     ):
-      detected_make = "GM"
-    elif any(m in v_upper for m in ["TOYOTA", "LEXUS", "SCION"]):
       detected_make = "TOYOTA"
     elif any(
-        m in v_upper for m in ["CHRYSLER", "DODGE", "JEEP", "RAM", "PLYMOUTH"]
+        m in v_upper
+        for m in [
+            "NISSAN",
+            "INFINITI",
+            "ALTIMA",
+            "MAXIMA",
+            "ROGUE",
+            "MURANO",
+            "PATHFINDER",
+            "SENTRA",
+        ]
+    ):
+      detected_make = "NISSAN"
+    elif any(
+        m in v_upper
+        for m in [
+            "HYUNDAI",
+            "KIA",
+            "GENESIS",
+            "ELANTRA",
+            "SONATA",
+            "SANTA FE",
+            "TUCSON",
+            "OPTIMA",
+            "SORENTO",
+        ]
+    ):
+      detected_make = "HYUNDAI"
+    elif any(
+        m in v_upper
+        for m in [
+            "SUBARU",
+            "OUTBACK",
+            "FORESTER",
+            "IMPREZA",
+            "LEGACY",
+            "CROSSTREK",
+            "WRX",
+        ]
+    ):
+      detected_make = "SUBARU"
+    elif any(m in v_upper for m in ["MAZDA", "CX-5", "CX-9", "CX-50", "MIATA"]):
+      detected_make = "MAZDA"
+    elif any(
+        m in v_upper
+        for m in [
+            "FORD",
+            "LINCOLN",
+            "MERCURY",
+            "F-150",
+            "F-250",
+            "EXPLORER",
+            "ESCAPE",
+            "EDGE",
+            "MUSTANG",
+        ]
+    ):
+      detected_make = "FORD"
+    elif any(
+        m in v_upper
+        for m in [
+            "CHEVROLET",
+            "CHEVY",
+            "GMC",
+            "CADILLAC",
+            "BUICK",
+            "SILVERADO",
+            "SIERRA",
+            "TAHOE",
+            "YUKON",
+            "SUBURBAN",
+        ]
+    ):
+      detected_make = "GM"
+    elif any(
+        m in v_upper
+        for m in [
+            "CHRYSLER",
+            "DODGE",
+            "JEEP",
+            "RAM",
+            "GRAND CHEROKEE",
+            "WRANGLER",
+            "CHARGER",
+            "CHALLENGER",
+        ]
     ):
       detected_make = "CHRYSLER"
 
@@ -544,15 +636,19 @@ with tab2:
                 <select id="oemProfileSelect" style="background: #111418; color: #00FF66; border: 1px solid #00FF66; padding: 6px 10px; border-radius: 4px; font-weight: 700; font-size: 0.85rem;">
                     <option value="AUTO">Auto-Detect</option>
                     <option value="HONDA">Honda / Acura</option>
-                    <option value="FORD">Ford / Lincoln</option>
-                    <option value="GM">GM / Chevrolet / GMC</option>
-                    <option value="TOYOTA">Toyota / Lexus</option>
-                    <option value="CHRYSLER">Chrysler / Dodge / Jeep</option>
+                    <option value="TOYOTA">Toyota / Lexus / Scion</option>
+                    <option value="NISSAN">Nissan / Infiniti</option>
+                    <option value="HYUNDAI">Hyundai / Kia / Genesis</option>
+                    <option value="SUBARU">Subaru</option>
+                    <option value="MAZDA">Mazda</option>
+                    <option value="FORD">Ford / Lincoln / Mercury</option>
+                    <option value="GM">GM / Chevrolet / GMC / Buick</option>
+                    <option value="CHRYSLER">Chrysler / Dodge / Jeep / Ram</option>
                     <option value="GENERIC">Standard Generic</option>
                 </select>
             </div>
         </div>
-        <div id="bleStatus" style="color: #A0AEC0; font-family: monospace; font-size: 0.85rem; margin-bottom: 12px;">Status: Ready to pair. Tap "Connect & Auto-Scan" to connect to the Honda ECM.</div>
+        <div id="bleStatus" style="color: #A0AEC0; font-family: monospace; font-size: 0.85rem; margin-bottom: 12px;">Status: Ready to pair. Connect once to automatically load Monitors, Mode $06, and start live telemetry.</div>
 
         <!-- TEST DRIVE AI ACTIVE BANNER -->
         <div id="driveBanner" style="display: none; background: #0F172A; border-left: 4px solid #38BDF8; padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; font-size: 0.85rem; color: #38BDF8;">
@@ -664,9 +760,9 @@ with tab2:
             </div>
         </div>
 
-        <!-- 2. OEM ENHANCED PIDS (UDS SERVICE 0x22) -->
-        <div style="font-weight: 700; font-size: 0.95rem; color: #EC4899; margin-bottom: 6px;">🏭 OEM ENHANCED PIDS (UDS 0x22 PROPRIETARY DATA)</div>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; max-height: 180px; overflow-y: auto; padding-right: 4px; margin-bottom: 16px;">
+        <!-- 2. OEM ENHANCED PIDS (UDS SERVICE 0x22 / MULTI-MODULE) -->
+        <div style="font-weight: 700; font-size: 0.95rem; color: #EC4899; margin-bottom: 6px;">🏭 OEM ENHANCED PIDS (DOMESTIC & ASIAN ENHANCED DATA)</div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; max-height: 220px; overflow-y: auto; padding-right: 4px; margin-bottom: 16px;">
             <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
                 <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Trans Fluid Temp</div>
                 <div id="valTft" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
@@ -690,6 +786,14 @@ with tab2:
             <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
                 <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Knock Retard (KR)</div>
                 <div id="valKr" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Ethanol / FRP 2</div>
+                <div id="valEth" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Hybrid SOC / Batt</div>
+                <div id="valSoc" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
             </div>
         </div>
 
@@ -847,6 +951,35 @@ with tab2:
         return clean;
     }
 
+    // Module-Targeted Query with automatic CAN header switching and restore
+    async function queryModulePid(header, cmd, timeoutMs = 450) {
+        const cacheKey = header + "_" + cmd;
+        if (unsupportedPids.has(cacheKey)) return "";
+        await sendCmd("ATSH " + header, 150);
+        let res = await sendCmd(cmd, timeoutMs);
+        await sendCmd("ATSH 7DF", 150); // restore functional broadcast
+        let clean = parseCleanHex(res);
+        if (clean.includes("NODATA") || clean.includes("?") || clean.includes("UNABLE")) {
+            unsupportedPids.add(cacheKey);
+            return "";
+        }
+        return clean;
+    }
+
+    // Extracts successive payload bytes following a positive UDS/OBD response prefix
+    function getPayloadBytes(cleanHex, expectedPrefix) {
+        // Strip out multi-frame CAN line index prefixes (0:, 1:, 2:)
+        let stripped = cleanHex.replace(/^[0-9A-F]{1,2}:/gm, '').replace(/[^0-9A-F]/g, '');
+        let pos = stripped.indexOf(expectedPrefix.toUpperCase());
+        if (pos === -1) return [];
+        let dataHex = stripped.substring(pos + expectedPrefix.length);
+        let bytes = [];
+        for (let i = 0; i + 2 <= dataHex.length; i += 2) {
+            bytes.push(parseInt(dataHex.substr(i, 2), 16));
+        }
+        return bytes;
+    }
+
     function getActiveOemProfile() {
         let sel = document.getElementById('oemProfileSelect').value;
         if (sel === "AUTO") {
@@ -924,11 +1057,12 @@ with tab2:
             "TransTemp": document.getElementById('valTft').innerText,
             "OilPress": document.getElementById('valEop').innerText,
             "CHT_VCM": document.getElementById('valCht').innerText,
+            "TCC_Slip": document.getElementById('valTccSlip').innerText,
+            "Gear": document.getElementById('valGear').innerText,
+            "KnockRetard": document.getElementById('valKr').innerText,
             "Timing": document.getElementById('valTime').innerText,
             "O2_B1S1": document.getElementById('valO21').innerText,
             "O2_B1S2": document.getElementById('valO22').innerText,
-            "O2_B2S1": document.getElementById('valO221').innerText,
-            "O2_B2S2": document.getElementById('valO222').innerText,
             "Voltage": document.getElementById('valVolt').innerText
         };
 
@@ -942,7 +1076,7 @@ ${JSON.stringify(pids, null, 2)}
 
 Provide a concise 3-bullet live assessment:
 1. Dynamic Fuel Delivery & Trim State (Bank 1 vs 2 balance under current load).
-2. Transmission, VCM Cylinder Deactivation & Operating Temperatures.
+2. Drivetrain & Powertrain Health (Trans Temp, Oil Pressure, CHT/VCM, TCC slip, Knock).
 3. Any immediate anomaly to inspect upon returning to the bay.
 Keep it strictly under 100 words.
 `;
@@ -1019,10 +1153,10 @@ Keep it strictly under 100 words.
         }
     }
 
-    // --- REUSABLE FULL MODE $06 FETCHER (OPTIMIZED FOR HONDA ODYSSEY V6) ---
+    // --- REUSABLE FULL MODE $06 FETCHER (ALL CYLINDERS, CATALYSTS, O2 & EVAP) ---
     async function loadMode6Data() {
         const m6Box = document.getElementById('mode6Box');
-        m6Box.innerHTML = "<div style='color: #F59E0B; padding: 4px;'>⚡ Scanning all supported vehicle monitors (Cylinders 1-6+, Catalyst Bank 1 & 2, O2 Sensors, EVAP, VVT, EGR)...</div>";
+        m6Box.innerHTML = "<div style='color: #F59E0B; padding: 4px;'>⚡ Scanning all supported vehicle monitors (Cylinders 1-8+, Catalyst Bank 1 & 2, O2 Sensors, EVAP, VVT, EGR)...</div>";
 
         const allMonitors = [
             {mid: "06A2", name: "Cylinder 1 Misfires (Bank 1)", isCyl: true},
@@ -1056,10 +1190,9 @@ Keep it strictly under 100 words.
             let res = await sendCmd(t.mid, 500);
             let clean = parseCleanHex(res);
             
-            // On a V6 Odyssey, stop checking Cyl 7 and 8 if Cyl 7 returns NODATA
             if ((clean.includes("NODATA") || clean.includes("?") || clean.length < 6)) {
                 if (t.mid === "06A8") {
-                    idx++; // skip Cyl 8
+                    idx++; // skip Cyl 8 if Cyl 7 is absent
                 }
                 continue;
             }
@@ -1093,133 +1226,275 @@ Keep it strictly under 100 words.
         }
     }
 
-    // --- REUSABLE OEM ENHANCED PIDS QUERY (UDS 0x22 INCLUDING HONDA) ---
+    // --- COMPREHENSIVE OEM ENHANCED PIDS ENGINE (DOMESTIC & ASIAN) ---
     async function queryEnhancedPids(oem) {
         if (oem === "GENERIC") return;
 
-        await sendCmd("ATSH 7E0", 250);
-
+        // 1. HONDA & ACURA
         if (oem === "HONDA") {
-            let rTft = await queryPid("222201", 350);
-            let mTft = rTft.match(/622201([0-9A-F]{2})/);
-            if (mTft) {
-                let degF = Math.round((parseInt(mTft[1], 16) - 40) * 1.8 + 32);
-                document.getElementById('valTft').innerText = degF + " °F";
+            // Trans Fluid Temp: Try 7E1 (TCM) then 7E0 (ECM) on 222201 (byte 27), 21D9 (byte 0), 221627
+            let rTft = await queryModulePid("7E1", "222201", 350);
+            let bTft = getPayloadBytes(rTft, "622201");
+            if (bTft.length >= 27) {
+                document.getElementById('valTft').innerText = Math.round((bTft[26] - 40) * 1.8 + 32) + " °F";
             } else {
-                let r2 = await queryPid("221627", 350);
-                let m2 = r2.match(/621627([0-9A-F]{2})/);
-                if (m2) {
-                    let degF = Math.round((parseInt(m2[1], 16) - 40) * 1.8 + 32);
-                    document.getElementById('valTft').innerText = degF + " °F";
-                } else if (unsupportedPids.has("222201") && unsupportedPids.has("221627")) {
-                    document.getElementById('valTft').innerText = "N/A";
+                let r2 = await queryModulePid("7E0", "222201", 350);
+                let b2 = getPayloadBytes(r2, "622201");
+                if (b2.length >= 27) {
+                    document.getElementById('valTft').innerText = Math.round((b2[26] - 40) * 1.8 + 32) + " °F";
+                } else {
+                    let r3 = await queryModulePid("7E1", "21D9", 350);
+                    let b3 = getPayloadBytes(r3, "61D9");
+                    if (b3.length >= 1) {
+                        document.getElementById('valTft').innerText = Math.round((b3[0] - 40) * 1.8 + 32) + " °F";
+                    } else {
+                        let r4 = await queryModulePid("7E0", "221627", 350);
+                        let b4 = getPayloadBytes(r4, "621627");
+                        if (b4.length >= 1) document.getElementById('valTft').innerText = Math.round((b4[0] - 40) * 1.8 + 32) + " °F";
+                    }
                 }
             }
 
-            let rVcm = await queryPid("222615", 350);
-            let mVcm = rVcm.match(/622615([0-9A-F]{2})/);
-            if (mVcm) {
-                let cCount = parseInt(mVcm[1], 16);
-                document.getElementById('valCht').innerText = cCount + " Cyls (VCM)";
-            } else if (unsupportedPids.has("222615")) {
-                document.getElementById('valCht').innerText = "N/A";
+            // VCM Active Cylinders / CHT
+            let rVcm = await queryModulePid("7E0", "222615", 350);
+            let bVcm = getPayloadBytes(rVcm, "622615");
+            if (bVcm.length >= 51) {
+                document.getElementById('valCht').innerText = bVcm[50] + " Cyls (VCM)";
+            } else if (bVcm.length >= 1) {
+                document.getElementById('valCht').innerText = bVcm[0] + " Cyls (VCM)";
             }
 
-        } else if (oem === "FORD") {
-            let rTft = await queryPid("221E1C", 350);
-            let mTft = rTft.match(/621E1C([0-9A-F]{4})/);
-            if (mTft) {
-                let a = parseInt(mTft[1].substr(0, 2), 16);
-                let b = parseInt(mTft[1].substr(2, 2), 16);
-                let degF = Math.round(((((a * 256) + b) / 16) - 40) * 1.8 + 32);
-                document.getElementById('valTft').innerText = degF + " °F";
-            } else if (unsupportedPids.has("221E1C")) {
-                let r2 = await queryPid("221674", 350);
-                let m2 = r2.match(/621674([0-9A-F]{4})/);
-                if (m2) {
-                    let a = parseInt(m2[1].substr(0, 2), 16);
-                    let b = parseInt(m2[1].substr(2, 2), 16);
-                    document.getElementById('valTft').innerText = Math.round(((((a * 256) + b) * 5 / 72) - 18) * 1.8 + 32) + " °F";
-                } else if (unsupportedPids.has("221674")) document.getElementById('valTft').innerText = "N/A";
-            }
+            // TCC Slip & Gear
+            let rSlip = await queryModulePid("7E1", "221E14", 300);
+            let bSlip = getPayloadBytes(rSlip, "621E14");
+            if (bSlip.length >= 2) document.getElementById('valTccSlip').innerText = Math.round(((bSlip[0] * 256) + bSlip[1]) / 4) + " RPM";
 
-            let rCht = await queryPid("221624", 350);
-            let mCht = rCht.match(/621624([0-9A-F]{4})/);
-            if (mCht) {
-                let a = parseInt(mCht[1].substr(0, 2), 16);
-                let b = parseInt(mCht[1].substr(2, 2), 16);
-                let degF = Math.round(((((a * 256) + b) / 10) - 40) * 1.8 + 32);
-                document.getElementById('valCht').innerText = degF + " °F";
-            } else if (unsupportedPids.has("221624")) document.getElementById('valCht').innerText = "N/A";
-
-            let rSlip = await queryPid("221E14", 350);
-            let mSlip = rSlip.match(/621E14([0-9A-F]{4})/);
-            if (mSlip) {
-                let a = parseInt(mSlip[1].substr(0, 2), 16);
-                let b = parseInt(mSlip[1].substr(2, 2), 16);
-                document.getElementById('valTccSlip').innerText = Math.round(((a * 256) + b) / 4) + " RPM";
-            } else if (unsupportedPids.has("221E14")) document.getElementById('valTccSlip').innerText = "N/A";
-
-            let rGear = await queryPid("221E12", 350);
-            let mGear = rGear.match(/621E12([0-9A-F]{2})/);
-            if (mGear) document.getElementById('valGear').innerText = "Gear " + parseInt(mGear[1], 16);
-            else if (unsupportedPids.has("221E12")) document.getElementById('valGear').innerText = "N/A";
-
-        } else if (oem === "GM") {
-            let rTft = await queryPid("221940", 350);
-            let mTft = rTft.match(/621940([0-9A-F]{2})/);
-            if (mTft) {
-                let degF = Math.round((parseInt(mTft[1], 16) - 40) * 1.8 + 32);
-                document.getElementById('valTft').innerText = degF + " °F";
-            } else if (unsupportedPids.has("221940")) document.getElementById('valTft').innerText = "N/A";
-
-            let rEop = await queryPid("22115C", 350);
-            let mEop = rEop.match(/62115C([0-9A-F]{2})/);
-            if (mEop) {
-                let psi = Math.round(parseInt(mEop[1], 16) * 0.579);
-                document.getElementById('valEop').innerText = psi + " PSI";
-            } else if (unsupportedPids.has("22115C")) document.getElementById('valEop').innerText = "N/A";
-
-            let rKr = await queryPid("2211A6", 350);
-            let mKr = rKr.match(/6211A6([0-9A-F]{2})/);
-            if (mKr) {
-                let kr = (parseInt(mKr[1], 16) * 0.1).toFixed(1);
-                document.getElementById('valKr').innerText = kr + "°";
-            } else if (unsupportedPids.has("2211A6")) document.getElementById('valKr').innerText = "N/A";
-
-            let rSlip = await queryPid("221943", 350);
-            let mSlip = rSlip.match(/621943([0-9A-F]{4})/);
-            if (mSlip) {
-                let a = parseInt(mSlip[1].substr(0, 2), 16);
-                let b = parseInt(mSlip[1].substr(2, 2), 16);
-                document.getElementById('valTccSlip').innerText = Math.round(((a * 256) + b) / 8) + " RPM";
-            } else if (unsupportedPids.has("221943")) document.getElementById('valTccSlip').innerText = "N/A";
-
-        } else if (oem === "TOYOTA") {
-            let rTft = await queryPid("221627", 350);
-            let mTft = rTft.match(/621627([0-9A-F]{2})/);
-            if (mTft) {
-                let degF = Math.round((parseInt(mTft[1], 16) - 40) * 1.8 + 32);
-                document.getElementById('valTft').innerText = degF + " °F";
-            } else if (unsupportedPids.has("221627")) document.getElementById('valTft').innerText = "N/A";
-
-        } else if (oem === "CHRYSLER") {
-            let rEop = await queryPid("221003", 350);
-            let mEop = rEop.match(/621003([0-9A-F]{2})/);
-            if (mEop) {
-                let psi = Math.round(parseInt(mEop[1], 16) * 0.58);
-                document.getElementById('valEop').innerText = psi + " PSI";
-            } else if (unsupportedPids.has("221003")) document.getElementById('valEop').innerText = "N/A";
-
-            let rTft = await queryPid("22B005", 350);
-            let mTft = rTft.match(/62B005([0-9A-F]{2})/);
-            if (mTft) {
-                let degF = Math.round((parseInt(mTft[1], 16) - 40) * 1.8 + 32);
-                document.getElementById('valTft').innerText = degF + " °F";
-            } else if (unsupportedPids.has("22B005")) document.getElementById('valTft').innerText = "N/A";
+            let rGear = await queryModulePid("7E1", "221E12", 300);
+            let bGear = getPayloadBytes(rGear, "621E12");
+            if (bGear.length >= 1) document.getElementById('valGear').innerText = "Gear " + bGear[0];
         }
 
-        await sendCmd("ATSH 7DF", 250);
+        // 2. TOYOTA, LEXUS & SCION
+        else if (oem === "TOYOTA") {
+            // ATF Pan Temp (ATF 1)
+            let rTft = await queryModulePid("7E0", "221627", 350);
+            let bTft = getPayloadBytes(rTft, "621627");
+            if (bTft.length >= 1) {
+                document.getElementById('valTft').innerText = Math.round((bTft[0] - 40) * 1.8 + 32) + " °F";
+            } else {
+                let r2 = await queryModulePid("700", "2182", 350);
+                let b2 = getPayloadBytes(r2, "6182");
+                if (b2.length >= 1) document.getElementById('valTft').innerText = Math.round((b2[0] - 40) * 1.8 + 32) + " °F";
+            }
+
+            // ATF Torque Converter Temp (ATF 2)
+            let rTf2 = await queryModulePid("7E0", "221628", 350);
+            let bTf2 = getPayloadBytes(rTf2, "621628");
+            if (bTf2.length >= 1) {
+                document.getElementById('valCht').innerText = Math.round((bTf2[0] - 40) * 1.8 + 32) + " °F (TC)";
+            } else {
+                let r3 = await queryModulePid("700", "2182", 350);
+                let b3 = getPayloadBytes(r3, "6182");
+                if (b3.length >= 4) {
+                    let degC = (((b3[2] * 256) + b3[3]) * 7 / 100 - 400) / 10;
+                    document.getElementById('valCht').innerText = Math.round(degC * 1.8 + 32) + " °F (TC)";
+                }
+            }
+
+            // Commanded Gear & Lockup
+            let rGear = await queryModulePid("7E0", "221621", 300);
+            let bGear = getPayloadBytes(rGear, "621621");
+            if (bGear.length >= 1) document.getElementById('valGear').innerText = "Gear " + bGear[0];
+
+            let rSlip = await queryModulePid("7E0", "221620", 300);
+            let bSlip = getPayloadBytes(rSlip, "621620");
+            if (bSlip.length >= 1) document.getElementById('valTccSlip').innerText = (bSlip[0] & 0x01) ? "Locked" : "Unlocked";
+
+            // Hybrid Battery SOC
+            let rSoc = await queryModulePid("7E0", "22015B", 300);
+            let bSoc = getPayloadBytes(rSoc, "62015B");
+            if (bSoc.length >= 1) document.getElementById('valSoc').innerText = (bSoc[0] * 0.5).toFixed(1) + "%";
+        }
+
+        // 3. NISSAN & INFINITI
+        else if (oem === "NISSAN") {
+            // CVT Fluid Temperature
+            let rCvt = await queryModulePid("7E1", "221017", 350);
+            let bCvt = getPayloadBytes(rCvt, "621017");
+            if (bCvt.length >= 1) {
+                document.getElementById('valTft').innerText = Math.round((bCvt[0] - 40) * 1.8 + 32) + " °F";
+            } else {
+                let r2 = await queryModulePid("7E0", "221017", 350);
+                let b2 = getPayloadBytes(r2, "621017");
+                if (b2.length >= 1) document.getElementById('valTft').innerText = Math.round((b2[0] - 40) * 1.8 + 32) + " °F";
+            }
+
+            // Engine Oil Temp
+            let rEot = await queryModulePid("7E0", "22114A", 300);
+            let bEot = getPayloadBytes(rEot, "62114A");
+            if (bEot.length >= 1) document.getElementById('valEop').innerText = Math.round((bEot[0] - 40) * 1.8 + 32) + " °F (Oil)";
+
+            // Commanded Gear
+            let rGear = await queryModulePid("7E1", "221621", 300);
+            let bGear = getPayloadBytes(rGear, "621621");
+            if (bGear.length >= 1) document.getElementById('valGear').innerText = "Gear " + bGear[0];
+        }
+
+        // 4. HYUNDAI, KIA & GENESIS
+        else if (oem === "HYUNDAI") {
+            // ATF Pan Temp
+            let rTft = await queryModulePid("7E1", "221627", 350);
+            let bTft = getPayloadBytes(rTft, "621627");
+            if (bTft.length >= 2) {
+                let degF = Math.round((bTft[0] * 459 / 255) + (bTft[1] * 1.6 / 255) - 40);
+                document.getElementById('valTft').innerText = degF + " °F";
+            } else if (bTft.length >= 1) {
+                document.getElementById('valTft').innerText = Math.round((bTft[0] - 40) * 1.8 + 32) + " °F";
+            }
+
+            // Engine Oil Temp (CVVT)
+            let rEot = await queryModulePid("7E0", "221104", 300);
+            let bEot = getPayloadBytes(rEot, "621104");
+            if (bEot.length >= 1) document.getElementById('valEop').innerText = Math.round((bEot[0] - 40) * 1.8 + 32) + " °F (Oil)";
+
+            // Knock Retard
+            let rKr = await queryModulePid("7E0", "2211A6", 300);
+            let bKr = getPayloadBytes(rKr, "6211A6");
+            if (bKr.length >= 1) document.getElementById('valKr').innerText = (bKr[0] * 0.1).toFixed(1) + "°";
+        }
+
+        // 5. SUBARU
+        else if (oem === "SUBARU") {
+            // CVT Fluid Temperature
+            let rCvt = await queryModulePid("7E1", "221017", 350);
+            let bCvt = getPayloadBytes(rCvt, "621017");
+            if (bCvt.length >= 1) {
+                document.getElementById('valTft').innerText = Math.round((bCvt[0] * 1.8) - 58) + " °F";
+            } else {
+                let r2 = await queryModulePid("7E0", "221017", 350);
+                let b2 = getPayloadBytes(r2, "621017");
+                if (b2.length >= 1) document.getElementById('valTft').innerText = Math.round((b2[0] - 40) * 1.8 + 32) + " °F";
+            }
+
+            // Engine Oil Temp
+            let rEot = await queryModulePid("7E0", "22114A", 300);
+            let bEot = getPayloadBytes(rEot, "62114A");
+            if (bEot.length >= 1) document.getElementById('valEop').innerText = Math.round((bEot[0] - 40) * 1.8 + 32) + " °F (Oil)";
+        }
+
+        // 6. MAZDA
+        else if (oem === "MAZDA") {
+            // ATF Fluid Temp
+            let rTft = await queryModulePid("7E1", "221E1C", 350);
+            let bTft = getPayloadBytes(rTft, "621E1C");
+            if (bTft.length >= 2) {
+                let degF = Math.round((((bTft[0] * 256) + bTft[1]) / 80) * 1.8 + 32);
+                document.getElementById('valTft').innerText = degF + " °F";
+            }
+
+            // Commanded Gear & Slip
+            let rGear = await queryModulePid("7E1", "221E12", 300);
+            let bGear = getPayloadBytes(rGear, "621E12");
+            if (bGear.length >= 1) document.getElementById('valGear').innerText = "Gear " + bGear[0];
+
+            let rSlip = await queryModulePid("7E1", "221E14", 300);
+            let bSlip = getPayloadBytes(rSlip, "621E14");
+            if (bSlip.length >= 2) document.getElementById('valTccSlip').innerText = Math.round(((bSlip[0] * 256) + bSlip[1]) / 4) + " RPM";
+        }
+
+        // 7. FORD, LINCOLN & MERCURY
+        else if (oem === "FORD") {
+            // Trans Fluid Temp
+            let rTft = await queryModulePid("7E0", "221E1C", 350);
+            let bTft = getPayloadBytes(rTft, "621E1C");
+            if (bTft.length >= 2) {
+                document.getElementById('valTft').innerText = Math.round(((((bTft[0] * 256) + bTft[1]) / 16) - 40) * 1.8 + 32) + " °F";
+            } else {
+                let r2 = await queryModulePid("7E0", "221674", 350);
+                let b2 = getPayloadBytes(r2, "621674");
+                if (b2.length >= 2) {
+                    document.getElementById('valTft').innerText = Math.round(((((b2[0] * 256) + b2[1]) * 5 / 72) - 18) * 1.8 + 32) + " °F";
+                }
+            }
+
+            // Cylinder Head Temp (CHT)
+            let rCht = await queryModulePid("7E0", "221624", 350);
+            let bCht = getPayloadBytes(rCht, "621624");
+            if (bCht.length >= 2) {
+                document.getElementById('valCht').innerText = Math.round(((((bCht[0] * 256) + bCht[1]) / 10) - 40) * 1.8 + 32) + " °F";
+            }
+
+            // TCC Slip & Gear
+            let rSlip = await queryModulePid("7E0", "221E14", 300);
+            let bSlip = getPayloadBytes(rSlip, "621E14");
+            if (bSlip.length >= 2) document.getElementById('valTccSlip').innerText = Math.round(((bSlip[0] * 256) + bSlip[1]) / 4) + " RPM";
+
+            let rGear = await queryModulePid("7E0", "221E12", 300);
+            let bGear = getPayloadBytes(rGear, "621E12");
+            if (bGear.length >= 1) document.getElementById('valGear').innerText = "Gear " + bGear[0];
+        }
+
+        // 8. GENERAL MOTORS (CHEVY, GMC, CADILLAC, BUICK)
+        else if (oem === "GM") {
+            // Trans Fluid Temp
+            let rTft = await queryModulePid("7E0", "221940", 350);
+            let bTft = getPayloadBytes(rTft, "621940");
+            if (bTft.length >= 1) {
+                document.getElementById('valTft').innerText = Math.round((bTft[0] - 40) * 1.8 + 32) + " °F";
+            } else {
+                let r2 = await queryModulePid("7E2", "221940", 350);
+                let b2 = getPayloadBytes(r2, "621940");
+                if (b2.length >= 1) document.getElementById('valTft').innerText = Math.round((b2[0] - 40) * 1.8 + 32) + " °F";
+            }
+
+            // Engine Oil Pressure (EOP)
+            let rEop = await queryModulePid("7E0", "22115C", 300);
+            let bEop = getPayloadBytes(rEop, "62115C");
+            if (bEop.length >= 1) document.getElementById('valEop').innerText = Math.round(bEop[0] * 0.579) + " PSI";
+
+            // Knock Retard (KR)
+            let rKr = await queryModulePid("7E0", "2211A6", 300);
+            let bKr = getPayloadBytes(rKr, "6211A6");
+            if (bKr.length >= 1) document.getElementById('valKr').innerText = (bKr[0] * 0.1).toFixed(1) + "°";
+
+            // TCC Slip & Commanded Gear
+            let rSlip = await queryModulePid("7E0", "221943", 300);
+            let bSlip = getPayloadBytes(rSlip, "621943");
+            if (bSlip.length >= 2) document.getElementById('valTccSlip').innerText = Math.round(((bSlip[0] * 256) + bSlip[1]) / 8) + " RPM";
+
+            let rGear = await queryModulePid("7E0", "221944", 300);
+            let bGear = getPayloadBytes(rGear, "621944");
+            if (bGear.length >= 1) document.getElementById('valGear').innerText = "Gear " + bGear[0];
+
+            // Ethanol Fuel Content %
+            let rEth = await queryModulePid("7E0", "220052", 300);
+            let bEth = getPayloadBytes(rEth, "620052");
+            if (bEth.length >= 1) document.getElementById('valEth').innerText = Math.round(bEth[0] * 0.392) + "% Eth";
+        }
+
+        // 9. CHRYSLER, DODGE, JEEP & RAM
+        else if (oem === "CHRYSLER") {
+            // Engine Oil Pressure
+            let rEop = await queryModulePid("7E0", "221003", 300);
+            let bEop = getPayloadBytes(rEop, "621003");
+            if (bEop.length >= 1) document.getElementById('valEop').innerText = Math.round(bEop[0] * 0.58) + " PSI";
+
+            // Trans Fluid Temp
+            let rTft = await queryModulePid("7E0", "22B005", 350);
+            let bTft = getPayloadBytes(rTft, "62B005");
+            if (bTft.length >= 1) {
+                document.getElementById('valTft').innerText = Math.round((bTft[0] - 40) * 1.8 + 32) + " °F";
+            } else {
+                let r2 = await queryModulePid("7E2", "22B005", 350);
+                let b2 = getPayloadBytes(r2, "62B005");
+                if (b2.length >= 1) document.getElementById('valTft').innerText = Math.round((b2[0] - 40) * 1.8 + 32) + " °F";
+            }
+
+            // Engine Oil Temp
+            let rEot = await queryModulePid("7E0", "221002", 300);
+            let bEot = getPayloadBytes(rEot, "621002");
+            if (bEot.length >= 1) document.getElementById('valCht').innerText = Math.round((bEot[0] - 40) * 1.8 + 32) + " °F (Oil)";
+        }
     }
 
     async function runLiveLoop() {
@@ -1465,7 +1740,7 @@ Keep it strictly under 100 words.
                         document.getElementById('valVolt').innerText = lastVolt.toFixed(1) + "V";
                     }
 
-                    // Query OEM Enhanced PIDs (including Honda ATF Temp & VCM)
+                    // Query All OEM Enhanced PIDs across Domestic & Asian profiles
                     let currentOem = getActiveOemProfile();
                     await queryEnhancedPids(currentOem);
 
@@ -1559,7 +1834,7 @@ Keep it strictly under 100 words.
             log("Auto-loading I/M Readiness monitors (Mode 01 01)...");
             await loadReadinessMonitors();
 
-            // 2. AUTO-LOAD MODE $06 ON-BOARD MONITORS (CYLINDERS 1-6 & DUAL CATS)
+            // 2. AUTO-LOAD MODE $06 ON-BOARD MONITORS (CYLINDERS 1-8 & DUAL CATS)
             log("Auto-scanning Mode $06 monitors & cylinder misfire counts...");
             await loadMode6Data();
 
@@ -1692,6 +1967,8 @@ Keep it strictly under 100 words.
             "TCC_Slip": document.getElementById('valTccSlip').innerText,
             "CommandedGear": document.getElementById('valGear').innerText,
             "KnockRetard": document.getElementById('valKr').innerText,
+            "Ethanol_FRP2": document.getElementById('valEth').innerText,
+            "Hybrid_SOC": document.getElementById('valSoc').innerText,
             "Timing": document.getElementById('valTime').innerText,
             "O2_B1S1": document.getElementById('valO21').innerText,
             "O2_B1S2": document.getElementById('valO22').innerText,
@@ -1720,7 +1997,7 @@ DIAGNOSTIC TASK:
 1. Fuel Control & Trim Analysis: Total Trim (STFT + LTFT) on Bank 1 vs Bank 2. Single-bank vs dual-bank discrepancy.
 2. Powertrain & Drivetrain Health: Transmission fluid temp, engine oil pressure, CHT/VCM status, torque converter slip, and knock retard.
 3. Air Metering & O2/AFR Sensors: Sensor switching vs catalytic converter holding efficiency on both banks.
-4. Mode $06 Misfire & Monitor Integrity: Evaluate cylinder-by-cylinder misfire counts (Cyl 1-6) and catalyst/EVAP/VVT monitors.
+4. Mode $06 Misfire & Monitor Integrity: Evaluate cylinder-by-cylinder misfire counts (Cyl 1-8+) and catalyst/EVAP/VVT monitors.
 5. Emissions Readiness State: Which monitors are not ready, and what drive cycle conditions are needed to set them?
 6. Immediate Master Tech Next Step: The single most definitive physical/electrical isolation test to condemn the root cause.
 
@@ -1788,7 +2065,7 @@ Format with clean bold sections and direct shop-floor language.
   )
   ble_html = ble_html.replace("___DETECTED_MAKE___", detected_make)
 
-  components.html(ble_html, height=1350)
+  components.html(ble_html, height=1400)
 
 # ========================================================
 # --- TAB 3: IN-DEPTH DTC DIAGNOSTIC STRATEGY ---
