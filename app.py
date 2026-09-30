@@ -485,7 +485,7 @@ with tab2:
 
   gemini_api_key = get_gemini_key()
 
-  # Auto-detect vehicle make for enhanced DID routing (including Honda/Acura)
+  # Auto-detect vehicle make for enhanced DID routing
   detected_make = "GENERIC"
   if st.session_state.vehicle_info:
     v_upper = st.session_state.vehicle_info.upper()
@@ -1019,13 +1019,12 @@ Keep it strictly under 100 words.
         }
     }
 
-    // --- REUSABLE FULL MODE $06 FETCHER (ALL 6 HONDA V6 CYLINDERS & DUAL CATALYSTS) ---
+    // --- REUSABLE FULL MODE $06 FETCHER (OPTIMIZED FOR HONDA ODYSSEY V6) ---
     async function loadMode6Data() {
         const m6Box = document.getElementById('mode6Box');
-        m6Box.innerHTML = "<div style='color: #F59E0B; padding: 4px;'>⚡ Scanning all supported vehicle monitors (Cylinders 1-8+, Catalyst Bank 1 & 2, O2 Sensors, EVAP, VVT, EGR)...</div>";
+        m6Box.innerHTML = "<div style='color: #F59E0B; padding: 4px;'>⚡ Scanning all supported vehicle monitors (Cylinders 1-6+, Catalyst Bank 1 & 2, O2 Sensors, EVAP, VVT, EGR)...</div>";
 
         const allMonitors = [
-            // Cylinders 1-6 for Odyssey V6 (and 7-8 if equipped)
             {mid: "06A2", name: "Cylinder 1 Misfires (Bank 1)", isCyl: true},
             {mid: "06A3", name: "Cylinder 2 Misfires (Bank 1)", isCyl: true},
             {mid: "06A4", name: "Cylinder 3 Misfires (Bank 1)", isCyl: true},
@@ -1034,22 +1033,17 @@ Keep it strictly under 100 words.
             {mid: "06A7", name: "Cylinder 6 Misfires (Bank 2)", isCyl: true},
             {mid: "06A8", name: "Cylinder 7 Misfires", isCyl: true},
             {mid: "06A9", name: "Cylinder 8 Misfires", isCyl: true},
-            // Dual Catalysts
             {mid: "0621", name: "Catalyst Bank 1", isCyl: false},
             {mid: "0622", name: "Catalyst Bank 2", isCyl: false},
-            // O2 Sensors
             {mid: "0601", name: "O2 Sensor B1S1 Monitor", isCyl: false},
             {mid: "0602", name: "O2 Sensor B1S2 Monitor", isCyl: false},
             {mid: "0605", name: "O2 Sensor B2S1 Monitor", isCyl: false},
             {mid: "0606", name: "O2 Sensor B2S2 Monitor", isCyl: false},
-            // VVT / VTEC / VCM
             {mid: "0635", name: "VVT / Cam Phasing Bank 1", isCyl: false},
             {mid: "0636", name: "VVT / Cam Phasing Bank 2", isCyl: false},
-            // EVAP
             {mid: "0639", name: "EVAP 0.040 Monitor", isCyl: false},
             {mid: "063A", name: "EVAP 0.020 Leak Monitor", isCyl: false},
             {mid: "063B", name: "EVAP Purge Flow Monitor", isCyl: false},
-            // EGR
             {mid: "0651", name: "EGR Flow / Lift Monitor", isCyl: false}
         ];
 
@@ -1057,12 +1051,20 @@ Keep it strictly under 100 words.
         let foundAny = false;
         mode6RawData = "";
 
-        for (let t of allMonitors) {
-            let res = await sendCmd(t.mid, 600);
+        for (let idx = 0; idx < allMonitors.length; idx++) {
+            let t = allMonitors[idx];
+            let res = await sendCmd(t.mid, 500);
             let clean = parseCleanHex(res);
-            if (clean.includes("NODATA") || clean.includes("?") || clean.length < 6) continue;
-            mode6RawData += `\\n${t.name} (${t.mid}): ${res}`;
+            
+            // On a V6 Odyssey, stop checking Cyl 7 and 8 if Cyl 7 returns NODATA
+            if ((clean.includes("NODATA") || clean.includes("?") || clean.length < 6)) {
+                if (t.mid === "06A8") {
+                    idx++; // skip Cyl 8
+                }
+                continue;
+            }
 
+            mode6RawData += `\\n${t.name} (${t.mid}): ${res}`;
             let color = "#00FF66";
             let statusText = "PASS";
 
@@ -1095,10 +1097,9 @@ Keep it strictly under 100 words.
     async function queryEnhancedPids(oem) {
         if (oem === "GENERIC") return;
 
-        await sendCmd("ATSH 7E0", 300);
+        await sendCmd("ATSH 7E0", 250);
 
         if (oem === "HONDA") {
-            // Honda Automatic Transmission Fluid Temp (222201 or 221627)
             let rTft = await queryPid("222201", 350);
             let mTft = rTft.match(/622201([0-9A-F]{2})/);
             if (mTft) {
@@ -1115,7 +1116,6 @@ Keep it strictly under 100 words.
                 }
             }
 
-            // Honda VCM (Variable Cylinder Management) Active Cylinders (222615)
             let rVcm = await queryPid("222615", 350);
             let mVcm = rVcm.match(/622615([0-9A-F]{2})/);
             if (mVcm) {
@@ -1219,7 +1219,7 @@ Keep it strictly under 100 words.
             } else if (unsupportedPids.has("22B005")) document.getElementById('valTft').innerText = "N/A";
         }
 
-        await sendCmd("ATSH 7DF", 300);
+        await sendCmd("ATSH 7DF", 250);
     }
 
     async function runLiveLoop() {
@@ -1425,6 +1425,7 @@ Keep it strictly under 100 words.
                     else if (unsupportedPids.has("015C")) document.getElementById('valEot').innerText = "N/A";
                     if (!isStreaming) break;
 
+                    // Fuel Rail Pressure
                     let cFrp = await queryPid("0123", 300);
                     let mFrp = cFrp.match(/4123([0-9A-F]{4})/);
                     if (mFrp) {
@@ -1477,7 +1478,7 @@ Keep it strictly under 100 words.
         }
     }
 
-    // --- ONE-TAP AUTOMATED CONNECTION, SCAN & STREAM SEQUENCE ---
+    // --- ONE-TAP AUTOMATED CONNECTION, FAST CAN HANDSHAKE & STREAM SEQUENCE ---
     document.getElementById('bleBtn').addEventListener('click', async () => {
         try {
             log("Opening Bluetooth selector...");
@@ -1507,14 +1508,31 @@ Keep it strictly under 100 words.
             await txChar.startNotifications();
             txChar.addEventListener('characteristicvaluechanged', onData);
 
-            log("Configuring Veepeak adapter...");
-            await sendCmd("ATE0", 600);
-            await sendCmd("ATL0", 500);
-            await sendCmd("ATH0", 500);
-            await sendCmd("ATSP0", 600);
+            log("Resetting Veepeak adapter (ATZ)...");
+            await sendCmd("ATZ", 1200);
+            await sendCmd("ATE0", 400);
+            await sendCmd("ATL0", 400);
+            await sendCmd("ATH0", 400);
+            await sendCmd("ATAT1", 400);
 
-            log("Connecting to vehicle ECM...");
-            await sendCmd("0100", 4000);
+            // Fast Handshake: Attempt High-Speed CAN (Protocol 6) first
+            log("Establishing ISO 15765-4 CAN link (ATSP6)...");
+            await sendCmd("ATSP6", 400);
+            let p00 = await sendCmd("0100", 2500);
+
+            // If ATSP6 did not get 4100, fall back to Auto-Protocol (ATSP0)
+            if (!parseCleanHex(p00).includes("4100")) {
+                log("Scanning legacy protocols (ATSP0)...");
+                await sendCmd("ATSP0", 400);
+                p00 = await sendCmd("0100", 8000);
+            }
+
+            // Connection Verification Guard: Stop immediately if ECM is not communicating
+            if (!parseCleanHex(p00).includes("4100")) {
+                log("ECM not responding. Ensure key is ON (Engine running or KOEO).");
+                alert("⚠️ ECM not responding to 0100. Make sure the vehicle ignition is turned fully ON (or engine running), then tap Connect & Auto-Scan again.");
+                return;
+            }
 
             unsupportedPids.clear();
             o2B1Probe = null;
@@ -1541,7 +1559,7 @@ Keep it strictly under 100 words.
             log("Auto-loading I/M Readiness monitors (Mode 01 01)...");
             await loadReadinessMonitors();
 
-            // 2. AUTO-LOAD MODE $06 ON-BOARD MONITORS (ALL 6 V6 CYLINDERS & DUAL CATS)
+            // 2. AUTO-LOAD MODE $06 ON-BOARD MONITORS (CYLINDERS 1-6 & DUAL CATS)
             log("Auto-scanning Mode $06 monitors & cylinder misfire counts...");
             await loadMode6Data();
 
