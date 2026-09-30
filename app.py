@@ -470,10 +470,10 @@ with tab1:
       st.error("Could not find vehicle details. Check the VIN and try again.")
 
 # ========================================================
-# --- TAB 2: AUTO-CONNECTING TELEMETRY, MONITORS & MODE 06 ---
+# --- TAB 2: LIVE TELEMETRY, ENHANCED PIDS, MONITORS & MODE 06 ---
 # ========================================================
 with tab2:
-  st.subheader("📊 Live Telemetry, I/M Monitors & Mode $06")
+  st.subheader("📊 Live Telemetry, OEM Enhanced PIDs & Monitors")
 
   c_tag = st.session_state.customer_name or "None"
   v_tag = st.session_state.vehicle_info or "No Vehicle Selected"
@@ -484,6 +484,23 @@ with tab2:
   )
 
   gemini_api_key = get_gemini_key()
+
+  # Identify auto-detected vehicle make for enhanced DID routing
+  detected_make = "GENERIC"
+  if st.session_state.vehicle_info:
+    v_upper = st.session_state.vehicle_info.upper()
+    if any(m in v_upper for m in ["FORD", "LINCOLN", "MERCURY"]):
+      detected_make = "FORD"
+    elif any(
+        m in v_upper for m in ["CHEVROLET", "CHEVY", "GMC", "CADILLAC", "BUICK"]
+    ):
+      detected_make = "GM"
+    elif any(m in v_upper for m in ["TOYOTA", "LEXUS", "SCION"]):
+      detected_make = "TOYOTA"
+    elif any(
+        m in v_upper for m in ["CHRYSLER", "DODGE", "JEEP", "RAM", "PLYMOUTH"]
+    ):
+      detected_make = "CHRYSLER"
 
   ble_dashboard_template = """
     <div style="background-color: #1A1F26; border: 1px solid #00FF66; padding: 14px; border-radius: 8px; margin-bottom: 1rem;">
@@ -507,8 +524,20 @@ with tab2:
             <button id="pullVinBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
                 📋 Sync VIN & DTCs
             </button>
+            
+            <div style="margin-left: auto; display: flex; align-items: center; gap: 6px;">
+                <span style="font-size: 0.8rem; color: #A0AEC0;">OEM Profile:</span>
+                <select id="oemProfileSelect" style="background: #111418; color: #00FF66; border: 1px solid #00FF66; padding: 6px 10px; border-radius: 4px; font-weight: 700; font-size: 0.85rem;">
+                    <option value="AUTO">Auto-Detect</option>
+                    <option value="FORD">Ford / Lincoln</option>
+                    <option value="GM">GM / Chevrolet / GMC</option>
+                    <option value="TOYOTA">Toyota / Lexus</option>
+                    <option value="CHRYSLER">Chrysler / Dodge / Jeep</option>
+                    <option value="GENERIC">Standard Generic</option>
+                </select>
+            </div>
         </div>
-        <div id="bleStatus" style="color: #A0AEC0; font-family: monospace; font-size: 0.85rem; margin-bottom: 12px;">Status: Ready to pair. Connect once to automatically load Monitors, Mode $06, and start live telemetry.</div>
+        <div id="bleStatus" style="color: #A0AEC0; font-family: monospace; font-size: 0.85rem; margin-bottom: 12px;">Status: Ready to pair. Tap "Connect & Auto-Scan" to auto-load Monitors, Mode $06, and start live telemetry.</div>
 
         <!-- TEST DRIVE AI ACTIVE BANNER -->
         <div id="driveBanner" style="display: none; background: #0F172A; border-left: 4px solid #38BDF8; padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; font-size: 0.85rem; color: #38BDF8;">
@@ -620,19 +649,48 @@ with tab2:
             </div>
         </div>
 
-        <!-- 2. I/M READINESS MONITORS (UNDER LIVE DATA) -->
+        <!-- 2. OEM ENHANCED PIDS (UDS SERVICE 0x22) -->
+        <div style="font-weight: 700; font-size: 0.95rem; color: #EC4899; margin-bottom: 6px;">🏭 OEM ENHANCED PIDS (UDS 0x22 PROPRIETARY DATA)</div>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; max-height: 180px; overflow-y: auto; padding-right: 4px; margin-bottom: 16px;">
+            <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Trans Fluid Temp</div>
+                <div id="valTft" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Engine Oil Press</div>
+                <div id="valEop" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Cyl Head Temp (CHT)</div>
+                <div id="valCht" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">TCC Converter Slip</div>
+                <div id="valTccSlip" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Commanded Gear</div>
+                <div id="valGear" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
+            </div>
+            <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
+                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Knock Retard (KR)</div>
+                <div id="valKr" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
+            </div>
+        </div>
+
+        <!-- 3. I/M READINESS MONITORS (UNDER ENHANCED PIDS) -->
         <div style="font-weight: 700; font-size: 0.95rem; color: #38BDF8; margin-bottom: 6px;">📋 EMISSIONS INSPECTION (I/M) READINESS MONITORS</div>
         <div id="readinessBox" style="background: #111418; border: 1px solid #2D3748; border-radius: 6px; padding: 10px; margin-bottom: 16px;">
             <div style="color: #A0AEC0; font-size: 0.85rem;">Monitors will auto-load immediately upon connection.</div>
         </div>
 
-        <!-- 3. FULL MODE $06 ON-BOARD MONITORS (UNDER READINESS) -->
+        <!-- 4. FULL MODE $06 ON-BOARD MONITORS (UNDER READINESS) -->
         <div style="font-weight: 700; font-size: 0.95rem; color: #38BDF8; margin-bottom: 6px;">📊 COMPLETE ON-BOARD DIAGNOSTIC MONITORS (MODE $06)</div>
         <div id="mode6Box" style="background: #111418; border: 1px solid #2D3748; border-radius: 6px; padding: 10px; min-height: 80px; max-height: 240px; overflow-y: auto; font-family: monospace; font-size: 0.85rem; color: #A0AEC0; margin-bottom: 16px;">
             Mode $06 monitors will auto-load immediately upon connection.
         </div>
 
-        <!-- 4. AI DIAGNOSTIC VERDICT (BOTTOM) -->
+        <!-- 5. AI DIAGNOSTIC VERDICT (BOTTOM) -->
         <div style="font-weight: 700; font-size: 0.95rem; color: #F59E0B; margin-bottom: 6px;">🤖 AI MASTER TECH TELEMETRY EVALUATION</div>
         <div id="aiVerdictBox" style="background: #111418; border: 1px solid #F59E0B; border-radius: 6px; padding: 12px; min-height: 90px; max-height: 320px; overflow-y: auto; font-size: 0.9rem; line-height: 1.45; color: #FFFFFF;">
             Connect adapter to automatically analyze live telemetry and diagnostic monitors.
@@ -643,6 +701,7 @@ with tab2:
     const GEMINI_API_KEY = "___GEMINI_KEY___";
     const VEHICLE_CONTEXT = "___VEHICLE_INFO___";
     const DTC_CONTEXT = "___ACTIVE_DTC___";
+    const DETECTED_MAKE = "___DETECTED_MAKE___";
 
     const NORDIC_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
     const NORDIC_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
@@ -773,6 +832,14 @@ with tab2:
         return clean;
     }
 
+    function getActiveOemProfile() {
+        let sel = document.getElementById('oemProfileSelect').value;
+        if (sel === "AUTO") {
+            return DETECTED_MAKE;
+        }
+        return sel;
+    }
+
     function speakAlert(text) {
         const now = Date.now();
         if (now - lastVoiceAlertTime < 18000) return;
@@ -839,6 +906,9 @@ with tab2:
             "LTFT1": document.getElementById('valLtft').innerText,
             "STFT2": document.getElementById('valStft2').innerText,
             "LTFT2": document.getElementById('valLtft2').innerText,
+            "TransTemp": document.getElementById('valTft').innerText,
+            "OilPress": document.getElementById('valEop').innerText,
+            "CHT": document.getElementById('valCht').innerText,
             "Timing": document.getElementById('valTime').innerText,
             "O2_B1S1": document.getElementById('valO21').innerText,
             "O2_B1S2": document.getElementById('valO22').innerText,
@@ -855,7 +925,7 @@ ${JSON.stringify(pids, null, 2)}
 
 Provide a concise 3-bullet live assessment:
 1. Dynamic Fuel Delivery & Trim State (Bank 1 vs 2 balance under current load).
-2. Plausibility of sensors (O2 switching, MAF vs load, coolant temp).
+2. Transmission, Oil Pressure & Temperature Health.
 3. Any immediate anomaly to inspect upon returning to the bay.
 Keep it strictly under 100 words.
 `;
@@ -998,6 +1068,122 @@ Keep it strictly under 100 words.
         }
     }
 
+    // --- REUSABLE OEM ENHANCED PIDS QUERY (UDS 0x22) ---
+    async function queryEnhancedPids(oem) {
+        if (oem === "GENERIC") return;
+
+        // Switch to physical ECM address 7E0
+        await sendCmd("ATSH 7E0", 300);
+
+        if (oem === "FORD") {
+            // Ford Transmission Fluid Temp (221E1C or 221674)
+            let rTft = await queryPid("221E1C", 350);
+            let mTft = rTft.match(/621E1C([0-9A-F]{4})/);
+            if (mTft) {
+                let a = parseInt(mTft[1].substr(0, 2), 16);
+                let b = parseInt(mTft[1].substr(2, 2), 16);
+                let degF = Math.round(((((a * 256) + b) / 16) - 40) * 1.8 + 32);
+                document.getElementById('valTft').innerText = degF + " °F";
+            } else if (unsupportedPids.has("221E1C")) {
+                let r2 = await queryPid("221674", 350);
+                let m2 = r2.match(/621674([0-9A-F]{4})/);
+                if (m2) {
+                    let a = parseInt(m2[1].substr(0, 2), 16);
+                    let b = parseInt(m2[1].substr(2, 2), 16);
+                    document.getElementById('valTft').innerText = Math.round(((((a * 256) + b) * 5 / 72) - 18) * 1.8 + 32) + " °F";
+                } else if (unsupportedPids.has("221674")) document.getElementById('valTft').innerText = "N/A";
+            }
+
+            // Ford Cylinder Head Temp (221624)
+            let rCht = await queryPid("221624", 350);
+            let mCht = rCht.match(/621624([0-9A-F]{4})/);
+            if (mCht) {
+                let a = parseInt(mCht[1].substr(0, 2), 16);
+                let b = parseInt(mCht[1].substr(2, 2), 16);
+                let degF = Math.round(((((a * 256) + b) / 10) - 40) * 1.8 + 32);
+                document.getElementById('valCht').innerText = degF + " °F";
+            } else if (unsupportedPids.has("221624")) document.getElementById('valCht').innerText = "N/A";
+
+            // Ford TCC Slip RPM (221E14)
+            let rSlip = await queryPid("221E14", 350);
+            let mSlip = rSlip.match(/621E14([0-9A-F]{4})/);
+            if (mSlip) {
+                let a = parseInt(mSlip[1].substr(0, 2), 16);
+                let b = parseInt(mSlip[1].substr(2, 2), 16);
+                document.getElementById('valTccSlip').innerText = Math.round(((a * 256) + b) / 4) + " RPM";
+            } else if (unsupportedPids.has("221E14")) document.getElementById('valTccSlip').innerText = "N/A";
+
+            // Ford Commanded Gear (221E12)
+            let rGear = await queryPid("221E12", 350);
+            let mGear = rGear.match(/621E12([0-9A-F]{2})/);
+            if (mGear) document.getElementById('valGear').innerText = "Gear " + parseInt(mGear[1], 16);
+            else if (unsupportedPids.has("221E12")) document.getElementById('valGear').innerText = "N/A";
+
+        } else if (oem === "GM") {
+            // GM Transmission Fluid Temp (221940)
+            let rTft = await queryPid("221940", 350);
+            let mTft = rTft.match(/621940([0-9A-F]{2})/);
+            if (mTft) {
+                let degF = Math.round((parseInt(mTft[1], 16) - 40) * 1.8 + 32);
+                document.getElementById('valTft').innerText = degF + " °F";
+            } else if (unsupportedPids.has("221940")) document.getElementById('valTft').innerText = "N/A";
+
+            // GM Engine Oil Pressure (22115C)
+            let rEop = await queryPid("22115C", 350);
+            let mEop = rEop.match(/62115C([0-9A-F]{2})/);
+            if (mEop) {
+                let psi = Math.round(parseInt(mEop[1], 16) * 0.579);
+                document.getElementById('valEop').innerText = psi + " PSI";
+            } else if (unsupportedPids.has("22115C")) document.getElementById('valEop').innerText = "N/A";
+
+            // GM Knock Retard (2211A6)
+            let rKr = await queryPid("2211A6", 350);
+            let mKr = rKr.match(/6211A6([0-9A-F]{2})/);
+            if (mKr) {
+                let kr = (parseInt(mKr[1], 16) * 0.1).toFixed(1);
+                document.getElementById('valKr').innerText = kr + "°";
+            } else if (unsupportedPids.has("2211A6")) document.getElementById('valKr').innerText = "N/A";
+
+            // GM TCC Slip (221943)
+            let rSlip = await queryPid("221943", 350);
+            let mSlip = rSlip.match(/621943([0-9A-F]{4})/);
+            if (mSlip) {
+                let a = parseInt(mSlip[1].substr(0, 2), 16);
+                let b = parseInt(mSlip[1].substr(2, 2), 16);
+                document.getElementById('valTccSlip').innerText = Math.round(((a * 256) + b) / 8) + " RPM";
+            } else if (unsupportedPids.has("221943")) document.getElementById('valTccSlip').innerText = "N/A";
+
+        } else if (oem === "TOYOTA") {
+            // Toyota A/T Pan Temp (221627)
+            let rTft = await queryPid("221627", 350);
+            let mTft = rTft.match(/621627([0-9A-F]{2})/);
+            if (mTft) {
+                let degF = Math.round((parseInt(mTft[1], 16) - 40) * 1.8 + 32);
+                document.getElementById('valTft').innerText = degF + " °F";
+            } else if (unsupportedPids.has("221627")) document.getElementById('valTft').innerText = "N/A";
+
+        } else if (oem === "CHRYSLER") {
+            // Chrysler Oil Pressure (221003)
+            let rEop = await queryPid("221003", 350);
+            let mEop = rEop.match(/621003([0-9A-F]{2})/);
+            if (mEop) {
+                let psi = Math.round(parseInt(mEop[1], 16) * 0.58);
+                document.getElementById('valEop').innerText = psi + " PSI";
+            } else if (unsupportedPids.has("221003")) document.getElementById('valEop').innerText = "N/A";
+
+            // Chrysler Trans Temp (22B005)
+            let rTft = await queryPid("22B005", 350);
+            let mTft = rTft.match(/62B005([0-9A-F]{2})/);
+            if (mTft) {
+                let degF = Math.round((parseInt(mTft[1], 16) - 40) * 1.8 + 32);
+                document.getElementById('valTft').innerText = degF + " °F";
+            } else if (unsupportedPids.has("22B005")) document.getElementById('valTft').innerText = "N/A";
+        }
+
+        // Restore standard functional broadcast address
+        await sendCmd("ATSH 7DF", 300);
+    }
+
     async function runLiveLoop() {
         let lastS1 = 0, lastL1 = 0, lastS2 = 0, lastL2 = 0, lastEct = 0, lastVolt = 0;
 
@@ -1031,7 +1217,6 @@ Keep it strictly under 100 words.
 
                 // Tier 2: Fuel Trims & Both Cylinder Banks (Every 2nd Cycle)
                 if (loopCycle % 2 === 0) {
-                    // STFT / LTFT Bank 1
                     let cStft = await queryPid("0106", 350);
                     let mStft = cStft.match(/4106([0-9A-F]{2})/);
                     if (mStft) {
@@ -1048,7 +1233,6 @@ Keep it strictly under 100 words.
                     }
                     if (!isStreaming) break;
 
-                    // STFT / LTFT Bank 2
                     let cStft2 = await queryPid("0108", 350);
                     let mStft2 = cStft2.match(/4108([0-9A-F]{2})/);
                     if (mStft2) {
@@ -1069,7 +1253,6 @@ Keep it strictly under 100 words.
                     }
                     if (!isStreaming) break;
 
-                    // Timing & Air
                     let cTime = await queryPid("010E", 300);
                     let mTime = cTime.match(/410E([0-9A-F]{2})/);
                     if (mTime) document.getElementById('valTime').innerText = ((parseInt(mTime[1], 16) / 2) - 64).toFixed(1) + "°";
@@ -1095,7 +1278,7 @@ Keep it strictly under 100 words.
                     }
                     if (!isStreaming) break;
 
-                    // Bank 1 Sensor 1 (Wideband vs Narrowband)
+                    // Bank 1 Sensor 1
                     if (!o2B1Probe) {
                         let c14 = await queryPid("0114", 300);
                         if (c14.includes("4114")) o2B1Probe = "14";
@@ -1123,14 +1306,14 @@ Keep it strictly under 100 words.
                         }
                     }
 
-                    // Bank 1 Sensor 2 (Downstream Cat)
+                    // Bank 1 Sensor 2
                     let cO22 = await queryPid("0115", 300);
                     let mO22 = cO22.match(/4115([0-9A-F]{2})/);
                     if (mO22) document.getElementById('valO22').innerText = (parseInt(mO22[1], 16) / 200).toFixed(2) + "V";
                     else if (unsupportedPids.has("0115")) document.getElementById('valO22').innerText = "N/A";
                     if (!isStreaming) break;
 
-                    // Bank 2 Sensor 1 (Wideband vs Narrowband)
+                    // Bank 2 Sensor 1
                     if (!o2B2Probe) {
                         let c18 = await queryPid("0118", 300);
                         if (c18.includes("4118")) o2B2Probe = "18";
@@ -1161,14 +1344,14 @@ Keep it strictly under 100 words.
                     }
                     if (!isStreaming) break;
 
-                    // Bank 2 Sensor 2 (Downstream Cat B2)
+                    // Bank 2 Sensor 2
                     let cO222 = await queryPid("0119", 300);
                     let mO222 = cO222.match(/4119([0-9A-F]{2})/);
                     if (mO222) document.getElementById('valO222').innerText = (parseInt(mO222[1], 16) / 200).toFixed(2) + "V";
                     else if (unsupportedPids.has("0119")) document.getElementById('valO222').innerText = "N/A";
                     if (!isStreaming) break;
 
-                    // Pedal Pos APP (0149)
+                    // Pedal Pos APP
                     let cApp = await queryPid("0149", 300);
                     let mApp = cApp.match(/4149([0-9A-F]{2})/);
                     if (mApp) document.getElementById('valApp').innerText = Math.round((parseInt(mApp[1], 16) * 100) / 255) + "%";
@@ -1204,7 +1387,7 @@ Keep it strictly under 100 words.
                     else if (unsupportedPids.has("015C")) document.getElementById('valEot').innerText = "N/A";
                     if (!isStreaming) break;
 
-                    // Fuel Rail Pressure (0123 or 010A)
+                    // Fuel Rail Pressure
                     let cFrp = await queryPid("0123", 300);
                     let mFrp = cFrp.match(/4123([0-9A-F]{4})/);
                     if (mFrp) {
@@ -1243,6 +1426,10 @@ Keep it strictly under 100 words.
                         lastVolt = parseFloat(vMatch[1]);
                         document.getElementById('valVolt').innerText = lastVolt.toFixed(1) + "V";
                     }
+
+                    // Query OEM Enhanced PIDs (UDS 0x22)
+                    let currentOem = getActiveOemProfile();
+                    await queryEnhancedPids(currentOem);
 
                     evaluateTestDriveTriggers(lastS1, lastL1, lastS2, lastL2, lastEct, lastVolt);
                 }
@@ -1321,7 +1508,7 @@ Keep it strictly under 100 words.
             log("Auto-scanning Mode $06 monitors & cylinder misfire counts...");
             await loadMode6Data();
 
-            // 3. AUTO-START LIVE TELEMETRY STREAM
+            // 3. AUTO-START LIVE TELEMETRY & ENHANCED PIDS STREAM
             log("All diagnostic monitors loaded! Starting live telemetry stream...");
             isStreaming = true;
             runLiveLoop();
@@ -1423,7 +1610,7 @@ Keep it strictly under 100 words.
             return;
         }
 
-        vBox.innerHTML = "<span style='color: #F59E0B;'>🤖 Gemini 2.5 Flash is analyzing live telemetry, Bank 1 & 2 trims, I/M monitors, and Mode $06 data...</span>";
+        vBox.innerHTML = "<span style='color: #F59E0B;'>🤖 Gemini 2.5 Flash is analyzing live telemetry, OEM enhanced data, I/M monitors, and Mode $06 results...</span>";
 
         const pids = {
             "RPM": document.getElementById('valRpm').innerText,
@@ -1444,6 +1631,12 @@ Keep it strictly under 100 words.
             "LTFT1": document.getElementById('valLtft').innerText,
             "STFT2": document.getElementById('valStft2').innerText,
             "LTFT2": document.getElementById('valLtft2').innerText,
+            "TransFluidTemp": document.getElementById('valTft').innerText,
+            "EngineOilPress": document.getElementById('valEop').innerText,
+            "CylHeadTemp": document.getElementById('valCht').innerText,
+            "TCC_Slip": document.getElementById('valTccSlip').innerText,
+            "CommandedGear": document.getElementById('valGear').innerText,
+            "KnockRetard": document.getElementById('valKr').innerText,
             "Timing": document.getElementById('valTime').innerText,
             "O2_B1S1": document.getElementById('valO21').innerText,
             "O2_B1S2": document.getElementById('valO22').innerText,
@@ -1459,7 +1652,7 @@ Perform a full diagnostic telemetry check for this vehicle:
 Vehicle: ${VEHICLE_CONTEXT}
 Active DTC: ${DTC_CONTEXT}
 
-LIVE STREAMING SENSOR DATA (MODE 01 - BANK 1 & BANK 2):
+LIVE STREAMING SENSOR DATA (MODE 01 & UDS 0x22 ENHANCED PIDS):
 ${JSON.stringify(pids, null, 2)}
 
 I/M READINESS MONITORS (MODE 01 01):
@@ -1469,9 +1662,9 @@ MODE $06 ON-BOARD TEST DATA:
 ${mode6RawData || "No Mode 6 scanned yet"}
 
 DIAGNOSTIC TASK:
-1. Fuel Control & Trim Analysis: Total Trim (STFT + LTFT) on Bank 1 vs Bank 2. Is there a single-bank lean/rich fault (injector, intake gasket, exhaust leak) or dual-bank fault (MAF, fuel pressure, EVAP)?
-2. Upstream & Downstream O2/AFR Evaluation: Upstream lambda/voltage behavior vs downstream catalyst holding steady (~0.6-0.8V). Compare Bank 1 vs Bank 2.
-3. Air Metering & Pressure Integrity: Is MAF/MAP matching calculated load and RPM?
+1. Fuel Control & Trim Analysis: Total Trim (STFT + LTFT) on Bank 1 vs Bank 2. Single-bank vs dual-bank discrepancy.
+2. Powertrain & Drivetrain Health: Transmission fluid temp, engine oil pressure, CHT, torque converter slip, and knock retard.
+3. Air Metering & O2/AFR Sensors: Sensor switching vs catalytic converter holding efficiency.
 4. Mode $06 Misfire & Monitor Integrity: Evaluate cylinder-by-cylinder misfire counts and catalyst/EVAP/VVT monitors.
 5. Emissions Readiness State: Which monitors are not ready, and what drive cycle conditions are needed to set them?
 6. Immediate Master Tech Next Step: The single most definitive physical/electrical isolation test to condemn the root cause.
@@ -1538,8 +1731,9 @@ Format with clean bold sections and direct shop-floor language.
       "___ACTIVE_DTC___",
       (st.session_state.active_dtc or "None").replace('"', ""),
   )
+  ble_html = ble_html.replace("___DETECTED_MAKE___", detected_make)
 
-  components.html(ble_html, height=1250)
+  components.html(ble_html, height=1350)
 
 # ========================================================
 # --- TAB 3: IN-DEPTH DTC DIAGNOSTIC STRATEGY ---
