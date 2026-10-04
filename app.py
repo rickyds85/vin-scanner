@@ -1,353 +1,302 @@
 import base64
 import csv
 from datetime import datetime
+import hashlib
 import io
 import json
 import os
+from pathlib import Path
 import re
+import tempfile
+
 from PIL import Image, ImageEnhance, ImageOps
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
 import zxingcpp
 
-st.set_page_config(
-    page_title="Test Don't Guess", page_icon="⚡", layout="wide"
-)
+st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-# Header with custom ignition firing line scope waveform
-firing_line_svg = """
+st.markdown(
+    """
 <div style="display: flex; align-items: center; gap: 14px; margin-bottom: 1.5rem;">
-  <svg width="65" height="42" viewBox="0 0 120 70" fill="none" xmlns="http://www.w3.org/2000/svg" style="vertical-align: middle;">
-    <!-- Dwell, Firing Line Spike, Spark Burn Line, and Coil Ringing -->
-    <path d="M 5 45 L 22 45 L 24 60 L 42 60 L 43 5 L 46 36 Q 48 34 54 36 T 64 36 T 74 35 T 80 36 Q 84 18 88 50 Q 92 24 96 44 Q 100 32 104 42 L 118 42" 
-          stroke="#00FF66" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" 
+  <svg width="65" height="42" viewBox="0 0 120 70" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M 5 45 L 22 45 L 24 60 L 42 60 L 43 5 L 46 36 Q 48 34 54 36 T 64 36 T 74 35 T 80 36 Q 84 18 88 50 Q 92 24 96 44 Q 100 32 104 42 L 118 42"
+          stroke="#00FF66" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"
           style="filter: drop-shadow(0px 0px 5px #00FF66);"/>
   </svg>
   <h1 style="margin: 0; padding: 0; font-size: 2.2rem; font-weight: 700;">Test Don't Guess</h1>
 </div>
-"""
-st.markdown(firing_line_svg, unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
-# Read query parameters from Web Bluetooth bridge redirect
-if "ble_vin" in st.query_params and st.query_params["ble_vin"]:
-  st.session_state.active_vin = st.query_params["ble_vin"].upper().strip()
-if "ble_dtc" in st.query_params and st.query_params["ble_dtc"]:
-  st.session_state.active_dtc = st.query_params["ble_dtc"].upper().strip()
-
-# Persistent session state across tabs
-if "vehicle_info" not in st.session_state:
-  st.session_state.vehicle_info = ""
-if "active_vin" not in st.session_state:
-  st.session_state.active_vin = ""
-if "active_dtc" not in st.session_state:
-  st.session_state.active_dtc = ""
-if "customer_name" not in st.session_state:
-  st.session_state.customer_name = ""
-if "customer_address" not in st.session_state:
-  st.session_state.customer_address = ""
-if "customer_phone" not in st.session_state:
-  st.session_state.customer_phone = ""
-if "chat_history" not in st.session_state:
-  st.session_state.chat_history = []
-
+# ========================================================
+# --- CONSTANTS ---
+# ========================================================
 LOG_FILE = "scan_history.csv"
+LOG_COLUMNS = ["Timestamp", "Customer", "Phone", "VIN", "Vehicle", "Fault Code (DTC)"]
+VIN_RE = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+
+# NHTSA "Make" -> enhanced-PID profile used by the Bluetooth dashboard
+MAKE_PROFILES = {
+    "HONDA": "HONDA", "ACURA": "HONDA",
+    "TOYOTA": "TOYOTA", "LEXUS": "TOYOTA", "SCION": "TOYOTA",
+    "NISSAN": "NISSAN", "INFINITI": "NISSAN",
+    "HYUNDAI": "HYUNDAI", "KIA": "HYUNDAI", "GENESIS": "HYUNDAI",
+    "SUBARU": "SUBARU", "MAZDA": "MAZDA",
+    "FORD": "FORD", "LINCOLN": "FORD", "MERCURY": "FORD",
+    "CHEVROLET": "GM", "GMC": "GM", "CADILLAC": "GM", "BUICK": "GM", "PONTIAC": "GM", "SATURN": "GM",
+    "CHRYSLER": "CHRYSLER", "DODGE": "CHRYSLER", "JEEP": "CHRYSLER", "RAM": "CHRYSLER",
+}
+
+# ========================================================
+# --- SESSION STATE ---
+# ========================================================
+ss = st.session_state
+DEFAULTS = {
+    "customer_name": "", "customer_phone": "", "customer_address": "",
+    "vin_input": "", "active_vin": "", "vehicle_info": "", "vehicle_make": "",
+    "vehicle_details": {}, "vin_error": "", "active_dtc": "",
+    "chat_history": [], "dtc_result": None, "scope_result": None,
+    "ble_ai": None, "ble_last_event": None, "ble_dtcs": {},
+}
+for _k, _v in DEFAULTS.items():
+    ss.setdefault(_k, _v)
+
+# Widget values can only be changed BEFORE the widget is drawn, so updates
+# coming from buttons/Bluetooth are queued, then applied here on the rerun.
+for _k, _v in ss.pop("_pending", {}).items():
+    ss[_k] = _v
+if _toast := ss.pop("_toast", None):
+    st.toast(_toast)
 
 
-# --- LOGGING HELPER FUNCTIONS ---
-def append_to_log(
-    vin: str, vehicle: str, dtc: str, customer: str = "", phone: str = ""
-):
-  file_exists = os.path.isfile(LOG_FILE)
-  timestamp = datetime.now().strftime("%Y-%m-%d %I:%M %p")
-  try:
-    with open(LOG_FILE, mode="a", newline="", encoding="utf-8") as f:
-      writer = csv.writer(f)
-      if not file_exists:
-        writer.writerow([
-            "Timestamp",
-            "Customer",
-            "Phone",
-            "VIN",
-            "Vehicle",
-            "Fault Code (DTC)",
-        ])
-      writer.writerow([
-          timestamp,
-          customer or "N/A",
-          phone or "N/A",
-          vin or "N/A",
-          vehicle or "Unknown Vehicle",
-          dtc or "N/A",
-      ])
-  except Exception:
-    pass
+def queue_update(toast: str | None = None, **values):
+  ss.setdefault("_pending", {}).update(values)
+  if toast:
+    ss._toast = toast
+  st.rerun()
 
 
-def load_log():
-  if not os.path.isfile(LOG_FILE):
-    return []
-  rows = []
-  try:
-    with open(LOG_FILE, mode="r", encoding="utf-8") as f:
-      reader = csv.DictReader(f)
-      for r in reader:
-        rows.append(r)
-  except Exception:
-    return []
-  return rows[::-1]
+# ========================================================
+# --- HELPERS ---
+# ========================================================
+class AIError(Exception):
+  pass
 
 
-# --- GEMINI HELPERS ---
-def get_gemini_key() -> str:
-  key = os.environ.get("GEMINI_API_KEY")
-  if not key and hasattr(st, "secrets"):
-    key = st.secrets.get("GEMINI_API_KEY")
-  return key or ""
-
-
-def query_gemini(prompt_text: str, system_instruction: str = "") -> str:
-  gemini_key = get_gemini_key()
-  if not gemini_key:
-    return "Error: GEMINI_API_KEY is missing from Streamlit Secrets."
-
-  url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
-  payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
-  if system_instruction:
-    payload["system_instruction"] = {
-        "parts": [{"text": system_instruction}]
-    }
-
-  try:
-    res = requests.post(url, json=payload, timeout=45)
-    if res.status_code == 200:
-      return res.json()["candidates"][0]["content"]["parts"][0]["text"]
-    else:
-      return f"Gemini API Error ({res.status_code}): {res.text}"
-  except Exception as e:
-    return f"Gemini Error: {e}"
-
-
-def analyze_scope_with_gemini(
-    pil_img: Image.Image | None, test_summary: str
-) -> str:
-  gemini_key = get_gemini_key()
-  if not gemini_key:
-    return "Error: GEMINI_API_KEY is missing from Streamlit Secrets."
-
-  prompt = f"""
-You are an expert ASE Master / L1 diagnostic technician and automotive oscilloscope waveform specialist.
-Analyze this oscilloscope or multimeter capture alongside physical shop test readings.
-
-TEST CONTEXT:
-{test_summary}
-
-SCOPE / METER VISION TASK:
-- Identify signal type (Secondary/Primary Ignition, Injector Voltage/Current, CKP/CMP correlation, Relative Compression, PWM, Sensor drop).
-- Evaluate critical electrical signatures: peak firing/inductive spike kV, dwell duration, spark burn line slope & turbulence, coil oscillation count, ground bounce, signal attenuation, or missing-tooth spacing.
-- Correlate waveform abnormalities directly with physical test readings.
-
-FORMAT STRICTLY AS:
-### 1. Scope Waveform & Electrical Findings
-- Key observations, time-base/voltage scale notes, circuit anomalies observed in photo.
-### 2. Component Condemnation & Defect Root Cause
-- What exact component, circuit, or mechanical issue is failing.
-### 3. Immediate Pinpoint Verification Step
-- The single next test to 100% isolate and verify before condemning the part.
-"""
-  parts = [{"text": prompt}]
-
-  if pil_img is not None:
+def secret(name: str) -> str:
+  val = os.environ.get(name)
+  if not val:
     try:
-      buffered = io.BytesIO()
-      pil_img.convert("RGB").save(buffered, format="JPEG", quality=85)
-      img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
-      parts.append(
-          {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
-      )
-    except Exception as e:
-      return f"Image processing error: {e}"
+      val = st.secrets.get(name)
+    except Exception:  # no secrets.toml
+      val = None
+  return val or ""
 
-  url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+
+@st.cache_resource
+def http() -> requests.Session:
+  return requests.Session()  # keep-alive: faster repeat API calls
+
+
+def img_part(img: Image.Image) -> dict:
+  im = img.convert("RGB")
+  im.thumbnail((1600, 1600))  # smaller upload = faster + cheaper, still sharp enough
+  b = io.BytesIO()
+  im.save(b, format="JPEG", quality=85)
+  return {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(b.getvalue()).decode()}}
+
+
+def gemini(parts: list, *, json_mode: bool = False, timeout: int = 45) -> str:
+  key = secret("GEMINI_API_KEY")
+  if not key:
+    raise AIError("GEMINI_API_KEY is missing from Streamlit Secrets.")
   payload = {"contents": [{"parts": parts}]}
-
+  if json_mode:
+    payload["generationConfig"] = {"response_mime_type": "application/json"}
   try:
-    res = requests.post(url, json=payload, timeout=45)
-    if res.status_code == 200:
-      return res.json()["candidates"][0]["content"]["parts"][0]["text"]
-    else:
-      return f"Gemini Vision Error ({res.status_code}): {res.text}"
-  except Exception as e:
-    return f"Scope Analysis Error: {e}"
-
-
-def extract_vin_via_ai(pil_img: Image.Image) -> str:
-  gemini_key = get_gemini_key()
-  if not gemini_key:
-    return ""
-
+    res = http().post(GEMINI_URL, headers={"x-goog-api-key": key}, json=payload, timeout=timeout)
+  except requests.RequestException as e:
+    raise AIError(f"Gemini connection error: {e}") from e
+  if res.status_code != 200:
+    raise AIError(f"Gemini API error ({res.status_code}): {res.text[:300]}")
   try:
-    buffered = io.BytesIO()
-    pil_img.convert("RGB").save(buffered, format="JPEG", quality=85)
-    img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
-    payload = {
-        "contents": [{
-            "parts": [
-                {
-                    "text": (
-                        "Locate and extract the 17-character Vehicle"
-                        " Identification Number (VIN) from this vehicle image."
-                        " Standard VINs only use digits and uppercase letters"
-                        " excluding I, O, and Q. Return ONLY the 17-character"
-                        " VIN. If none is found, return 'NONE'."
-                    )
-                },
-                {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
-            ]
-        }]
-    }
-
-    res = requests.post(url, json=payload, timeout=20)
-    if res.status_code == 200:
-      raw_text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
-      match = re.search(r"[A-HJ-NPR-Z0-9]{17}", raw_text.upper())
-      if match:
-        return match.group(0)
-  except Exception:
-    pass
-  return ""
+    return res.json()["candidates"][0]["content"]["parts"][0]["text"]
+  except (KeyError, IndexError, ValueError) as e:
+    raise AIError("Gemini returned no text (the request may have been blocked).") from e
 
 
-def extract_customer_info(pil_img: Image.Image) -> dict:
-  gemini_key = get_gemini_key()
-  if not gemini_key:
-    return {
-        "error": "GEMINI_API_KEY is missing from Streamlit Secrets."
-    }
-
-  buffered = io.BytesIO()
-  pil_img.convert("RGB").save(buffered, format="JPEG", quality=85)
-  img_b64 = base64.b64encode(buffered.getvalue()).decode("utf-8")
-
-  url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
-  payload = {
-      "contents": [{
-          "parts": [
-              {
-                  "text": (
-                      "Read this work order / invoice image. Extract ONLY: 1)"
-                      " Customer Name, 2) Address, 3) Phone Number. Return"
-                      " strictly a valid JSON object with keys:"
-                      " 'customer_name', 'address', 'phone'. Do not include"
-                      " markdown formatting."
-                  )
-              },
-              {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
-          ]
-      }],
-      "generationConfig": {"response_mime_type": "application/json"},
-  }
-
+def ask_gemini(prompt: str) -> str:
   try:
-    res = requests.post(url, json=payload, timeout=20)
-    if res.status_code == 200:
-      raw_text = res.json()["candidates"][0]["content"]["parts"][0]["text"]
-      return json.loads(raw_text)
-    else:
-      return {"error": f"Vision API Error ({res.status_code}): {res.text}"}
-  except Exception as e:
-    return {"error": f"Failed to extract info: {e}"}
+    return gemini([{"text": prompt}])
+  except AIError as e:
+    return f"⚠️ {e}"
 
 
-# --- PERPLEXITY AGENT API HELPER ---
-def query_perplexity(prompt_text: str, preset: str = "low") -> str:
-  api_key = os.environ.get("PERPLEXITY_API_KEY")
-  if not api_key and hasattr(st, "secrets"):
-    api_key = st.secrets.get("PERPLEXITY_API_KEY")
-
-  if not api_key:
-    return "Error: PERPLEXITY_API_KEY is not configured in Streamlit Secrets."
-
-  headers = {
-      "Authorization": f"Bearer {api_key}",
-      "Content-Type": "application/json",
-  }
-  payload = {"preset": preset, "input": prompt_text}
-
+def ask_perplexity(prompt: str, preset: str = "low") -> str:
+  key = secret("PERPLEXITY_API_KEY")
+  if not key:
+    return "⚠️ PERPLEXITY_API_KEY is not configured in Streamlit Secrets."
   try:
-    res = requests.post(
+    res = http().post(
         "https://api.perplexity.ai/v1/responses",
-        headers=headers,
-        json=payload,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        json={"preset": preset, "input": prompt},
         timeout=60,
     )
-    if res.status_code == 200:
-      data = res.json()
-      if "output_text" in data:
-        return data["output_text"]
-      elif "output" in data:
-        text = ""
-        for item in data["output"]:
-          if item.get("type") == "message":
-            for c in item.get("content", []):
-              if "text" in c:
-                text += c["text"]
-        return text or "No response text received."
-      return "No message content found in API output."
-    else:
-      return f"API Error ({res.status_code}): {res.text}"
   except requests.exceptions.Timeout:
-    return "Request timed out. Please try again."
-  except Exception as e:
-    return f"Unexpected error: {e}"
-
-
-def scan_vin_barcode(pil_img: Image.Image) -> str:
-  barcodes = zxingcpp.read_barcodes(
-      pil_img, try_rotate=True, try_downscale=True, try_invert=True
+    return "⚠️ Request timed out. Please try again."
+  except requests.RequestException as e:
+    return f"⚠️ Perplexity connection error: {e}"
+  if res.status_code != 200:
+    return f"⚠️ Perplexity API error ({res.status_code}): {res.text[:300]}"
+  data = res.json()
+  if data.get("output_text"):
+    return data["output_text"]
+  text = "".join(
+      c.get("text", "")
+      for item in data.get("output", []) if item.get("type") == "message"
+      for c in item.get("content", [])
   )
-  for b in barcodes:
-    match = re.search(r"[A-HJ-NPR-Z0-9]{17}", b.text.upper())
-    if match:
-      return match.group(0)
+  return text or "No response text received."
 
-  gray = ImageOps.grayscale(pil_img)
-  high_contrast = ImageEnhance.Contrast(gray).enhance(2.2)
-  barcodes = zxingcpp.read_barcodes(
-      high_contrast, try_rotate=True, try_downscale=True, try_invert=True
-  )
-  for b in barcodes:
-    match = re.search(r"[A-HJ-NPR-Z0-9]{17}", b.text.upper())
-    if match:
-      return match.group(0)
 
+# --- VIN ---
+_VIN_VALUES = dict(zip("ABCDEFGHJKLMNPRSTUVWXYZ", [1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 7, 9, 2, 3, 4, 5, 6, 7, 8, 9]))
+_VIN_WEIGHTS = [8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2]
+
+
+def vin_check_digit_ok(vin: str) -> bool:
+  total = sum((int(c) if c.isdigit() else _VIN_VALUES.get(c, 0)) * w for c, w in zip(vin, _VIN_WEIGHTS))
+  r = total % 11
+  return vin[8] == ("X" if r == 10 else str(r))
+
+
+def scan_vin_barcode(img: Image.Image) -> str:
+  for candidate in (img, ImageEnhance.Contrast(ImageOps.grayscale(img)).enhance(2.2)):
+    for b in zxingcpp.read_barcodes(candidate, try_rotate=True, try_downscale=True, try_invert=True):
+      m = VIN_RE.search(b.text.upper())
+      if m:
+        return m.group(0)
   return ""
 
 
-def decode_vin(vin_code: str) -> dict | None:
-  url = (
-      f"https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/{vin_code}?format=json"
+@st.cache_data(show_spinner=False, max_entries=50)
+def find_vin(img_bytes: bytes) -> tuple[str, str]:
+  """Barcode first (free, instant), AI text read only if that fails. Cached per photo."""
+  img = ImageOps.exif_transpose(Image.open(io.BytesIO(img_bytes)))
+  vin = scan_vin_barcode(img)
+  if vin:
+    return vin, "Barcode"
+  text = gemini(
+      [
+          {"text": "Locate the 17-character Vehicle Identification Number (VIN) in this image. VINs use digits and"
+                   " uppercase letters except I, O and Q. Return ONLY the VIN, or NONE if there isn't one."},
+          img_part(img),
+      ],
+      timeout=25,
   )
+  m = VIN_RE.search(text.upper())
+  return (m.group(0), "AI photo text") if m else ("", "")
+
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def extract_customer(img_bytes: bytes) -> dict:
+  img = ImageOps.exif_transpose(Image.open(io.BytesIO(img_bytes)))
+  raw = gemini(
+      [
+          {"text": "Read this work order / invoice. Extract ONLY the customer name, address and phone number."
+                   " Return a JSON object with keys 'customer_name', 'address', 'phone' (empty string if missing)."},
+          img_part(img),
+      ],
+      json_mode=True,
+      timeout=25,
+  )
+  return json.loads(raw)
+
+
+@st.cache_data(ttl=7 * 86400, show_spinner=False, max_entries=500)
+def decode_vin(vin: str) -> dict:
+  r = http().get(f"https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/{vin}?format=json", timeout=10)
+  r.raise_for_status()
+  wanted = [
+      "Model Year", "Make", "Model", "Trim", "Displacement (L)", "Engine Number of Cylinders",
+      "Engine Model", "Fuel Type - Primary", "Drive Type", "Transmission Style", "Vehicle Type",
+  ]
+  found = {i["Variable"]: i["Value"] for i in r.json().get("Results", []) if i.get("Value") and i.get("Variable") in wanted}
+  return {k: found[k] for k in wanted if k in found}
+
+
+def load_vehicle(vin: str) -> bool:
+  """Decode a VIN and make it the active vehicle. Returns True on success."""
   try:
-    response = requests.get(url, timeout=10).json()
-    details = {}
-    for item in response.get("Results", []):
-      if item.get("Value") and item.get("Variable") in [
-          "Model Year",
-          "Make",
-          "Model",
-          "Displacement (L)",
-          "Engine Number of Cylinders",
-          "Fuel Type - Primary",
-          "Drive Type",
-          "Vehicle Type",
-      ]:
-        details[item["Variable"]] = item["Value"]
-    return details
-  except Exception:
-    return None
+    d = decode_vin(vin)
+  except Exception as e:
+    ss.vin_error, ss._failed_vin = f"VIN decode failed ({e}). Check your connection and try again.", vin
+    return False
+  if not d.get("Make"):
+    ss.vin_error, ss._failed_vin = "NHTSA couldn't decode this VIN. Double-check the characters.", vin
+    return False
+  disp = d.get("Displacement (L)", "")
+  try:
+    disp = f"{float(disp):.1f}"
+  except ValueError:
+    pass
+  ss.active_vin = vin
+  ss.vehicle_details = d
+  ss.vehicle_make = d.get("Make", "").upper()
+  ss.vehicle_info = " ".join(x for x in (d.get("Model Year"), d.get("Make"), d.get("Model")) if x) + (f" ({disp}L)" if disp else "")
+  ss.vin_error = ""
+  return True
+
+
+def make_profile() -> str:
+  return MAKE_PROFILES.get(ss.vehicle_make, "GENERIC")
+
+
+# --- LOG ---
+def append_to_log(vin: str, vehicle: str, dtc: str, customer: str = "", phone: str = ""):
+  new = not os.path.isfile(LOG_FILE)
+  try:
+    with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
+      w = csv.writer(f)
+      if new:
+        w.writerow(LOG_COLUMNS)
+      w.writerow([datetime.now().strftime("%Y-%m-%d %I:%M %p"), customer or "N/A", phone or "N/A",
+                  vin or "N/A", vehicle or "Unknown Vehicle", dtc or "N/A"])
+  except OSError:
+    pass
+
+
+def load_log() -> list[dict]:
+  try:
+    with open(LOG_FILE, encoding="utf-8") as f:
+      return list(csv.DictReader(f))[::-1]
+  except OSError:
+    return []
+
+
+def context_bar():
+  st.info(
+      f"📋 **Context:** Customer: `{ss.customer_name or 'None'}` | Vehicle: `{ss.vehicle_info or 'No Vehicle Selected'}`"
+      f" | Active DTC: `{ss.active_dtc or 'None Specified'}`"
+  )
+
+
+# Legacy links from the old "Sync" button (?ble_vin=...&ble_dtc=...): use once, then clear
+if "ble_vin" in st.query_params or "ble_dtc" in st.query_params:
+  _qv = st.query_params.get("ble_vin", "").upper().strip()
+  _qd = st.query_params.get("ble_dtc", "").upper().strip()
+  st.query_params.clear()
+  _upd = {}
+  if VIN_RE.fullmatch(_qv) and load_vehicle(_qv):
+    _upd["vin_input"] = _qv
+  if _qd:
+    _upd["active_dtc"] = _qd
+  queue_update(**_upd)
 
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
@@ -365,1962 +314,1123 @@ with tab1:
   st.subheader("Customer & Vehicle Identification")
 
   st.markdown("#### 👤 Customer Information")
-  col_c1, col_c2 = st.columns([1, 1])
+  col_c1, col_c2 = st.columns(2)
   with col_c1:
-    cust_name = st.text_input(
-        "Customer Name:",
-        value=st.session_state.customer_name,
-        placeholder="e.g. ROTAE LLC",
-    )
-    cust_phone = st.text_input(
-        "Phone Number:",
-        value=st.session_state.customer_phone,
-        placeholder="e.g. 678-365-2146",
-    )
+    st.text_input("Customer Name:", key="customer_name", placeholder="e.g. ROTAE LLC")
+    st.text_input("Phone Number:", key="customer_phone", placeholder="e.g. 678-365-2146")
   with col_c2:
-    cust_address = st.text_area(
-        "Address:",
-        value=st.session_state.customer_address,
-        placeholder="e.g. 6428 DAWSON BLVD, STE 1730, NORCROSS, GA, 30093",
-        height=108,
-    )
-
-  st.session_state.customer_name = cust_name.strip()
-  st.session_state.customer_phone = cust_phone.strip()
-  st.session_state.customer_address = cust_address.strip()
+    st.text_area("Address:", key="customer_address", height=108,
+                 placeholder="e.g. 6428 DAWSON BLVD, STE 1730, NORCROSS, GA, 30093")
 
   st.write("---")
   st.markdown("#### 📸 Camera / Photo VIN Scanner")
-
-  col_cam, col_up = st.columns([1, 1])
+  col_cam, col_up = st.columns(2)
   with col_cam:
-    open_camera = st.toggle("📷 Open Camera", value=False)
-    photo = None
-    if open_camera:
-      photo = st.camera_input("Snap VIN sticker, plate, or paperwork")
-
+    photo = st.camera_input("Snap VIN sticker, plate, or paperwork") if st.toggle("📷 Open Camera") else None
   with col_up:
-    uploaded_label = st.file_uploader(
-        "Or upload photo from phone gallery",
-        type=["png", "jpg", "jpeg"],
-        key="vin_upload",
-    )
+    uploaded = st.file_uploader("Or upload photo from phone gallery", type=["png", "jpg", "jpeg"], key="vin_upload")
 
-  active_image = photo or uploaded_label
-  found_vin = ""
-
+  active_image = photo or uploaded
   if active_image:
-    st.image(active_image, caption="Captured Image", use_container_width=True)
-    img = Image.open(active_image)
+    img_bytes = active_image.getvalue()
+    photo_id = hashlib.md5(img_bytes).hexdigest()
+    st.image(img_bytes, caption="Captured Image")
 
-    found_vin = scan_vin_barcode(img)
-    detection_method = "Barcode"
-
-    if not found_vin:
-      with st.spinner("Scanning photo text with AI Vision for 17-digit VIN..."):
-        found_vin = extract_vin_via_ai(img)
-        detection_method = "AI Photo Text Recognition"
+    found_vin, method = "", ""
+    try:
+      with st.spinner("Reading VIN (barcode, then AI text)..."):
+        found_vin, method = find_vin(img_bytes)
+    except AIError as e:
+      st.warning(f"Barcode not found and AI read failed: {e}")
 
     if found_vin:
-      st.session_state.active_vin = found_vin
-      st.success(f"VIN Detected ({detection_method})! **{found_vin}**")
+      st.success(f"VIN Detected ({method}): **{found_vin}**")
+      if ss.get("_applied_photo") != photo_id:  # apply each photo once so manual edits stick
+        ss._applied_photo = photo_id
+        load_vehicle(found_vin)
+        queue_update(vin_input=found_vin)
     else:
-      st.warning("Could not detect a 17-digit VIN. Enter manually below.")
+      st.warning("Could not detect a 17-character VIN. Enter it manually below.")
 
     if st.button("📄 Extract Customer Details from this Image"):
-      with st.spinner("Extracting customer name, address, and phone..."):
-        c_info = extract_customer_info(img)
-        if "error" in c_info:
-          st.error(c_info["error"])
-        else:
-          if c_info.get("customer_name"):
-            st.session_state.customer_name = c_info["customer_name"]
-          if c_info.get("address"):
-            st.session_state.customer_address = c_info["address"]
-          if c_info.get("phone"):
-            st.session_state.customer_phone = c_info["phone"]
-          st.success("Customer info updated!")
-          st.rerun()
+      try:
+        with st.spinner("Extracting customer name, address, and phone..."):
+          info = extract_customer(img_bytes)
+      except (AIError, ValueError) as e:
+        st.error(f"Couldn't read customer details: {e}")
+      else:
+        upd = {k: str(info.get(j, "")).strip() for k, j in
+               (("customer_name", "customer_name"), ("customer_address", "address"), ("customer_phone", "phone"))
+               if str(info.get(j, "")).strip()}
+        if upd:
+          queue_update(toast="Customer info updated", **upd)
+        st.warning("No customer details found in this image.")
 
-  vin = st.text_input(
-      "Vehicle VIN (17 digits):",
-      value=found_vin or st.session_state.active_vin,
-      max_chars=17,
-  )
-  active_vin = vin.strip().upper()
+  vin_typed = st.text_input("Vehicle VIN (17 characters) — decodes automatically:", key="vin_input", max_chars=17)
+  vin_clean = vin_typed.strip().upper()
+  if len(vin_clean) == 17 and vin_clean != ss.active_vin and vin_clean != ss.get("_failed_vin"):
+    with st.spinner("Decoding VIN..."):
+      load_vehicle(vin_clean)
+  elif 0 < len(vin_clean) < 17:
+    st.caption(f"{len(vin_clean)}/17 characters")
 
-  if active_vin and (found_vin or st.button("Decode VIN")):
-    st.session_state.active_vin = active_vin
-    details = decode_vin(active_vin)
-    if details:
-      year = details.get("Model Year", "")
-      make = details.get("Make", "")
-      model = details.get("Model", "")
-      disp = details.get("Displacement (L)", "")
-      st.session_state.vehicle_info = f"{year} {make} {model} ({disp}L)"
+  if ss.vin_error and vin_clean == ss.get("_failed_vin"):
+    st.error(ss.vin_error)
+    if st.button("🔁 Retry decode"):
+      ss._failed_vin = ""
+      st.rerun()
 
-      st.subheader(f"Vehicle Specifications ({active_vin})")
-      col1, col2 = st.columns(2)
-      for i, (key, val) in enumerate(details.items()):
-        if i % 2 == 0:
-          col1.write(f"**{key}:** {val}")
-        else:
-          col2.write(f"**{key}:** {val}")
-    else:
-      st.error("Could not find vehicle details. Check the VIN and try again.")
+  if ss.active_vin and ss.vehicle_details:
+    if not vin_check_digit_ok(ss.active_vin):
+      st.warning("⚠️ VIN check digit (9th character) doesn't match. One character may be misread"
+                 " (common with photos). Non-North-American VINs can ignore this.")
+    st.subheader(f"{ss.vehicle_info}  ·  `{ss.active_vin}`")
+    col1, col2 = st.columns(2)
+    for i, (k, v) in enumerate(ss.vehicle_details.items()):
+      (col1 if i % 2 == 0 else col2).write(f"**{k}:** {v}")
+    st.caption(f"Bluetooth enhanced-PID profile: **{make_profile()}**")
 
 # ========================================================
 # --- TAB 2: LIVE TELEMETRY, ENHANCED PIDS, MONITORS & MODE 06 ---
 # ========================================================
-with tab2:
-  st.subheader("📊 Live Telemetry, OEM Enhanced PIDs & Monitors")
-
-  c_tag = st.session_state.customer_name or "None"
-  v_tag = st.session_state.vehicle_info or "No Vehicle Selected"
-  d_tag = st.session_state.active_dtc or "None Specified"
-  st.info(
-      f"📋 **Context:** Customer: `{c_tag}` | Vehicle: `{v_tag}` | Active"
-      f" DTC: `{d_tag}`"
-  )
-
-  gemini_api_key = get_gemini_key()
-
-  # Auto-detect vehicle make for enhanced DID routing
-  detected_make = "GENERIC"
-  if st.session_state.vehicle_info:
-    v_upper = st.session_state.vehicle_info.upper()
-    if any(
-        m in v_upper
-        for m in [
-            "HONDA",
-            "ACURA",
-            "ODYSSEY",
-            "PILOT",
-            "ACCORD",
-            "CIVIC",
-            "CR-V",
-            "RIDGELINE",
-        ]
-    ):
-      detected_make = "HONDA"
-    elif any(
-        m in v_upper
-        for m in [
-            "TOYOTA",
-            "LEXUS",
-            "SCION",
-            "CAMRY",
-            "COROLLA",
-            "RAV4",
-            "HIGHLANDER",
-            "TACOMA",
-            "TUNDRA",
-        ]
-    ):
-      detected_make = "TOYOTA"
-    elif any(
-        m in v_upper
-        for m in [
-            "NISSAN",
-            "INFINITI",
-            "ALTIMA",
-            "MAXIMA",
-            "ROGUE",
-            "MURANO",
-            "PATHFINDER",
-            "SENTRA",
-        ]
-    ):
-      detected_make = "NISSAN"
-    elif any(
-        m in v_upper
-        for m in [
-            "HYUNDAI",
-            "KIA",
-            "GENESIS",
-            "ELANTRA",
-            "SONATA",
-            "SANTA FE",
-            "TUCSON",
-            "OPTIMA",
-            "SORENTO",
-        ]
-    ):
-      detected_make = "HYUNDAI"
-    elif any(
-        m in v_upper
-        for m in [
-            "SUBARU",
-            "OUTBACK",
-            "FORESTER",
-            "IMPREZA",
-            "LEGACY",
-            "CROSSTREK",
-            "WRX",
-        ]
-    ):
-      detected_make = "SUBARU"
-    elif any(m in v_upper for m in ["MAZDA", "CX-5", "CX-9", "CX-50", "MIATA"]):
-      detected_make = "MAZDA"
-    elif any(
-        m in v_upper
-        for m in [
-            "FORD",
-            "LINCOLN",
-            "MERCURY",
-            "F-150",
-            "F-250",
-            "EXPLORER",
-            "ESCAPE",
-            "EDGE",
-            "MUSTANG",
-        ]
-    ):
-      detected_make = "FORD"
-    elif any(
-        m in v_upper
-        for m in [
-            "CHEVROLET",
-            "CHEVY",
-            "GMC",
-            "CADILLAC",
-            "BUICK",
-            "SILVERADO",
-            "SIERRA",
-            "TAHOE",
-            "YUKON",
-            "SUBURBAN",
-        ]
-    ):
-      detected_make = "GM"
-    elif any(
-        m in v_upper
-        for m in [
-            "CHRYSLER",
-            "DODGE",
-            "JEEP",
-            "RAM",
-            "GRAND CHEROKEE",
-            "WRANGLER",
-            "CHARGER",
-            "CHALLENGER",
-        ]
-    ):
-      detected_make = "CHRYSLER"
-
-  ble_dashboard_template = """
-    <div style="background-color: #1A1F26; border: 1px solid #00FF66; padding: 14px; border-radius: 8px; margin-bottom: 1rem;">
-        <!-- Action & Utility Bar -->
-        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px;">
-            <button id="bleBtn" style="background-color: #00FF66; color: #0E1117; font-weight: 700; font-size: 0.95rem; border: none; padding: 10px 18px; border-radius: 5px; cursor: pointer; display: flex; align-items: center; gap: 6px;">
-                <span>⚡</span> Connect & Auto-Scan
-            </button>
-            <button id="pauseBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
-                ⏸️ Pause Stream
-            </button>
-            <button id="testDriveBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
-                🚗 Test Drive Audio
-            </button>
-            <button id="clearDtcBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
-                🗑️ Clear DTCs (Mode 04)
-            </button>
-            <button id="aiCheckBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
-                🤖 AI Check Now
-            </button>
-            <button id="pullVinBtn" disabled style="background-color: #2D3748; color: #718096; font-weight: 700; font-size: 0.9rem; border: 1px solid #4A5568; padding: 9px 15px; border-radius: 5px; cursor: not-allowed;">
-                📋 Sync VIN & DTCs
-            </button>
-            
-            <div style="margin-left: auto; display: flex; align-items: center; gap: 6px;">
-                <span style="font-size: 0.8rem; color: #A0AEC0;">OEM Profile:</span>
-                <select id="oemProfileSelect" style="background: #111418; color: #00FF66; border: 1px solid #00FF66; padding: 6px 10px; border-radius: 4px; font-weight: 700; font-size: 0.85rem;">
-                    <option value="AUTO">Auto-Detect</option>
-                    <option value="HONDA">Honda / Acura</option>
-                    <option value="TOYOTA">Toyota / Lexus / Scion</option>
-                    <option value="NISSAN">Nissan / Infiniti</option>
-                    <option value="HYUNDAI">Hyundai / Kia / Genesis</option>
-                    <option value="SUBARU">Subaru</option>
-                    <option value="MAZDA">Mazda</option>
-                    <option value="FORD">Ford / Lincoln / Mercury</option>
-                    <option value="GM">GM / Chevrolet / GMC / Buick</option>
-                    <option value="CHRYSLER">Chrysler / Dodge / Jeep / Ram</option>
-                    <option value="GENERIC">Standard Generic</option>
-                </select>
-            </div>
-        </div>
-        <div id="bleStatus" style="color: #A0AEC0; font-family: monospace; font-size: 0.85rem; margin-bottom: 12px;">Status: Ready to pair. Connect once to automatically load Monitors, Mode $06, and start live telemetry.</div>
-
-        <!-- TEST DRIVE AI ACTIVE BANNER -->
-        <div id="driveBanner" style="display: none; background: #0F172A; border-left: 4px solid #38BDF8; padding: 8px 12px; border-radius: 4px; margin-bottom: 12px; font-size: 0.85rem; color: #38BDF8;">
-            🚗 <strong>Test Drive AI Active:</strong> Screen Wake Lock ON (screen will not sleep). Real-time speech alerts active for Fuel Trim skews, thermal spikes, or misfires.
-        </div>
-
-        <!-- 1. LIVE SENSOR TELEMETRY (TOP) -->
-        <div style="font-weight: 700; font-size: 0.95rem; color: #00FF66; margin-bottom: 6px;">📈 LIVE SENSOR TELEMETRY (MODE 01)</div>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(115px, 1fr)); gap: 8px; max-height: 280px; overflow-y: auto; padding-right: 4px; margin-bottom: 16px;">
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Engine RPM</div>
-                <div id="valRpm" style="font-size: 1.15rem; font-weight: 700; color: #00FF66;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Engine Load</div>
-                <div id="valLoad" style="font-size: 1.15rem; font-weight: 700; color: #38BDF8;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Vehicle Speed</div>
-                <div id="valSpd" style="font-size: 1.15rem; font-weight: 700; color: #38BDF8;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Throttle (TPS)</div>
-                <div id="valTps" style="font-size: 1.15rem; font-weight: 700; color: #E2E8F0;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Pedal Pos (APP)</div>
-                <div id="valApp" style="font-size: 1.15rem; font-weight: 700; color: #E2E8F0;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Coolant (ECT)</div>
-                <div id="valEct" style="font-size: 1.15rem; font-weight: 700; color: #F59E0B;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Intake Air (IAT)</div>
-                <div id="valIat" style="font-size: 1.15rem; font-weight: 700; color: #F59E0B;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Ambient Temp</div>
-                <div id="valAat" style="font-size: 1.15rem; font-weight: 700; color: #F59E0B;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Oil Temp</div>
-                <div id="valEot" style="font-size: 1.15rem; font-weight: 700; color: #F59E0B;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">MAP Sensor</div>
-                <div id="valMap" style="font-size: 1.15rem; font-weight: 700; color: #00FF66;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">MAF Flow</div>
-                <div id="valMaf" style="font-size: 1.15rem; font-weight: 700; color: #00FF66;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Baro Press</div>
-                <div id="valBaro" style="font-size: 1.15rem; font-weight: 700; color: #64748B;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Fuel Rail Press</div>
-                <div id="valFrp" style="font-size: 1.15rem; font-weight: 700; color: #10B981;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Fuel Level %</div>
-                <div id="valFli" style="font-size: 1.15rem; font-weight: 700; color: #10B981;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">STFT Bank 1</div>
-                <div id="valStft" style="font-size: 1.15rem; font-weight: 700; color: #FBBF24;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">LTFT Bank 1</div>
-                <div id="valLtft" style="font-size: 1.15rem; font-weight: 700; color: #FBBF24;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">STFT Bank 2</div>
-                <div id="valStft2" style="font-size: 1.15rem; font-weight: 700; color: #FBBF24;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">LTFT Bank 2</div>
-                <div id="valLtft2" style="font-size: 1.15rem; font-weight: 700; color: #FBBF24;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Ign Timing</div>
-                <div id="valTime" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div id="lblO21" style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">O2 B1S1 (A/F)</div>
-                <div id="valO21" style="font-size: 1.15rem; font-weight: 700; color: #A855F7;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">O2 B1S2 (V)</div>
-                <div id="valO22" style="font-size: 1.15rem; font-weight: 700; color: #A855F7;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div id="lblO221" style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">O2 B2S1 (A/F)</div>
-                <div id="valO221" style="font-size: 1.15rem; font-weight: 700; color: #A855F7;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">O2 B2S2 (V)</div>
-                <div id="valO222" style="font-size: 1.15rem; font-weight: 700; color: #A855F7;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Evap Purge %</div>
-                <div id="valEvap" style="font-size: 1.15rem; font-weight: 700; color: #E2E8F0;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #2D3748; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Battery Volt</div>
-                <div id="valVolt" style="font-size: 1.15rem; font-weight: 700; color: #E2E8F0;">--</div>
-            </div>
-        </div>
-
-        <!-- 2. OEM ENHANCED PIDS (UDS SERVICE 0x22 / MULTI-MODULE) -->
-        <div style="font-weight: 700; font-size: 0.95rem; color: #EC4899; margin-bottom: 6px;">🏭 OEM ENHANCED PIDS (DOMESTIC & ASIAN ENHANCED DATA)</div>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; max-height: 220px; overflow-y: auto; padding-right: 4px; margin-bottom: 16px;">
-            <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Trans Fluid Temp</div>
-                <div id="valTft" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Engine Oil Press</div>
-                <div id="valEop" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Cyl Head Temp / VCM</div>
-                <div id="valCht" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">TCC Converter Slip</div>
-                <div id="valTccSlip" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Commanded Gear</div>
-                <div id="valGear" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Knock Retard (KR)</div>
-                <div id="valKr" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Ethanol / FRP 2</div>
-                <div id="valEth" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
-            </div>
-            <div style="background: #111418; border: 1px solid #EC4899; padding: 8px 4px; border-radius: 6px; text-align: center;">
-                <div style="font-size: 0.7rem; color: #A0AEC0; text-transform: uppercase;">Hybrid SOC / Batt</div>
-                <div id="valSoc" style="font-size: 1.15rem; font-weight: 700; color: #EC4899;">--</div>
-            </div>
-        </div>
-
-        <!-- 3. I/M READINESS MONITORS (UNDER ENHANCED PIDS) -->
-        <div style="font-weight: 700; font-size: 0.95rem; color: #38BDF8; margin-bottom: 6px;">📋 EMISSIONS INSPECTION (I/M) READINESS MONITORS</div>
-        <div id="readinessBox" style="background: #111418; border: 1px solid #2D3748; border-radius: 6px; padding: 10px; margin-bottom: 16px;">
-            <div style="color: #A0AEC0; font-size: 0.85rem;">Monitors will auto-load immediately upon connection.</div>
-        </div>
-
-        <!-- 4. FULL MODE $06 ON-BOARD MONITORS (UNDER READINESS) -->
-        <div style="font-weight: 700; font-size: 0.95rem; color: #38BDF8; margin-bottom: 6px;">📊 COMPLETE ON-BOARD DIAGNOSTIC MONITORS (MODE $06)</div>
-        <div id="mode6Box" style="background: #111418; border: 1px solid #2D3748; border-radius: 6px; padding: 10px; min-height: 80px; max-height: 240px; overflow-y: auto; font-family: monospace; font-size: 0.85rem; color: #A0AEC0; margin-bottom: 16px;">
-            Mode $06 monitors will auto-load immediately upon connection.
-        </div>
-
-        <!-- 5. AI DIAGNOSTIC VERDICT (BOTTOM) -->
-        <div style="font-weight: 700; font-size: 0.95rem; color: #F59E0B; margin-bottom: 6px;">🤖 AI MASTER TECH TELEMETRY EVALUATION</div>
-        <div id="aiVerdictBox" style="background: #111418; border: 1px solid #F59E0B; border-radius: 6px; padding: 12px; min-height: 90px; max-height: 320px; overflow-y: auto; font-size: 0.9rem; line-height: 1.45; color: #FFFFFF;">
-            Connect adapter to automatically analyze live telemetry and diagnostic monitors.
-        </div>
+# ========================================================
+# --- BLUETOOTH DASHBOARD PAGE (runs in the browser) ---
+# ========================================================
+BLE_DASHBOARD_HTML = r'''<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#1A1F26; --card:#111418; --line:#2D3748; --muted:#A0AEC0; --g:#00FF66; --b:#38BDF8; --o:#F59E0B; --y:#FBBF24; --p:#EC4899; --v:#A855F7; --t:#10B981; --r:#EF4444; --s:#64748B; --w:#E2E8F0; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:transparent; color:#fff; font-family:"Source Sans Pro",system-ui,sans-serif; }
+  .wrap { background:var(--bg); border:1px solid var(--g); padding:14px; border-radius:8px; }
+  .bar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+  button { font-weight:700; font-size:.88rem; border:1px solid var(--line); padding:9px 14px; border-radius:5px; cursor:pointer; color:#0E1117; }
+  button:disabled { background:#2D3748 !important; color:#718096 !important; cursor:not-allowed; }
+  #bleBtn { background:var(--g); border:none; } #pauseBtn { background:var(--r); color:#fff; } #driveBtn { background:var(--t); }
+  #readBtn { background:var(--b); } #clearBtn { background:var(--r); color:#fff; } #aiBtn { background:var(--o); } #syncBtn { background:var(--v); color:#fff; }
+  .oem { margin-left:auto; display:flex; align-items:center; gap:6px; font-size:.8rem; color:var(--muted); }
+  select { background:var(--card); color:var(--g); border:1px solid var(--g); padding:6px 8px; border-radius:4px; font-weight:700; }
+  #status { color:var(--muted); font-family:monospace; font-size:.85rem; margin-bottom:12px; }
+  #driveBanner { display:none; background:#0F172A; border-left:4px solid var(--b); padding:8px 12px; border-radius:4px; margin-bottom:12px; font-size:.85rem; color:var(--b); }
+  h3 { font-size:.95rem; margin:0 0 6px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(112px,1fr)); gap:8px; margin-bottom:16px; }
+  .tile { background:var(--card); border:1px solid var(--line); padding:8px 4px; border-radius:6px; text-align:center; }
+  .tile .l { font-size:.68rem; color:var(--muted); text-transform:uppercase; }
+  .tile .v { font-size:1.12rem; font-weight:700; }
+  .tile.na { opacity:.4; }
+  .enh .tile { border-color:var(--p); }
+  .box { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:10px; margin-bottom:16px; font-size:.85rem; color:var(--muted); }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { padding:4px 10px; border-radius:12px; font-weight:700; font-family:monospace; font-size:.9rem; border:1px solid; }
+  .mon { background:var(--bg); border:1px solid; padding:6px; border-radius:5px; text-align:center; }
+  .mon .l { font-size:.74rem; color:var(--muted); } .mon .v { font-size:.88rem; font-weight:700; }
+  #aiBox { border-color:var(--o); color:#fff; font-size:.9rem; line-height:1.45; min-height:80px; }
+  #aiBox h4 { color:var(--g); margin:8px 0 4px; }
+  .note { font-size:.72rem; color:var(--s); font-weight:400; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <button id="bleBtn">⚡ Connect &amp; Auto-Scan</button>
+    <button id="pauseBtn" disabled>⏸️ Pause</button>
+    <button id="driveBtn" disabled>🚗 Test Drive Audio</button>
+    <button id="readBtn" disabled>🔎 Re-read Codes</button>
+    <button id="clearBtn" disabled>🗑️ Clear Codes</button>
+    <button id="aiBtn" disabled>🤖 AI Check</button>
+    <button id="syncBtn" disabled>📋 Send VIN &amp; Codes to App</button>
+    <div class="oem">OEM Profile:
+      <select id="oemSel">
+        <option value="AUTO">Auto-Detect</option><option value="HONDA">Honda / Acura</option>
+        <option value="TOYOTA">Toyota / Lexus / Scion</option><option value="NISSAN">Nissan / Infiniti</option>
+        <option value="HYUNDAI">Hyundai / Kia / Genesis</option><option value="SUBARU">Subaru</option>
+        <option value="MAZDA">Mazda</option><option value="FORD">Ford / Lincoln / Mercury</option>
+        <option value="GM">GM</option><option value="CHRYSLER">Chrysler / Dodge / Jeep / Ram</option>
+        <option value="GENERIC">Generic (OBD-II only)</option>
+      </select>
     </div>
+  </div>
+  <div id="status">Status: Ready. Key ON (or engine running), then tap Connect.</div>
+  <div id="driveBanner">🚗 <strong>Test Drive Audio ON:</strong> screen stays awake; spoken alerts for fuel trim, coolant temp and charging voltage; AI check every 60 s.</div>
 
-    <script>
-    const GEMINI_API_KEY = "___GEMINI_KEY___";
-    const VEHICLE_CONTEXT = "___VEHICLE_INFO___";
-    const DTC_CONTEXT = "___ACTIVE_DTC___";
-    const DETECTED_MAKE = "___DETECTED_MAKE___";
+  <h3 style="color:var(--r)">🚨 FAULT CODES</h3>
+  <div id="dtcBox" class="box">Codes are read automatically on connect.</div>
 
-    const NORDIC_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
-    const NORDIC_RX = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
-    const NORDIC_TX = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+  <h3 style="color:var(--g)">📈 LIVE DATA (MODE 01) <span id="rate" class="note"></span></h3>
+  <div id="liveGrid" class="grid"></div>
 
-    const FFF0_SERVICE = '0000fff0-0000-1000-8000-00805f9b34fb';
-    const FFF2_RX = '0000fff2-0000-1000-8000-00805f9b34fb';
-    const FFF1_TX = '0000fff1-0000-1000-8000-00805f9b34fb';
+  <h3 style="color:var(--p)">🏭 OEM ENHANCED PIDS <span class="note">beta: verify readings against a factory-level scan tool before relying on them</span></h3>
+  <div id="enhGrid" class="grid enh"></div>
 
-    let rxChar = null;
-    let txChar = null;
-    let responseBuffer = "";
-    let resolver = null;
-    let isBusy = false;
-    let isStreaming = false;
-    let isTestDriveActive = false;
-    let unsupportedPids = new Set();
-    let o2B1Probe = null;
-    let o2B2Probe = null;
-    let loopCycle = 0;
-    let mode6RawData = "";
-    let readinessSummary = "";
-    let wakeLockSentinel = null;
-    let lastVoiceAlertTime = 0;
-    let lastAiSnapshotTime = 0;
+  <h3 style="color:var(--b)">📋 I/M READINESS</h3>
+  <div id="readyBox" class="box">Loads automatically on connect.</div>
 
-    function log(msg) {
-        document.getElementById('bleStatus').innerText = "Status: " + msg;
+  <h3 style="color:var(--b)">📊 MODE $06 TEST RESULTS</h3>
+  <div id="m6Box" class="box">Loads automatically on connect.</div>
+
+  <h3 style="color:var(--o)">🤖 AI MASTER TECH EVALUATION</h3>
+  <div id="aiBox" class="box">Connect, let it stream for a few seconds, then tap AI Check.</div>
+</div>
+
+<script>
+// ===================== Streamlit bridge (no npm needed) =====================
+function toStreamlit(type, data) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type }, data || {}), "*"); }
+const sendValue = (value) => toStreamlit("streamlit:setComponentValue", { value, dataType: "json" });
+let lastHeight = 0;
+function fitHeight() { const h = document.documentElement.scrollHeight; if (h !== lastHeight) { lastHeight = h; toStreamlit("streamlit:setFrameHeight", { height: h }); } }
+new ResizeObserver(fitHeight).observe(document.body);
+
+let ARGS = { vehicle: "", make: "GENERIC", ai: null };
+let lastAiShown = null;
+window.addEventListener("message", (e) => {
+  if (!e.data || e.data.type !== "streamlit:render") return;
+  const a = e.data.args || {};
+  const makeChanged = a.make !== ARGS.make;
+  ARGS = a;
+  if (makeChanged && connected) buildEnhanced();
+  if (a.ai && a.ai.id && a.ai.id !== lastAiShown) {
+    lastAiShown = a.ai.id;
+    if (a.ai.id === aiPendingId) aiPendingId = null;
+    showAi(a.ai.text, a.ai.label);
+  }
+  fitHeight();
+});
+toStreamlit("streamlit:componentReady", { apiVersion: 1 });
+
+// ===================== UI helpers =====================
+const $ = (id) => document.getElementById(id);
+const log = (m) => { $("status").textContent = "Status: " + m; };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+const LIVE_TILES = [
+  ["rpm", "Engine RPM", "g"], ["load", "Engine Load", "b"], ["spd", "Vehicle Speed", "b"], ["tps", "Throttle (TPS)", "w"],
+  ["app", "Pedal (APP)", "w"], ["ect", "Coolant (ECT)", "o"], ["iat", "Intake Air (IAT)", "o"], ["aat", "Ambient Temp", "o"],
+  ["eot", "Oil Temp", "o"], ["map", "MAP", "g"], ["maf", "MAF Flow", "g"], ["baro", "Baro", "s"],
+  ["frp", "Fuel Rail Press", "t"], ["fli", "Fuel Level", "t"], ["stft1", "STFT B1", "y"], ["ltft1", "LTFT B1", "y"],
+  ["stft2", "STFT B2", "y"], ["ltft2", "LTFT B2", "y"], ["timing", "Ign Timing", "p"], ["o2b1s1", "O2 B1S1", "v"],
+  ["o2b1s2", "O2 B1S2", "v"], ["o2b2s1", "O2 B2S1", "v"], ["o2b2s2", "O2 B2S2", "v"], ["evap", "EVAP Purge", "w"],
+  ["volt", "Battery Volt", "w"],
+];
+const ENH_TILES = [
+  ["tft", "Trans Fluid Temp"], ["eop", "Oil Pressure"], ["cht", "Cyl Head Temp / VCM / TC Temp"], ["tcc", "TCC Slip"],
+  ["gear", "Commanded Gear"], ["kr", "Knock Retard"], ["eth", "Ethanol %"], ["soc", "Hybrid SOC"],
+];
+const LABEL = {};
+function makeTiles(gridId, tiles, color) {
+  $(gridId).innerHTML = tiles.map(([id, label, c]) => {
+    LABEL[id] = label;
+    return `<div class="tile" id="t_${id}"><div class="l">${label}</div><div class="v" id="v_${id}" style="color:var(--${c || color})">--</div></div>`;
+  }).join("");
+}
+makeTiles("liveGrid", LIVE_TILES);
+makeTiles("enhGrid", ENH_TILES, "p");
+
+const shown = {};   // tile id -> display text
+const num = {};     // tile id -> numeric value (for alerts)
+function setTile(id, text, n) {
+  shown[id] = text;
+  if (n !== undefined) num[id] = n;
+  const v = $("v_" + id); if (!v) return;
+  v.textContent = text;
+  $("t_" + id).classList.toggle("na", text === "N/A");
+}
+
+// ===================== ELM327 transport =====================
+const NORDIC = ["6e400001-b5a3-f393-e0a9-e50e24dcca9e", "6e400002-b5a3-f393-e0a9-e50e24dcca9e", "6e400003-b5a3-f393-e0a9-e50e24dcca9e"];
+const FFF0 = ["0000fff0-0000-1000-8000-00805f9b34fb", "0000fff2-0000-1000-8000-00805f9b34fb", "0000fff1-0000-1000-8000-00805f9b34fb"];
+const decoder = new TextDecoder();
+let device = null, rxChar = null, txChar = null, connected = false;
+let buf = "", pending = null;
+let cmdChain = Promise.resolve(), txnChain = Promise.resolve();
+
+function onData(ev) {
+  buf += decoder.decode(ev.target.value, { stream: true });
+  if (pending && buf.includes(">")) { const out = buf; buf = ""; pending(out); }
+}
+function rawSend(cmd, timeoutMs) {
+  return new Promise((resolve) => {
+    buf = "";
+    let t;
+    const done = (out) => { clearTimeout(t); pending = null; resolve(out); };
+    t = setTimeout(() => done(buf), timeoutMs);
+    pending = done;
+    const data = new TextEncoder().encode(cmd + "\r");
+    const w = rxChar.properties.writeWithoutResponse && rxChar.writeValueWithoutResponse
+      ? rxChar.writeValueWithoutResponse(data)
+      : (rxChar.writeValueWithResponse ? rxChar.writeValueWithResponse(data) : rxChar.writeValue(data));
+    w.catch(() => done(""));
+  });
+}
+// One command at a time on the wire
+function sendCmd(cmd, timeoutMs = 1000) {
+  if (!rxChar) return Promise.resolve("");
+  const p = cmdChain.then(() => rawSend(cmd, timeoutMs));
+  cmdChain = p.catch(() => {});
+  return p;
+}
+// One multi-command "transaction" at a time (so header switches never interleave)
+function txn(fn) { const p = txnChain.then(fn); txnChain = p.catch(() => {}); return p; }
+
+const isErr = (raw) => !raw || /NO ?DATA|UNABLE|ERROR|STOPPED|\?|BUFFER/i.test(raw);
+
+// Split an ELM reply into complete messages (handles ISO-TP multi-frame "0: 1: 2:" lines and multiple ECUs)
+function messages(raw) {
+  const out = []; let cur = null;
+  for (let l of (raw || "").split(/[\r\n]+/)) {
+    l = l.replace(/[\s>]/g, "").toUpperCase();
+    if (!l) continue;
+    if (/^[0-9A-F]{3}$/.test(l)) { cur = { hex: "", len: parseInt(l, 16) }; out.push(cur); continue; }
+    const mf = l.match(/^([0-9A-F]):([0-9A-F]*)$/);
+    if (mf) { if (cur) cur.hex += mf[2]; continue; }
+    if (/^[0-9A-F]+$/.test(l)) out.push({ hex: l, len: 0 });
+  }
+  return out.map((m) => (m.len ? m.hex.slice(0, m.len * 2) : m.hex));
+}
+const bytesOf = (hex) => { const b = []; for (let i = 0; i + 2 <= hex.length; i += 2) b.push(parseInt(hex.substr(i, 2), 16)); return b; };
+const respCode = (svc) => (parseInt(svc, 16) + 0x40).toString(16).toUpperCase().padStart(2, "0");
+
+let isCan = false, curHeader = "7DF", baseHeader = "7DF", batchOK = false, fastOK = true;
+async function setHeader(h) {
+  if (!isCan || h === curHeader) return;
+  await sendCmd("ATSH" + h, 500);
+  curHeader = h;
+}
+
+// Supported-ID bitmaps (Mode 01 PIDs / Mode 06 MIDs) -> Set of "0C", "A2", ...
+async function supported(svc, ranges) {
+  const set = new Set(); let any = false;
+  for (const r of ranges) {
+    const raw = await sendCmd(svc + r, 2000);
+    const pre = respCode(svc) + r;
+    let bits = 0, found = false;
+    for (const m of messages(raw)) {
+      if (m.startsWith(pre) && m.length >= pre.length + 8) { bits = (bits | parseInt(m.substr(pre.length, 8), 16)) >>> 0; found = true; }
     }
+    if (!found) break;
+    any = true;
+    for (let i = 0; i < 32; i++) if ((bits >>> (31 - i)) & 1) set.add((parseInt(r, 16) + i + 1).toString(16).toUpperCase().padStart(2, "0"));
+    if (!(bits & 1)) break;
+  }
+  return any ? set : null;
+}
 
-    function onData(event) {
-        const val = new TextDecoder().decode(event.target.value);
-        responseBuffer += val;
-        if (responseBuffer.includes('>') && resolver) {
-            const out = responseBuffer;
-            responseBuffer = "";
-            const r = resolver;
-            resolver = null;
-            isBusy = false;
-            r(out);
-        }
+// ===================== Mode 01 PID table =====================
+const pct = (b) => Math.round(b[0] * 100 / 255) + "%";
+const degF = (c) => Math.round(c * 1.8 + 32);
+const tF = (b) => degF(b[0] - 40) + " °F";
+const trimN = (b) => (b[0] - 128) * 100 / 128;
+const trim = (b) => { const v = trimN(b); return (v > 0 ? "+" : "") + v.toFixed(1) + "%"; };
+const o2v = (b) => (b[0] / 200).toFixed(3) + " V";
+const lam = (b) => "λ " + ((b[0] * 256 + b[1]) / 32768).toFixed(3);
+const u16 = (b, i = 0) => b[i] * 256 + b[i + 1];
+const PIDS = {
+  "0C": { tile: "rpm", tier: 1, len: 2, fn: (b) => Math.round(u16(b) / 4) + " RPM", n: (b) => u16(b) / 4 },
+  "04": { tile: "load", tier: 1, len: 1, fn: pct },
+  "11": { tile: "tps", tier: 1, len: 1, fn: pct },
+  "0D": { tile: "spd", tier: 1, len: 1, fn: (b) => Math.round(b[0] * 0.621371) + " MPH" },
+  "06": { tile: "stft1", tier: 2, len: 1, fn: trim, n: trimN },
+  "07": { tile: "ltft1", tier: 2, len: 1, fn: trim, n: trimN },
+  "08": { tile: "stft2", tier: 2, len: 1, fn: trim, n: trimN },
+  "09": { tile: "ltft2", tier: 2, len: 1, fn: trim, n: trimN },
+  "0E": { tile: "timing", tier: 2, len: 1, fn: (b) => (b[0] / 2 - 64).toFixed(1) + "°" },
+  "10": { tile: "maf", tier: 2, len: 2, fn: (b) => (u16(b) / 100).toFixed(1) + " g/s" },
+  "0B": { tile: "map", tier: 2, len: 1, fn: (b) => (b[0] * 0.145038).toFixed(1) + " PSI" },
+  "49": { tile: "app", tier: 2, len: 1, fn: pct },
+  "14": { tile: "o2b1s1", tier: 2, len: 2, fn: o2v }, "24": { tile: "o2b1s1", tier: 2, len: 4, fn: lam }, "34": { tile: "o2b1s1", tier: 2, len: 4, fn: lam },
+  "15": { tile: "o2b1s2", tier: 2, len: 2, fn: o2v },
+  "16": { tile: "o2b2s1", tier: 2, len: 2, fn: o2v }, "26": { tile: "o2b2s1", tier: 2, len: 4, fn: lam }, "36": { tile: "o2b2s1", tier: 2, len: 4, fn: lam },
+  "17": { tile: "o2b2s2", tier: 2, len: 2, fn: o2v },
+  "18": { tile: "o2b2s1", tier: 2, len: 2, fn: o2v }, "28": { tile: "o2b2s1", tier: 2, len: 4, fn: lam }, "38": { tile: "o2b2s1", tier: 2, len: 4, fn: lam },
+  "19": { tile: "o2b2s2", tier: 2, len: 2, fn: o2v },
+  "05": { tile: "ect", tier: 3, len: 1, fn: tF, n: (b) => degF(b[0] - 40) },
+  "0F": { tile: "iat", tier: 3, len: 1, fn: tF },
+  "46": { tile: "aat", tier: 3, len: 1, fn: tF },
+  "5C": { tile: "eot", tier: 3, len: 1, fn: tF },
+  "23": { tile: "frp", tier: 3, len: 2, fn: (b) => Math.round(u16(b) * 10 * 0.145038) + " PSI" },
+  "0A": { tile: "frp", tier: 3, len: 1, fn: (b) => Math.round(b[0] * 3 * 0.145038) + " PSI" },
+  "2F": { tile: "fli", tier: 3, len: 1, fn: pct },
+  "2E": { tile: "evap", tier: 3, len: 1, fn: pct },
+  "33": { tile: "baro", tier: 3, len: 1, fn: (b) => (b[0] * 0.2953).toFixed(1) + " inHg" },
+};
+const TIER_EVERY = { 1: 1, 2: 2, 3: 6 };
+let active = [];   // PIDs actually polled, chosen from what the ECM says it supports
+
+function choosePids(sup) {
+  const has = (p) => !sup || sup.has(p);
+  const alt1D = sup && sup.has("1D") && !sup.has("13");   // 4-bank O2 layout
+  const pick = {
+    rpm: ["0C"], load: ["04"], tps: ["11"], spd: ["0D"], stft1: ["06"], ltft1: ["07"], stft2: ["08"], ltft2: ["09"],
+    timing: ["0E"], maf: ["10"], map: ["0B"], app: ["49"], ect: ["05"], iat: ["0F"], aat: ["46"], eot: ["5C"],
+    frp: ["23", "0A"], fli: ["2F"], evap: ["2E"], baro: ["33"],
+    o2b1s1: ["24", "34", "14"], o2b1s2: ["15"],
+    o2b2s1: alt1D ? ["26", "36", "16"] : ["28", "38", "18"], o2b2s2: alt1D ? ["17"] : ["19"],
+  };
+  active = [];
+  for (const [tile, cands] of Object.entries(pick)) {
+    const p = cands.find(has);
+    if (p) active.push(p); else setTile(tile, "N/A");
+  }
+}
+function applyPid(pid, b) {
+  const d = PIDS[pid]; if (!d || b.length < d.len) return;
+  setTile(d.tile, d.fn(b), d.n ? d.n(b) : undefined);
+}
+function parse01(raw, wanted) {
+  const got = {};
+  for (const m of messages(raw)) {
+    if (!m.startsWith("41")) continue;
+    let i = 2;
+    while (i + 2 <= m.length) {
+      const pid = m.substr(i, 2), d = PIDS[pid];
+      if (!d || !wanted.includes(pid) || got[pid]) break;
+      const end = i + 2 + d.len * 2;
+      if (end > m.length) break;
+      got[pid] = bytesOf(m.slice(i + 2, end));
+      i = end;
     }
-
-    async function sendCmd(cmd, timeoutMs = 1200) {
-        while (isBusy) {
-            await new Promise(r => setTimeout(r, 20));
-        }
-        isBusy = true;
-
-        return new Promise(async (resolve) => {
-            responseBuffer = "";
-            const timer = setTimeout(() => {
-                if (resolver) {
-                    const fallback = responseBuffer;
-                    responseBuffer = "";
-                    resolver = null;
-                    isBusy = false;
-                    resolve(fallback);
-                }
-            }, timeoutMs);
-
-            resolver = (data) => {
-                clearTimeout(timer);
-                resolver = null;
-                isBusy = false;
-                resolve(data);
-            };
-
-            try {
-                const enc = new TextEncoder().encode(cmd + "\\r");
-                if (rxChar.writeValueWithResponse) {
-                    await rxChar.writeValueWithResponse(enc);
-                } else {
-                    await rxChar.writeValue(enc);
-                }
-            } catch (err) {
-                clearTimeout(timer);
-                resolver = null;
-                isBusy = false;
-                resolve("");
-            }
-        });
+  }
+  return got;
+}
+async function pollPids(pids) {
+  if (batchOK) {
+    for (let i = 0; i < pids.length; i += 6) {
+      const chunk = pids.slice(i, i + 6);
+      const got = parse01(await sendCmd("01" + chunk.join(""), 1500), chunk);
+      for (const [p, b] of Object.entries(got)) applyPid(p, b);
     }
+    return;
+  }
+  for (const p of pids) {
+    let raw = await sendCmd("01" + p + (isCan && fastOK ? "1" : ""), 800);
+    if (isCan && fastOK && /\?/.test(raw)) { fastOK = false; raw = await sendCmd("01" + p, 800); }
+    const got = parse01(raw, [p]);
+    if (got[p]) applyPid(p, got[p]);
+  }
+}
 
-    function parseCleanHex(raw) {
-        return (raw || '').replace(/\\s+/g, '').toUpperCase();
+// ===================== OEM enhanced DIDs (Service $22/$21) =====================
+// [header, request, decoder]; candidates are tried in order and the first that answers is locked in.
+const one = (f) => (b) => b.length ? f(b) : null;
+const two = (f) => (b) => b.length >= 2 ? f(b) : null;
+const C40 = one((b) => degF(b[0] - 40) + " °F");
+const GEAR = one((b) => "Gear " + b[0]);
+const ENH = {
+  HONDA: [
+    ["tft", [["7E1", "222201", (b) => b.length >= 27 ? degF(b[26] - 40) + " °F" : null], ["7E0", "222201", (b) => b.length >= 27 ? degF(b[26] - 40) + " °F" : null], ["7E1", "21D9", C40], ["7E0", "221627", C40]]],
+    ["cht", [["7E0", "222615", (b) => b.length >= 51 ? b[50] + " Cyls (VCM)" : null]]],
+    ["tcc", [["7E1", "221E14", two((b) => Math.round(u16(b) / 4) + " RPM")]]],
+    ["gear", [["7E1", "221E12", GEAR]]],
+  ],
+  TOYOTA: [
+    ["tft", [["7E0", "221627", C40], ["7E1", "221627", C40]]],
+    ["cht", [["7E0", "221628", one((b) => degF(b[0] - 40) + " °F (TC)")]]],
+    ["gear", [["7E0", "221621", GEAR]]],
+    ["tcc", [["7E0", "221620", one((b) => (b[0] & 1) ? "Locked" : "Unlocked")]]],
+    ["soc", [["7E0", "22015B", one((b) => (b[0] * 0.5).toFixed(1) + "%")]]],
+  ],
+  NISSAN: [
+    ["tft", [["7E1", "221017", C40], ["7E0", "221017", C40]]],
+    ["eot", [["7E0", "22114A", C40]], "ifEmpty"],
+    ["gear", [["7E1", "221621", GEAR]]],
+  ],
+  HYUNDAI: [
+    ["tft", [["7E1", "221627", C40]]],
+    ["eot", [["7E0", "221104", C40]], "ifEmpty"],
+    ["kr", [["7E0", "2211A6", one((b) => (b[0] * 0.1).toFixed(1) + "°")]]],
+  ],
+  SUBARU: [
+    ["tft", [["7E1", "221017", C40], ["7E0", "221017", C40]]],
+    ["eot", [["7E0", "22114A", C40]], "ifEmpty"],
+  ],
+  MAZDA: [
+    ["tft", [["7E1", "221E1C", two((b) => degF(u16(b) / 80) + " °F")]]],
+    ["gear", [["7E1", "221E12", GEAR]]],
+    ["tcc", [["7E1", "221E14", two((b) => Math.round(u16(b) / 4) + " RPM")]]],
+  ],
+  FORD: [
+    ["tft", [["7E0", "221E1C", two((b) => degF(u16(b) / 16 - 40) + " °F")], ["7E0", "221674", two((b) => degF(u16(b) * 5 / 72 - 18) + " °F")]]],
+    ["cht", [["7E0", "221624", two((b) => degF(u16(b) / 10 - 40) + " °F")]]],
+    ["tcc", [["7E0", "221E14", two((b) => Math.round(u16(b) / 4) + " RPM")]]],
+    ["gear", [["7E0", "221E12", GEAR]]],
+  ],
+  GM: [
+    ["tft", [["7E0", "221940", C40], ["7E2", "221940", C40]]],
+    ["eop", [["7E0", "22115C", one((b) => Math.round(b[0] * 0.579) + " PSI")]]],
+    ["kr", [["7E0", "2211A6", one((b) => (b[0] * 0.1).toFixed(1) + "°")]]],
+    ["tcc", [["7E0", "221943", two((b) => Math.round(u16(b) / 8) + " RPM")]]],
+    ["gear", [["7E0", "221944", GEAR]]],
+    ["eth", [["7E0", "220052", one((b) => Math.round(b[0] * 0.392) + "%")]]],
+  ],
+  CHRYSLER: [
+    ["eop", [["7E0", "221003", one((b) => Math.round(b[0] * 0.58) + " PSI")]]],
+    ["tft", [["7E0", "22B005", C40], ["7E2", "22B005", C40]]],
+    ["eot", [["7E0", "221002", C40]], "ifEmpty"],
+  ],
+};
+let enh = [];
+function profile() { const s = $("oemSel").value; return s === "AUTO" ? (ARGS.make || "GENERIC") : s; }
+function buildEnhanced() {
+  ENH_TILES.forEach(([id]) => setTile(id, "--"));
+  const list = isCan ? (ENH[profile()] || []) : [];
+  enh = list
+    .filter(([tile, , mode]) => !(mode === "ifEmpty" && active.some((p) => PIDS[p].tile === tile)))
+    .map(([tile, cands]) => ({ tile, cands, idx: 0, ok: false, miss: 0 }));
+  const used = new Set(enh.map((e) => e.tile));
+  ENH_TILES.forEach(([id]) => { if (!used.has(id)) setTile(id, "N/A"); });
+}
+async function readDid(hdr, req) {
+  await setHeader(hdr);
+  const raw = await sendCmd(req, 600);
+  if (isErr(raw)) return null;
+  const pre = respCode(req.slice(0, 2)) + req.slice(2);
+  for (const m of messages(raw)) if (m.startsWith(pre)) return bytesOf(m.slice(pre.length));
+  return null;
+}
+async function pollEnhanced() {
+  const jobs = enh.filter((e) => e.idx < e.cands.length)
+    .sort((a, b) => a.cands[a.idx][0].localeCompare(b.cands[b.idx][0]));   // group by module = fewer header switches
+  for (const e of jobs) {
+    const [hdr, req, fn] = e.cands[e.idx];
+    const b = await readDid(hdr, req);
+    let v = null; try { v = b ? fn(b) : null; } catch (_) {}
+    if (v != null) { setTile(e.tile, v); e.ok = true; e.miss = 0; continue; }
+    e.miss++;
+    if (!e.ok || e.miss >= 3) {
+      e.idx++; e.ok = false; e.miss = 0;
+      if (e.idx >= e.cands.length) setTile(e.tile, "N/A");
     }
+  }
+  await setHeader(baseHeader);
+}
 
-    function parseDTC(raw) {
-        const clean = parseCleanHex(raw);
-        const m = clean.match(/43([0-9A-F]{4})/);
-        if (m) {
-            const hex = m[1];
-            const byte1 = parseInt(hex.substr(0, 2), 16);
-            let prefix = 'P';
-            const type = (byte1 & 0xC0) >> 6;
-            if (type === 1) prefix = 'C';
-            if (type === 2) prefix = 'B';
-            if (type === 3) prefix = 'U';
-            const digit1 = (byte1 & 0x30) >> 4;
-            const digit2 = (byte1 & 0x0F).toString(16);
-            const rest = hex.substr(2, 2);
-            return (prefix + digit1 + digit2 + rest).toUpperCase();
-        }
-        return "";
+// ===================== DTCs, VIN, Readiness, Mode $06 =====================
+let dtcs = { stored: [], pending: [], permanent: [] }, vinRead = "";
+function decodeDtc(h) {
+  const b1 = parseInt(h.slice(0, 2), 16);
+  return ("PCBU"[b1 >> 6] + ((b1 >> 4) & 3) + (b1 & 0xF).toString(16) + h.slice(2, 4)).toUpperCase();
+}
+function parseDtcs(raw, svc) {
+  const pre = respCode(svc), out = new Set();
+  for (const m of messages(raw)) {
+    if (!m.startsWith(pre)) continue;
+    let body = m.slice(2), n = 99;
+    if (isCan) { n = parseInt(body.slice(0, 2), 16) || 0; body = body.slice(2); }   // CAN: first byte = number of codes
+    for (let k = 0, i = 0; k < n && i + 4 <= body.length; k++, i += 4) {
+      const h = body.substr(i, 4);
+      if (h !== "0000") out.add(decodeDtc(h));
     }
+  }
+  return [...out];
+}
+async function readDtcs() {
+  await setHeader("7DF");   // functional: every emissions module answers
+  for (const [svc, key] of [["03", "stored"], ["07", "pending"], ["0A", "permanent"]]) {
+    if (svc === "0A" && !isCan) { dtcs[key] = []; continue; }
+    dtcs[key] = parseDtcs(await sendCmd(svc, 3000), svc);
+  }
+  await setHeader(baseHeader);
+  renderDtcs();
+}
+function renderDtcs() {
+  const row = (label, list, c) => `<div style="margin-bottom:6px"><span style="color:var(--muted)">${label}:</span> ` +
+    (list.length ? `<span class="chips">${list.map((d) => `<span class="chip" style="color:var(--${c});border-color:var(--${c})">${d}</span>`).join("")}</span>` : `<span style="color:var(--g)">none</span>`) + "</div>";
+  $("dtcBox").innerHTML = row("Stored (03)", dtcs.stored, "r") + row("Pending (07)", dtcs.pending, "o") + (isCan ? row("Permanent (0A)", dtcs.permanent, "v") : "");
+}
+async function readVin() {
+  const raw = await sendCmd("0902", 3000);
+  let hex = "";
+  for (const m of messages(raw)) if (m.startsWith("4902")) hex += m.slice(6);
+  const ascii = bytesOf(hex).map((c) => String.fromCharCode(c)).join("").toUpperCase();
+  const m = ascii.match(/[A-HJ-NPR-Z0-9]{17}/);
+  vinRead = m ? m[0] : "";
+}
 
-    function parseVIN(raw) {
-        const hexMatches = raw.match(/[0-9A-Fa-f]{2}/g);
-        if (!hexMatches) return "";
-        let ascii = "";
-        for (let h of hexMatches) {
-            const code = parseInt(h, 16);
-            if (code >= 32 && code <= 126) ascii += String.fromCharCode(code);
-        }
-        const m = ascii.match(/[A-HJ-NPR-Z0-9]{17}/);
-        return m ? m[0] : "";
+let readinessSummary = "";
+async function loadReadiness() {
+  const raw = await sendCmd("0101", 1500);
+  const m = messages(raw).find((x) => x.startsWith("4101") && x.length >= 12);
+  if (!m) { $("readyBox").innerHTML = `<span style="color:var(--r)">Could not read monitors (${esc(raw.trim() || "no reply")})</span>`; return; }
+  const [A, B, C, D] = bytesOf(m.slice(4, 12));
+  const diesel = (B & 0x08) !== 0;
+  const mons = [["Misfire", B, 0, B, 4], ["Fuel System", B, 1, B, 5], ["Comprehensive", B, 2, B, 6]];
+  const names = diesel
+    ? ["NMHC Catalyst", "NOx / SCR", null, "Boost Pressure", null, "Exhaust Gas Sensor", "PM Filter", "EGR / VVT"]
+    : ["Catalyst", "Heated Catalyst", "EVAP", "Secondary Air", "A/C Refrigerant", "O2 Sensor", "O2 Heater", "EGR / VVT"];
+  names.forEach((n, bit) => { if (n) mons.push([n, C, bit, D, bit]); });
+  const mil = (A & 0x80) !== 0, count = A & 0x7F;
+  let html = `<div style="margin-bottom:8px;font-weight:700;color:${mil ? "var(--r)" : "var(--g)"}">MIL ${mil ? "ON" : "OFF"} · ${count} emissions code(s)${diesel ? " · Diesel" : ""}</div>`;
+  html += `<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr));margin:0">`;
+  readinessSummary = `MIL ${mil ? "ON" : "OFF"}, ${count} codes. `;
+  for (const [n, sb, sbit, rb, rbit] of mons) {
+    if (!((sb >> sbit) & 1)) continue;   // only show monitors this vehicle supports
+    const ready = !((rb >> rbit) & 1);
+    const c = ready ? "g" : "r", t = ready ? "COMPLETE" : "NOT READY";
+    readinessSummary += `${n}: ${t}; `;
+    html += `<div class="mon" style="border-color:var(--${c})"><div class="l">${n}</div><div class="v" style="color:var(--${c})">${t}</div></div>`;
+  }
+  $("readyBox").innerHTML = html + "</div>";
+}
+
+// SAE J1979 Mode $06 monitor IDs
+const MID_NAMES = {
+  "01": "O2 Sensor B1S1", "02": "O2 Sensor B1S2", "03": "O2 Sensor B1S3", "05": "O2 Sensor B2S1", "06": "O2 Sensor B2S2", "07": "O2 Sensor B2S3",
+  "21": "Catalyst B1", "22": "Catalyst B2", "31": "EGR B1", "32": "EGR B2", "35": "VVT B1", "36": "VVT B2",
+  "39": "EVAP Cap-Off / 0.150\"", "3A": "EVAP 0.090\"", "3B": "EVAP 0.040\"", "3C": "EVAP 0.020\"", "3D": "Purge Flow",
+  "41": "O2 Heater B1S1", "42": "O2 Heater B1S2", "45": "O2 Heater B2S1", "46": "O2 Heater B2S2",
+  "61": "Heated Cat B1", "62": "Heated Cat B2", "71": "Secondary Air 1", "81": "Fuel System B1", "82": "Fuel System B2",
+  "A1": "Misfire (All Cyl)",
+};
+for (let c = 1; c <= 12; c++) MID_NAMES[(0xA1 + c).toString(16).toUpperCase()] = `Cylinder ${c} Misfire`;
+const DEFAULT_MIDS = ["01", "02", "05", "06", "21", "22", "31", "35", "36", "39", "3A", "3B", "3C", "3D", "A2", "A3", "A4", "A5", "A6", "A7", "A8", "A9"];
+const s16 = (v) => (v & 0x8000 ? v - 0x10000 : v);
+function parse06(raw, mid) {
+  const recs = [];
+  for (const m of messages(raw)) {
+    if (!m.startsWith("46")) continue;
+    const body = m.slice(2);
+    for (let i = 0; i + 18 <= body.length; i += 18) {
+      if (body.substr(i, 2) !== mid) break;
+      const b = bytesOf(body.substr(i + 2, 16));   // TID, UASID, value(2), min(2), max(2)
+      const sg = b[1] >= 0x80;
+      let v = u16(b, 2), mn = u16(b, 4), mx = u16(b, 6);
+      if (sg) { v = s16(v); mn = s16(mn); mx = s16(mx); }
+      recs.push({ tid: b[0], v, mn, mx, pass: v >= mn && v <= mx });
     }
-
-    async function queryPid(cmd, timeoutMs = 500) {
-        if (unsupportedPids.has(cmd)) return "";
-        let res = await sendCmd(cmd, timeoutMs);
-        let clean = parseCleanHex(res);
-        if (clean.includes("NODATA") || clean.includes("?") || clean.includes("UNABLE")) {
-            unsupportedPids.add(cmd);
-            return "";
-        }
-        return clean;
+  }
+  return recs;
+}
+let mode6Summary = "";
+async function loadMode6() {
+  const box = $("m6Box");
+  if (!isCan) { box.textContent = "Mode $06 decoding needs a CAN vehicle (most 2008+)."; mode6Summary = "Not available (non-CAN)"; return; }
+  box.innerHTML = `<span style="color:var(--o)">Reading supported monitors…</span>`;
+  const sup = await supported("06", ["00", "20", "40", "60", "80", "A0"]);
+  const mids = sup ? [...sup].filter((m) => MID_NAMES[m]) : DEFAULT_MIDS;
+  let html = "", lines = [];
+  for (const mid of mids) {
+    const recs = parse06(await sendCmd("06" + mid, 1000), mid);
+    if (!recs.length) continue;
+    const name = MID_NAMES[mid];
+    let text, color;
+    if (mid >= "A1" && mid <= "AD") {
+      const cur = recs.find((r) => r.tid === 0x0C), avg = recs.find((r) => r.tid === 0x0B);
+      const c = cur ? cur.v : 0, a = avg ? avg.v : 0;
+      color = c || a ? "r" : "g";
+      text = `Now ${c} · Avg ${a}`;
+      lines.push(`${name}: current-cycle ${c}, 10-cycle avg ${a}`);
+    } else {
+      const fails = recs.filter((r) => !r.pass).length;
+      color = fails ? "r" : "g";
+      text = fails ? `FAIL ${fails}/${recs.length}` : `PASS (${recs.length})`;
+      lines.push(`${name}: ` + recs.map((r) => `TID $${r.tid.toString(16).toUpperCase().padStart(2, "0")} val ${r.v} [${r.mn}..${r.mx}] ${r.pass ? "PASS" : "FAIL"}`).join("; "));
     }
+    html += `<div class="mon" style="border-color:var(--${color})"><div class="l">${name}</div><div class="v" style="color:var(--${color})">${text}</div></div>`;
+    box.innerHTML = `<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(140px,1fr));margin:0">${html}</div>`;
+  }
+  mode6Summary = lines.join("\n") || "No Mode $06 results returned";
+  if (!html) box.textContent = "ECM returned no Mode $06 results.";
+}
 
-    // Module-Targeted Query with automatic CAN header switching and restore
-    async function queryModulePid(header, cmd, timeoutMs = 450) {
-        const cacheKey = header + "_" + cmd;
-        if (unsupportedPids.has(cacheKey)) return "";
-        await sendCmd("ATSH " + header, 150);
-        let res = await sendCmd(cmd, timeoutMs);
-        await sendCmd("ATSH 7DF", 150); // restore functional broadcast
-        let clean = parseCleanHex(res);
-        if (clean.includes("NODATA") || clean.includes("?") || clean.includes("UNABLE")) {
-            unsupportedPids.add(cacheKey);
-            return "";
-        }
-        return clean;
+// ===================== Live loop =====================
+let loopToken = 0, streaming = false, driveOn = false, wakeLock = null, lastSpeak = 0, lastDriveAi = 0;
+async function liveLoop(token) {
+  let cycle = 0, t0 = performance.now(), cmds = 0;
+  while (token === loopToken) {
+    cycle++;
+    const due = active.filter((p) => cycle === 1 || cycle % TIER_EVERY[PIDS[p].tier] === 0);
+    await txn(() => pollPids(due));
+    cmds += batchOK ? Math.ceil(due.length / 6) : due.length;
+    if (token !== loopToken) break;
+    if (cycle % 6 === 0) {
+      const r = await txn(() => sendCmd("ATRV", 600));
+      const m = (r || "").match(/(\d+\.\d+)/);
+      if (m) setTile("volt", parseFloat(m[1]).toFixed(1) + " V", parseFloat(m[1]));
     }
-
-    // Extracts successive payload bytes following a positive UDS/OBD response prefix
-    function getPayloadBytes(cleanHex, expectedPrefix) {
-        // Strip out multi-frame CAN line index prefixes (0:, 1:, 2:)
-        let stripped = cleanHex.replace(/^[0-9A-F]{1,2}:/gm, '').replace(/[^0-9A-F]/g, '');
-        let pos = stripped.indexOf(expectedPrefix.toUpperCase());
-        if (pos === -1) return [];
-        let dataHex = stripped.substring(pos + expectedPrefix.length);
-        let bytes = [];
-        for (let i = 0; i + 2 <= dataHex.length; i += 2) {
-            bytes.push(parseInt(dataHex.substr(i, 2), 16));
-        }
-        return bytes;
+    if (enh.length && cycle % 12 === 0) await txn(pollEnhanced);
+    if (cycle % 10 === 0) {
+      const secs = (performance.now() - t0) / 1000;
+      $("rate").textContent = `· ${(cycle / secs).toFixed(1)} refresh/s${batchOK ? " · multi-PID" : ""}`;
     }
+    driveChecks();
+  }
+}
+function startStream() { streaming = true; loopToken++; liveLoop(loopToken); $("pauseBtn").textContent = "⏸️ Pause"; log("Streaming live data…"); }
+function stopStream() { streaming = false; loopToken++; $("pauseBtn").textContent = "▶️ Resume"; }
 
-    function getActiveOemProfile() {
-        let sel = document.getElementById('oemProfileSelect').value;
-        if (sel === "AUTO") {
-            return DETECTED_MAKE;
-        }
-        return sel;
+function speak(text) {
+  const now = Date.now(); if (now - lastSpeak < 18000) return; lastSpeak = now;
+  if ("speechSynthesis" in window) { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.rate = 1.05; speechSynthesis.speak(u); }
+}
+function driveChecks() {
+  if (!driveOn) return;
+  const t1 = (num.stft1 ?? 0) + (num.ltft1 ?? 0);
+  const hasB2 = num.stft2 !== undefined;
+  const t2 = (num.stft2 ?? 0) + (num.ltft2 ?? 0);
+  if (t1 > 16) speak(`Bank 1 total fuel trim plus ${Math.round(t1)} percent. Lean.`);
+  else if (t1 < -16) speak(`Bank 1 total fuel trim minus ${Math.abs(Math.round(t1))} percent. Rich.`);
+  else if (hasB2 && t2 > 16) speak(`Bank 2 total fuel trim plus ${Math.round(t2)} percent. Lean.`);
+  else if (hasB2 && t2 < -16) speak(`Bank 2 total fuel trim minus ${Math.abs(Math.round(t2))} percent. Rich.`);
+  else if ((num.ect ?? 0) >= 225) speak(`High coolant temperature, ${num.ect} degrees.`);
+  else if ((num.rpm ?? 0) > 500 && num.volt && num.volt < 13.0) speak(`Low charging voltage, ${num.volt.toFixed(1)} volts.`);
+  if (Date.now() - lastDriveAi > 60000) { lastDriveAi = Date.now(); requestAi("drive"); }
+}
+async function wake(on) {
+  try {
+    if (on && "wakeLock" in navigator) wakeLock = await navigator.wakeLock.request("screen");
+    else if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
+  } catch (_) {}
+}
+document.addEventListener("visibilitychange", () => { if (driveOn && document.visibilityState === "visible") wake(true); });
+
+// ===================== AI (runs server-side in Python, key never reaches the browser) =====================
+let aiPendingId = null;
+function snapshot() {
+  const s = {};
+  for (const [id, t] of Object.entries(shown)) if (t && t !== "--" && t !== "N/A") s[LABEL[id] || id] = t;
+  return s;
+}
+function requestAi(mode) {
+  if (aiPendingId) return;
+  aiPendingId = "ai-" + Date.now();
+  if (mode === "full") $("aiBox").innerHTML = `<span style="color:var(--o)">🤖 Analyzing live data, codes, monitors and Mode $06…</span>`;
+  sendValue({ type: "ai", id: aiPendingId, mode, at: new Date().toLocaleTimeString(), pids: snapshot(), dtcs, readiness: readinessSummary, mode6: mode6Summary });
+  const id = aiPendingId;
+  setTimeout(() => { if (aiPendingId === id) { aiPendingId = null; if (mode === "full") $("aiBox").textContent = "AI request timed out. Try again."; } }, 90000);
+}
+function showAi(text, label) {
+  let h = esc(text || "")
+    .replace(/^#{1,4}\s*(.+)$\n?/gm, "<h4>$1</h4>")
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/^\s*[-*]\s+/gm, "• ")
+    .replace(/\n/g, "<br>");
+  $("aiBox").innerHTML = (label ? `<div style="color:var(--g);font-size:.8rem;margin-bottom:4px">${esc(label)}</div>` : "") + h;
+}
+
+// ===================== Connect / setup =====================
+const BTN_IDS = ["pauseBtn", "driveBtn", "readBtn", "clearBtn", "aiBtn", "syncBtn"];
+const enableBtns = (on) => BTN_IDS.forEach((id) => { $(id).disabled = !on; });
+
+function onDisconnect() {
+  connected = false; stopStream(); enableBtns(false);
+  if (driveOn) { driveOn = false; $("driveBanner").style.display = "none"; wake(false); }
+  $("bleBtn").textContent = "🔄 Reconnect"; $("bleBtn").disabled = false;
+  log("Adapter disconnected. Tap Reconnect.");
+}
+
+async function connectGatt() {
+  const server = await device.gatt.connect();
+  let svc;
+  try { svc = await server.getPrimaryService(NORDIC[0]); rxChar = await svc.getCharacteristic(NORDIC[1]); txChar = await svc.getCharacteristic(NORDIC[2]); }
+  catch (_) { svc = await server.getPrimaryService(FFF0[0]); rxChar = await svc.getCharacteristic(FFF0[1]); txChar = await svc.getCharacteristic(FFF0[2]); }
+  await txChar.startNotifications();
+  txChar.removeEventListener("characteristicvaluechanged", onData);
+  txChar.addEventListener("characteristicvaluechanged", onData);
+}
+
+async function initVehicle() {
+  log("Resetting adapter…");
+  await sendCmd("ATZ", 2000);
+  for (const c of ["ATE0", "ATL0", "ATS0", "ATH0", "ATAT1"]) await sendCmd(c, 500);
+  curHeader = "7DF";
+
+  log("Trying CAN (ATSP6)…");
+  await sendCmd("ATSP6", 500);
+  let r = await sendCmd("0100", 3000);
+  if (!messages(r).some((m) => m.startsWith("4100"))) {
+    log("Searching other protocols (ATSP0)…");
+    await sendCmd("ATSP0", 500);
+    r = await sendCmd("0100", 9000);
+  }
+  if (!messages(r).some((m) => m.startsWith("4100"))) return false;
+
+  const dpn = (await sendCmd("ATDPN", 500)).replace(/[\s>]/g, "").toUpperCase();
+  isCan = /^A?[6-9]$/.test(dpn);
+  batchOK = false; fastOK = true; baseHeader = "7DF";
+
+  if (isCan) {   // talk to the engine computer directly: no duplicate replies from other modules, faster
+    await setHeader("7E0");
+    if (messages(await sendCmd("0100", 1500)).some((m) => m.startsWith("4100"))) baseHeader = "7E0";
+    else await setHeader("7DF");
+  }
+
+  log("Reading supported PIDs…");
+  const sup = await supported("01", ["00", "20", "40"]);
+  choosePids(sup);
+
+  if (isCan && active.length >= 2) {   // can this ECU answer several PIDs in one request?
+    const test = active.slice(0, 3);
+    batchOK = Object.keys(parse01(await sendCmd("01" + test.join(""), 1500), test)).length === test.length;
+  }
+  buildEnhanced();
+  return true;
+}
+
+$("bleBtn").addEventListener("click", async () => {
+  try {
+    if (!navigator.bluetooth) { alert("Web Bluetooth isn't available here. Use Chrome on Android, Windows, macOS or ChromeOS (or Bluefy on iPhone)."); return; }
+    if (!device) {
+      log("Opening Bluetooth picker…");
+      device = await navigator.bluetooth.requestDevice({
+        filters: [{ namePrefix: "VEEPEAK" }, { namePrefix: "OBD" }, { namePrefix: "IOS-Vlink" }, { namePrefix: "vLink" }, { namePrefix: "Vgate" }, { namePrefix: "ELM" }],
+        optionalServices: [NORDIC[0], FFF0[0]],
+      });
+      device.addEventListener("gattserverdisconnected", onDisconnect);
     }
-
-    function speakAlert(text) {
-        const now = Date.now();
-        if (now - lastVoiceAlertTime < 18000) return;
-        lastVoiceAlertTime = now;
-        if ('speechSynthesis' in window) {
-            window.speechSynthesis.cancel();
-            const utter = new SpeechSynthesisUtterance(text);
-            utter.rate = 1.05;
-            utter.pitch = 1.0;
-            window.speechSynthesis.speak(utter);
-        }
+    $("bleBtn").disabled = true;
+    log("Connecting to " + device.name + "…");
+    await connectGatt();
+    if (!(await initVehicle())) {
+      log("ECM not responding. Turn the key fully ON (or start the engine) and tap Connect again.");
+      $("bleBtn").disabled = false; return;
     }
-
-    async function enableWakeLock() {
-        try {
-            if ('wakeLock' in navigator) {
-                wakeLockSentinel = await navigator.wakeLock.request('screen');
-            }
-        } catch (e) {}
-    }
-
-    function disableWakeLock() {
-        if (wakeLockSentinel) {
-            wakeLockSentinel.release().catch(() => {});
-            wakeLockSentinel = null;
-        }
-    }
-
-    async function evaluateTestDriveTriggers(s1, l1, s2, l2, ectVal, voltVal) {
-        if (!isTestDriveActive) return;
-
-        const total1 = s1 + l1;
-        const total2 = s2 + l2;
-
-        if (total1 > 16.0) speakAlert("Alert: Bank 1 Total Fuel Trim plus " + Math.round(total1) + " percent lean.");
-        else if (total1 < -16.0) speakAlert("Alert: Bank 1 Total Fuel Trim negative " + Math.abs(Math.round(total1)) + " percent rich.");
-        else if (total2 > 16.0 && s2 !== 0) speakAlert("Alert: Bank 2 Total Fuel Trim plus " + Math.round(total2) + " percent lean.");
-        else if (total2 < -16.0 && s2 !== 0) speakAlert("Alert: Bank 2 Total Fuel Trim negative " + Math.abs(Math.round(total2)) + " percent rich.");
-        else if (ectVal >= 225) speakAlert("High Coolant Temperature: " + ectVal + " degrees.");
-        else if (voltVal > 0 && voltVal < 12.8) speakAlert("Low Battery Voltage under load: " + voltVal.toFixed(1) + " volts.");
-
-        const now = Date.now();
-        if (now - lastAiSnapshotTime >= 45000) {
-            lastAiSnapshotTime = now;
-            triggerBackgroundAiEvaluation();
-        }
-    }
-
-    async function triggerBackgroundAiEvaluation() {
-        if (!GEMINI_API_KEY) return;
-        const vBox = document.getElementById('aiVerdictBox');
-        
-        const pids = {
-            "Time": new Date().toLocaleTimeString(),
-            "RPM": document.getElementById('valRpm').innerText,
-            "Load": document.getElementById('valLoad').innerText,
-            "Speed": document.getElementById('valSpd').innerText,
-            "TPS": document.getElementById('valTps').innerText,
-            "ECT": document.getElementById('valEct').innerText,
-            "IAT": document.getElementById('valIat').innerText,
-            "MAP": document.getElementById('valMap').innerText,
-            "MAF": document.getElementById('valMaf').innerText,
-            "STFT1": document.getElementById('valStft').innerText,
-            "LTFT1": document.getElementById('valLtft').innerText,
-            "STFT2": document.getElementById('valStft2').innerText,
-            "LTFT2": document.getElementById('valLtft2').innerText,
-            "TransTemp": document.getElementById('valTft').innerText,
-            "OilPress": document.getElementById('valEop').innerText,
-            "CHT_VCM": document.getElementById('valCht').innerText,
-            "TCC_Slip": document.getElementById('valTccSlip').innerText,
-            "Gear": document.getElementById('valGear').innerText,
-            "KnockRetard": document.getElementById('valKr').innerText,
-            "Timing": document.getElementById('valTime').innerText,
-            "O2_B1S1": document.getElementById('valO21').innerText,
-            "O2_B1S2": document.getElementById('valO22').innerText,
-            "Voltage": document.getElementById('valVolt').innerText
-        };
-
-        const prompt = `
-You are an expert ASE Master / L1 Diagnostic Technician monitoring a live vehicle test drive in real time.
-Vehicle: ${VEHICLE_CONTEXT}
-Active DTC: ${DTC_CONTEXT}
-
-LATEST TELEMETRY SNAPSHOT DURING ROAD LOAD:
-${JSON.stringify(pids, null, 2)}
-
-Provide a concise 3-bullet live assessment:
-1. Dynamic Fuel Delivery & Trim State (Bank 1 vs 2 balance under current load).
-2. Drivetrain & Powertrain Health (Trans Temp, Oil Pressure, CHT/VCM, TCC slip, Knock).
-3. Any immediate anomaly to inspect upon returning to the bay.
-Keep it strictly under 100 words.
-`;
-        try {
-            const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + GEMINI_API_KEY;
-            const res = await fetch(url, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
-            });
-            const data = await res.json();
-            if (data.candidates && data.candidates[0].content.parts[0].text) {
-                const text = data.candidates[0].content.parts[0].text
-                    .replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>')
-                    .replace(/\\n/g, '<br>');
-                vBox.innerHTML = "<div style='color: #00FF66; font-size: 0.8rem; margin-bottom: 4px;'>[Live Drive AI Check - " + pids.Time + "]</div>" + text;
-            }
-        } catch (e) {}
-    }
-
-    // --- REUSABLE READINESS MONITORS FETCHER ---
-    async function loadReadinessMonitors() {
-        const rBox = document.getElementById('readinessBox');
-        rBox.innerHTML = "<div style='color: #F59E0B;'>Reading emissions monitor status from ECM...</div>";
-
-        let res = await sendCmd("0101", 1500);
-        let clean = parseCleanHex(res);
-        let m = clean.match(/4101([0-9A-F]{8})/);
-
-        if (m) {
-            let bB = parseInt(m[1].substr(2, 2), 16);
-            let bC = parseInt(m[1].substr(4, 2), 16);
-            let bD = parseInt(m[1].substr(6, 2), 16);
-
-            const monitors = [
-                {name: "Misfire Monitor", sup: (bB & 0x01) !== 0, rdy: (bB & 0x10) === 0},
-                {name: "Fuel System", sup: (bB & 0x02) !== 0, rdy: (bB & 0x20) === 0},
-                {name: "Comprehensive Components", sup: (bB & 0x04) !== 0, rdy: (bB & 0x40) === 0},
-                {name: "Catalyst Monitor", sup: (bC & 0x01) !== 0, rdy: (bD & 0x01) === 0},
-                {name: "Heated Catalyst", sup: (bC & 0x02) !== 0, rdy: (bD & 0x02) === 0},
-                {name: "EVAP System", sup: (bC & 0x04) !== 0, rdy: (bD & 0x04) === 0},
-                {name: "Secondary Air", sup: (bC & 0x08) !== 0, rdy: (bD & 0x08) === 0},
-                {name: "O2 Sensor", sup: (bC & 0x20) !== 0, rdy: (bD & 0x20) === 0},
-                {name: "O2 Sensor Heater", sup: (bC & 0x40) !== 0, rdy: (bD & 0x40) === 0},
-                {name: "EGR / VVT System", sup: (bC & 0x80) !== 0, rdy: (bD & 0x80) === 0}
-            ];
-
-            let html = "<div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px;'>";
-            readinessSummary = "";
-
-            for (let mon of monitors) {
-                let badge = "";
-                let color = "";
-                if (!mon.sup) {
-                    badge = "N/A";
-                    color = "#64748B";
-                } else if (mon.rdy) {
-                    badge = "READY / COMPLETE";
-                    color = "#00FF66";
-                } else {
-                    badge = "NOT READY";
-                    color = "#EF4444";
-                }
-                readinessSummary += `${mon.name}: ${badge}; `;
-                html += `<div style='background: #1A1F26; border: 1px solid ${color}; padding: 6px; border-radius: 5px; text-align: center;'>
-                    <div style='font-size: 0.75rem; color: #A0AEC0;'>${mon.name}</div>
-                    <div style='font-size: 0.9rem; font-weight: 700; color: ${color};'>${badge}</div>
-                </div>`;
-            }
-            html += "</div>";
-            rBox.innerHTML = html;
-        } else {
-            rBox.innerHTML = "<div style='color: #EF4444;'>Could not read I/M monitors. Raw response: " + res + "</div>";
-        }
-    }
-
-    // --- REUSABLE FULL MODE $06 FETCHER (ALL CYLINDERS, CATALYSTS, O2 & EVAP) ---
-    async function loadMode6Data() {
-        const m6Box = document.getElementById('mode6Box');
-        m6Box.innerHTML = "<div style='color: #F59E0B; padding: 4px;'>⚡ Scanning all supported vehicle monitors (Cylinders 1-8+, Catalyst Bank 1 & 2, O2 Sensors, EVAP, VVT, EGR)...</div>";
-
-        const allMonitors = [
-            {mid: "06A2", name: "Cylinder 1 Misfires (Bank 1)", isCyl: true},
-            {mid: "06A3", name: "Cylinder 2 Misfires (Bank 1)", isCyl: true},
-            {mid: "06A4", name: "Cylinder 3 Misfires (Bank 1)", isCyl: true},
-            {mid: "06A5", name: "Cylinder 4 Misfires (Bank 2)", isCyl: true},
-            {mid: "06A6", name: "Cylinder 5 Misfires (Bank 2)", isCyl: true},
-            {mid: "06A7", name: "Cylinder 6 Misfires (Bank 2)", isCyl: true},
-            {mid: "06A8", name: "Cylinder 7 Misfires", isCyl: true},
-            {mid: "06A9", name: "Cylinder 8 Misfires", isCyl: true},
-            {mid: "0621", name: "Catalyst Bank 1", isCyl: false},
-            {mid: "0622", name: "Catalyst Bank 2", isCyl: false},
-            {mid: "0601", name: "O2 Sensor B1S1 Monitor", isCyl: false},
-            {mid: "0602", name: "O2 Sensor B1S2 Monitor", isCyl: false},
-            {mid: "0605", name: "O2 Sensor B2S1 Monitor", isCyl: false},
-            {mid: "0606", name: "O2 Sensor B2S2 Monitor", isCyl: false},
-            {mid: "0635", name: "VVT / Cam Phasing Bank 1", isCyl: false},
-            {mid: "0636", name: "VVT / Cam Phasing Bank 2", isCyl: false},
-            {mid: "0639", name: "EVAP 0.040 Monitor", isCyl: false},
-            {mid: "063A", name: "EVAP 0.020 Leak Monitor", isCyl: false},
-            {mid: "063B", name: "EVAP Purge Flow Monitor", isCyl: false},
-            {mid: "0651", name: "EGR Flow / Lift Monitor", isCyl: false}
-        ];
-
-        let htmlGrid = "<div style='display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px;'>";
-        let foundAny = false;
-        mode6RawData = "";
-
-        for (let idx = 0; idx < allMonitors.length; idx++) {
-            let t = allMonitors[idx];
-            let res = await sendCmd(t.mid, 500);
-            let clean = parseCleanHex(res);
-            
-            if ((clean.includes("NODATA") || clean.includes("?") || clean.length < 6)) {
-                if (t.mid === "06A8") {
-                    idx++; // skip Cyl 8 if Cyl 7 is absent
-                }
-                continue;
-            }
-
-            mode6RawData += `\\n${t.name} (${t.mid}): ${res}`;
-            let color = "#00FF66";
-            let statusText = "PASS";
-
-            if (t.isCyl) {
-                let m = clean.match(/46(A[2-9])([0-9A-F]{2})([0-9A-F]{2})([0-9A-F]{4})/);
-                if (m) {
-                    let count = parseInt(m[4], 16);
-                    color = count === 0 ? "#00FF66" : "#EF4444";
-                    statusText = count === 0 ? "PASS (0 ct)" : "MISFIRES: " + count;
-                }
-            } else {
-                statusText = "MONITORED";
-                color = "#38BDF8";
-            }
-
-            foundAny = true;
-            htmlGrid += `<div style='background: #1A1F26; border: 1px solid ${color}; padding: 8px; border-radius: 6px; text-align: center;'>
-                <div style='color: #A0AEC0; font-weight: 700; font-size: 0.8rem;'>${t.name}</div>
-                <div style='color: ${color}; font-size: 1rem; font-weight: 700;'>${statusText}</div>
-            </div>`;
-            m6Box.innerHTML = htmlGrid + "</div>";
-        }
-
-        if (!foundAny) {
-            m6Box.innerHTML = "<div style='color: #A0AEC0; padding: 4px;'>Raw Mode $06 Output:<br><pre style='white-space: pre-wrap; font-size: 0.75rem;'>" + (mode6RawData.trim() || "No response bytes from ECM.") + "</pre></div>";
-        }
-    }
-
-    // --- COMPREHENSIVE OEM ENHANCED PIDS ENGINE (DOMESTIC & ASIAN) ---
-    async function queryEnhancedPids(oem) {
-        if (oem === "GENERIC") return;
-
-        // 1. HONDA & ACURA
-        if (oem === "HONDA") {
-            // Trans Fluid Temp: Try 7E1 (TCM) then 7E0 (ECM) on 222201 (byte 27), 21D9 (byte 0), 221627
-            let rTft = await queryModulePid("7E1", "222201", 350);
-            let bTft = getPayloadBytes(rTft, "622201");
-            if (bTft.length >= 27) {
-                document.getElementById('valTft').innerText = Math.round((bTft[26] - 40) * 1.8 + 32) + " °F";
-            } else {
-                let r2 = await queryModulePid("7E0", "222201", 350);
-                let b2 = getPayloadBytes(r2, "622201");
-                if (b2.length >= 27) {
-                    document.getElementById('valTft').innerText = Math.round((b2[26] - 40) * 1.8 + 32) + " °F";
-                } else {
-                    let r3 = await queryModulePid("7E1", "21D9", 350);
-                    let b3 = getPayloadBytes(r3, "61D9");
-                    if (b3.length >= 1) {
-                        document.getElementById('valTft').innerText = Math.round((b3[0] - 40) * 1.8 + 32) + " °F";
-                    } else {
-                        let r4 = await queryModulePid("7E0", "221627", 350);
-                        let b4 = getPayloadBytes(r4, "621627");
-                        if (b4.length >= 1) document.getElementById('valTft').innerText = Math.round((b4[0] - 40) * 1.8 + 32) + " °F";
-                    }
-                }
-            }
-
-            // VCM Active Cylinders / CHT
-            let rVcm = await queryModulePid("7E0", "222615", 350);
-            let bVcm = getPayloadBytes(rVcm, "622615");
-            if (bVcm.length >= 51) {
-                document.getElementById('valCht').innerText = bVcm[50] + " Cyls (VCM)";
-            } else if (bVcm.length >= 1) {
-                document.getElementById('valCht').innerText = bVcm[0] + " Cyls (VCM)";
-            }
-
-            // TCC Slip & Gear
-            let rSlip = await queryModulePid("7E1", "221E14", 300);
-            let bSlip = getPayloadBytes(rSlip, "621E14");
-            if (bSlip.length >= 2) document.getElementById('valTccSlip').innerText = Math.round(((bSlip[0] * 256) + bSlip[1]) / 4) + " RPM";
-
-            let rGear = await queryModulePid("7E1", "221E12", 300);
-            let bGear = getPayloadBytes(rGear, "621E12");
-            if (bGear.length >= 1) document.getElementById('valGear').innerText = "Gear " + bGear[0];
-        }
-
-        // 2. TOYOTA, LEXUS & SCION
-        else if (oem === "TOYOTA") {
-            // ATF Pan Temp (ATF 1)
-            let rTft = await queryModulePid("7E0", "221627", 350);
-            let bTft = getPayloadBytes(rTft, "621627");
-            if (bTft.length >= 1) {
-                document.getElementById('valTft').innerText = Math.round((bTft[0] - 40) * 1.8 + 32) + " °F";
-            } else {
-                let r2 = await queryModulePid("700", "2182", 350);
-                let b2 = getPayloadBytes(r2, "6182");
-                if (b2.length >= 1) document.getElementById('valTft').innerText = Math.round((b2[0] - 40) * 1.8 + 32) + " °F";
-            }
-
-            // ATF Torque Converter Temp (ATF 2)
-            let rTf2 = await queryModulePid("7E0", "221628", 350);
-            let bTf2 = getPayloadBytes(rTf2, "621628");
-            if (bTf2.length >= 1) {
-                document.getElementById('valCht').innerText = Math.round((bTf2[0] - 40) * 1.8 + 32) + " °F (TC)";
-            } else {
-                let r3 = await queryModulePid("700", "2182", 350);
-                let b3 = getPayloadBytes(r3, "6182");
-                if (b3.length >= 4) {
-                    let degC = (((b3[2] * 256) + b3[3]) * 7 / 100 - 400) / 10;
-                    document.getElementById('valCht').innerText = Math.round(degC * 1.8 + 32) + " °F (TC)";
-                }
-            }
-
-            // Commanded Gear & Lockup
-            let rGear = await queryModulePid("7E0", "221621", 300);
-            let bGear = getPayloadBytes(rGear, "621621");
-            if (bGear.length >= 1) document.getElementById('valGear').innerText = "Gear " + bGear[0];
-
-            let rSlip = await queryModulePid("7E0", "221620", 300);
-            let bSlip = getPayloadBytes(rSlip, "621620");
-            if (bSlip.length >= 1) document.getElementById('valTccSlip').innerText = (bSlip[0] & 0x01) ? "Locked" : "Unlocked";
-
-            // Hybrid Battery SOC
-            let rSoc = await queryModulePid("7E0", "22015B", 300);
-            let bSoc = getPayloadBytes(rSoc, "62015B");
-            if (bSoc.length >= 1) document.getElementById('valSoc').innerText = (bSoc[0] * 0.5).toFixed(1) + "%";
-        }
-
-        // 3. NISSAN & INFINITI
-        else if (oem === "NISSAN") {
-            // CVT Fluid Temperature
-            let rCvt = await queryModulePid("7E1", "221017", 350);
-            let bCvt = getPayloadBytes(rCvt, "621017");
-            if (bCvt.length >= 1) {
-                document.getElementById('valTft').innerText = Math.round((bCvt[0] - 40) * 1.8 + 32) + " °F";
-            } else {
-                let r2 = await queryModulePid("7E0", "221017", 350);
-                let b2 = getPayloadBytes(r2, "621017");
-                if (b2.length >= 1) document.getElementById('valTft').innerText = Math.round((b2[0] - 40) * 1.8 + 32) + " °F";
-            }
-
-            // Engine Oil Temp
-            let rEot = await queryModulePid("7E0", "22114A", 300);
-            let bEot = getPayloadBytes(rEot, "62114A");
-            if (bEot.length >= 1) document.getElementById('valEop').innerText = Math.round((bEot[0] - 40) * 1.8 + 32) + " °F (Oil)";
-
-            // Commanded Gear
-            let rGear = await queryModulePid("7E1", "221621", 300);
-            let bGear = getPayloadBytes(rGear, "621621");
-            if (bGear.length >= 1) document.getElementById('valGear').innerText = "Gear " + bGear[0];
-        }
-
-        // 4. HYUNDAI, KIA & GENESIS
-        else if (oem === "HYUNDAI") {
-            // ATF Pan Temp
-            let rTft = await queryModulePid("7E1", "221627", 350);
-            let bTft = getPayloadBytes(rTft, "621627");
-            if (bTft.length >= 2) {
-                let degF = Math.round((bTft[0] * 459 / 255) + (bTft[1] * 1.6 / 255) - 40);
-                document.getElementById('valTft').innerText = degF + " °F";
-            } else if (bTft.length >= 1) {
-                document.getElementById('valTft').innerText = Math.round((bTft[0] - 40) * 1.8 + 32) + " °F";
-            }
-
-            // Engine Oil Temp (CVVT)
-            let rEot = await queryModulePid("7E0", "221104", 300);
-            let bEot = getPayloadBytes(rEot, "621104");
-            if (bEot.length >= 1) document.getElementById('valEop').innerText = Math.round((bEot[0] - 40) * 1.8 + 32) + " °F (Oil)";
-
-            // Knock Retard
-            let rKr = await queryModulePid("7E0", "2211A6", 300);
-            let bKr = getPayloadBytes(rKr, "6211A6");
-            if (bKr.length >= 1) document.getElementById('valKr').innerText = (bKr[0] * 0.1).toFixed(1) + "°";
-        }
-
-        // 5. SUBARU
-        else if (oem === "SUBARU") {
-            // CVT Fluid Temperature
-            let rCvt = await queryModulePid("7E1", "221017", 350);
-            let bCvt = getPayloadBytes(rCvt, "621017");
-            if (bCvt.length >= 1) {
-                document.getElementById('valTft').innerText = Math.round((bCvt[0] * 1.8) - 58) + " °F";
-            } else {
-                let r2 = await queryModulePid("7E0", "221017", 350);
-                let b2 = getPayloadBytes(r2, "621017");
-                if (b2.length >= 1) document.getElementById('valTft').innerText = Math.round((b2[0] - 40) * 1.8 + 32) + " °F";
-            }
-
-            // Engine Oil Temp
-            let rEot = await queryModulePid("7E0", "22114A", 300);
-            let bEot = getPayloadBytes(rEot, "62114A");
-            if (bEot.length >= 1) document.getElementById('valEop').innerText = Math.round((bEot[0] - 40) * 1.8 + 32) + " °F (Oil)";
-        }
-
-        // 6. MAZDA
-        else if (oem === "MAZDA") {
-            // ATF Fluid Temp
-            let rTft = await queryModulePid("7E1", "221E1C", 350);
-            let bTft = getPayloadBytes(rTft, "621E1C");
-            if (bTft.length >= 2) {
-                let degF = Math.round((((bTft[0] * 256) + bTft[1]) / 80) * 1.8 + 32);
-                document.getElementById('valTft').innerText = degF + " °F";
-            }
-
-            // Commanded Gear & Slip
-            let rGear = await queryModulePid("7E1", "221E12", 300);
-            let bGear = getPayloadBytes(rGear, "621E12");
-            if (bGear.length >= 1) document.getElementById('valGear').innerText = "Gear " + bGear[0];
-
-            let rSlip = await queryModulePid("7E1", "221E14", 300);
-            let bSlip = getPayloadBytes(rSlip, "621E14");
-            if (bSlip.length >= 2) document.getElementById('valTccSlip').innerText = Math.round(((bSlip[0] * 256) + bSlip[1]) / 4) + " RPM";
-        }
-
-        // 7. FORD, LINCOLN & MERCURY
-        else if (oem === "FORD") {
-            // Trans Fluid Temp
-            let rTft = await queryModulePid("7E0", "221E1C", 350);
-            let bTft = getPayloadBytes(rTft, "621E1C");
-            if (bTft.length >= 2) {
-                document.getElementById('valTft').innerText = Math.round(((((bTft[0] * 256) + bTft[1]) / 16) - 40) * 1.8 + 32) + " °F";
-            } else {
-                let r2 = await queryModulePid("7E0", "221674", 350);
-                let b2 = getPayloadBytes(r2, "621674");
-                if (b2.length >= 2) {
-                    document.getElementById('valTft').innerText = Math.round(((((b2[0] * 256) + b2[1]) * 5 / 72) - 18) * 1.8 + 32) + " °F";
-                }
-            }
-
-            // Cylinder Head Temp (CHT)
-            let rCht = await queryModulePid("7E0", "221624", 350);
-            let bCht = getPayloadBytes(rCht, "621624");
-            if (bCht.length >= 2) {
-                document.getElementById('valCht').innerText = Math.round(((((bCht[0] * 256) + bCht[1]) / 10) - 40) * 1.8 + 32) + " °F";
-            }
-
-            // TCC Slip & Gear
-            let rSlip = await queryModulePid("7E0", "221E14", 300);
-            let bSlip = getPayloadBytes(rSlip, "621E14");
-            if (bSlip.length >= 2) document.getElementById('valTccSlip').innerText = Math.round(((bSlip[0] * 256) + bSlip[1]) / 4) + " RPM";
-
-            let rGear = await queryModulePid("7E0", "221E12", 300);
-            let bGear = getPayloadBytes(rGear, "621E12");
-            if (bGear.length >= 1) document.getElementById('valGear').innerText = "Gear " + bGear[0];
-        }
-
-        // 8. GENERAL MOTORS (CHEVY, GMC, CADILLAC, BUICK)
-        else if (oem === "GM") {
-            // Trans Fluid Temp
-            let rTft = await queryModulePid("7E0", "221940", 350);
-            let bTft = getPayloadBytes(rTft, "621940");
-            if (bTft.length >= 1) {
-                document.getElementById('valTft').innerText = Math.round((bTft[0] - 40) * 1.8 + 32) + " °F";
-            } else {
-                let r2 = await queryModulePid("7E2", "221940", 350);
-                let b2 = getPayloadBytes(r2, "621940");
-                if (b2.length >= 1) document.getElementById('valTft').innerText = Math.round((b2[0] - 40) * 1.8 + 32) + " °F";
-            }
-
-            // Engine Oil Pressure (EOP)
-            let rEop = await queryModulePid("7E0", "22115C", 300);
-            let bEop = getPayloadBytes(rEop, "62115C");
-            if (bEop.length >= 1) document.getElementById('valEop').innerText = Math.round(bEop[0] * 0.579) + " PSI";
-
-            // Knock Retard (KR)
-            let rKr = await queryModulePid("7E0", "2211A6", 300);
-            let bKr = getPayloadBytes(rKr, "6211A6");
-            if (bKr.length >= 1) document.getElementById('valKr').innerText = (bKr[0] * 0.1).toFixed(1) + "°";
-
-            // TCC Slip & Commanded Gear
-            let rSlip = await queryModulePid("7E0", "221943", 300);
-            let bSlip = getPayloadBytes(rSlip, "621943");
-            if (bSlip.length >= 2) document.getElementById('valTccSlip').innerText = Math.round(((bSlip[0] * 256) + bSlip[1]) / 8) + " RPM";
-
-            let rGear = await queryModulePid("7E0", "221944", 300);
-            let bGear = getPayloadBytes(rGear, "621944");
-            if (bGear.length >= 1) document.getElementById('valGear').innerText = "Gear " + bGear[0];
-
-            // Ethanol Fuel Content %
-            let rEth = await queryModulePid("7E0", "220052", 300);
-            let bEth = getPayloadBytes(rEth, "620052");
-            if (bEth.length >= 1) document.getElementById('valEth').innerText = Math.round(bEth[0] * 0.392) + "% Eth";
-        }
-
-        // 9. CHRYSLER, DODGE, JEEP & RAM
-        else if (oem === "CHRYSLER") {
-            // Engine Oil Pressure
-            let rEop = await queryModulePid("7E0", "221003", 300);
-            let bEop = getPayloadBytes(rEop, "621003");
-            if (bEop.length >= 1) document.getElementById('valEop').innerText = Math.round(bEop[0] * 0.58) + " PSI";
-
-            // Trans Fluid Temp
-            let rTft = await queryModulePid("7E0", "22B005", 350);
-            let bTft = getPayloadBytes(rTft, "62B005");
-            if (bTft.length >= 1) {
-                document.getElementById('valTft').innerText = Math.round((bTft[0] - 40) * 1.8 + 32) + " °F";
-            } else {
-                let r2 = await queryModulePid("7E2", "22B005", 350);
-                let b2 = getPayloadBytes(r2, "62B005");
-                if (b2.length >= 1) document.getElementById('valTft').innerText = Math.round((b2[0] - 40) * 1.8 + 32) + " °F";
-            }
-
-            // Engine Oil Temp
-            let rEot = await queryModulePid("7E0", "221002", 300);
-            let bEot = getPayloadBytes(rEot, "621002");
-            if (bEot.length >= 1) document.getElementById('valCht').innerText = Math.round((bEot[0] - 40) * 1.8 + 32) + " °F (Oil)";
-        }
-    }
-
-    async function runLiveLoop() {
-        let lastS1 = 0, lastL1 = 0, lastS2 = 0, lastL2 = 0, lastEct = 0, lastVolt = 0;
-
-        while (isStreaming) {
-            loopCycle++;
-            try {
-                // Tier 1: Fast Engine Essentials (Every Cycle)
-                let cRpm = await queryPid("010C", 350);
-                let mRpm = cRpm.match(/410C([0-9A-F]{4})/);
-                if (mRpm) {
-                    let a = parseInt(mRpm[1].substr(0, 2), 16);
-                    let b = parseInt(mRpm[1].substr(2, 2), 16);
-                    document.getElementById('valRpm').innerText = Math.round(((a * 256) + b) / 4) + " RPM";
-                }
-                if (!isStreaming) break;
-
-                let cLoad = await queryPid("0104", 300);
-                let mLoad = cLoad.match(/4104([0-9A-F]{2})/);
-                if (mLoad) document.getElementById('valLoad').innerText = Math.round((parseInt(mLoad[1], 16) * 100) / 255) + "%";
-                if (!isStreaming) break;
-
-                let cTps = await queryPid("0111", 300);
-                let mTps = cTps.match(/4111([0-9A-F]{2})/);
-                if (mTps) document.getElementById('valTps').innerText = Math.round((parseInt(mTps[1], 16) * 100) / 255) + "%";
-                if (!isStreaming) break;
-
-                let cSpd = await queryPid("010D", 300);
-                let mSpd = cSpd.match(/410D([0-9A-F]{2})/);
-                if (mSpd) document.getElementById('valSpd').innerText = Math.round(parseInt(mSpd[1], 16) * 0.621371) + " MPH";
-                if (!isStreaming) break;
-
-                // Tier 2: Fuel Trims & Both Cylinder Banks (Every 2nd Cycle)
-                if (loopCycle % 2 === 0) {
-                    let cStft = await queryPid("0106", 350);
-                    let mStft = cStft.match(/4106([0-9A-F]{2})/);
-                    if (mStft) {
-                        lastS1 = ((parseInt(mStft[1], 16) - 128) * 100) / 128;
-                        document.getElementById('valStft').innerText = (lastS1 > 0 ? "+" : "") + lastS1.toFixed(1) + "%";
-                    }
-                    if (!isStreaming) break;
-
-                    let cLtft = await queryPid("0107", 350);
-                    let mLtft = cLtft.match(/4107([0-9A-F]{2})/);
-                    if (mLtft) {
-                        lastL1 = ((parseInt(mLtft[1], 16) - 128) * 100) / 128;
-                        document.getElementById('valLtft').innerText = (lastL1 > 0 ? "+" : "") + lastL1.toFixed(1) + "%";
-                    }
-                    if (!isStreaming) break;
-
-                    let cStft2 = await queryPid("0108", 350);
-                    let mStft2 = cStft2.match(/4108([0-9A-F]{2})/);
-                    if (mStft2) {
-                        lastS2 = ((parseInt(mStft2[1], 16) - 128) * 100) / 128;
-                        document.getElementById('valStft2').innerText = (lastS2 > 0 ? "+" : "") + lastS2.toFixed(1) + "%";
-                    } else if (unsupportedPids.has("0108")) {
-                        document.getElementById('valStft2').innerText = "N/A";
-                    }
-                    if (!isStreaming) break;
-
-                    let cLtft2 = await queryPid("0109", 350);
-                    let mLtft2 = cLtft2.match(/4109([0-9A-F]{2})/);
-                    if (mLtft2) {
-                        lastL2 = ((parseInt(mLtft2[1], 16) - 128) * 100) / 128;
-                        document.getElementById('valLtft2').innerText = (lastL2 > 0 ? "+" : "") + lastL2.toFixed(1) + "%";
-                    } else if (unsupportedPids.has("0109")) {
-                        document.getElementById('valLtft2').innerText = "N/A";
-                    }
-                    if (!isStreaming) break;
-
-                    let cTime = await queryPid("010E", 300);
-                    let mTime = cTime.match(/410E([0-9A-F]{2})/);
-                    if (mTime) document.getElementById('valTime').innerText = ((parseInt(mTime[1], 16) / 2) - 64).toFixed(1) + "°";
-                    if (!isStreaming) break;
-
-                    let cMaf = await queryPid("0110", 300);
-                    let mMaf = cMaf.match(/4110([0-9A-F]{4})/);
-                    if (mMaf) {
-                        let a = parseInt(mMaf[1].substr(0, 2), 16);
-                        let b = parseInt(mMaf[1].substr(2, 2), 16);
-                        document.getElementById('valMaf').innerText = (((a * 256) + b) / 100).toFixed(1) + " g/s";
-                    } else if (unsupportedPids.has("0110")) {
-                        document.getElementById('valMaf').innerText = "N/A";
-                    }
-                    if (!isStreaming) break;
-
-                    let cMap = await queryPid("010B", 300);
-                    let mMap = cMap.match(/410B([0-9A-F]{2})/);
-                    if (mMap) {
-                        document.getElementById('valMap').innerText = (parseInt(mMap[1], 16) * 0.145038).toFixed(1) + " PSI";
-                    } else if (unsupportedPids.has("010B")) {
-                        document.getElementById('valMap').innerText = "N/A";
-                    }
-                    if (!isStreaming) break;
-
-                    // Bank 1 Sensor 1
-                    if (!o2B1Probe) {
-                        let c14 = await queryPid("0114", 300);
-                        if (c14.includes("4114")) o2B1Probe = "14";
-                        else {
-                            let c24 = await queryPid("0124", 300);
-                            if (c24.includes("4124")) o2B1Probe = "24";
-                            else {
-                                let c34 = await queryPid("0134", 300);
-                                if (c34.includes("4134")) o2B1Probe = "34";
-                            }
-                        }
-                    }
-                    if (o2B1Probe === "14") {
-                        let cO2 = await queryPid("0114", 300);
-                        let m = cO2.match(/4114([0-9A-F]{2})/);
-                        if (m) document.getElementById('valO21').innerText = (parseInt(m[1], 16) / 200).toFixed(2) + "V";
-                    } else if (o2B1Probe) {
-                        let cWb = await queryPid("01" + o2B1Probe, 300);
-                        let m = cWb.match(new RegExp("41" + o2B1Probe + "([0-9A-F]{4})"));
-                        if (m) {
-                            let a = parseInt(m[1].substr(0, 2), 16);
-                            let b = parseInt(m[1].substr(2, 2), 16);
-                            document.getElementById('lblO21').innerText = "O2 B1S1 (A/F λ)";
-                            document.getElementById('valO21').innerText = "λ " + (((a * 256) + b) / 32768).toFixed(2);
-                        }
-                    }
-
-                    // Bank 1 Sensor 2
-                    let cO22 = await queryPid("0115", 300);
-                    let mO22 = cO22.match(/4115([0-9A-F]{2})/);
-                    if (mO22) document.getElementById('valO22').innerText = (parseInt(mO22[1], 16) / 200).toFixed(2) + "V";
-                    else if (unsupportedPids.has("0115")) document.getElementById('valO22').innerText = "N/A";
-                    if (!isStreaming) break;
-
-                    // Bank 2 Sensor 1
-                    if (!o2B2Probe) {
-                        let c18 = await queryPid("0118", 300);
-                        if (c18.includes("4118")) o2B2Probe = "18";
-                        else {
-                            let c28 = await queryPid("0128", 300);
-                            if (c28.includes("4128")) o2B2Probe = "28";
-                            else {
-                                let c38 = await queryPid("0138", 300);
-                                if (c38.includes("4138")) o2B2Probe = "38";
-                            }
-                        }
-                    }
-                    if (o2B2Probe === "18") {
-                        let cO2 = await queryPid("0118", 300);
-                        let m = cO2.match(/4118([0-9A-F]{2})/);
-                        if (m) document.getElementById('valO221').innerText = (parseInt(m[1], 16) / 200).toFixed(2) + "V";
-                    } else if (o2B2Probe) {
-                        let cWb = await queryPid("01" + o2B2Probe, 300);
-                        let m = cWb.match(new RegExp("41" + o2B2Probe + "([0-9A-F]{4})"));
-                        if (m) {
-                            let a = parseInt(m[1].substr(0, 2), 16);
-                            let b = parseInt(m[1].substr(2, 2), 16);
-                            document.getElementById('lblO221').innerText = "O2 B2S1 (A/F λ)";
-                            document.getElementById('valO221').innerText = "λ " + (((a * 256) + b) / 32768).toFixed(2);
-                        }
-                    } else if (unsupportedPids.has("0118") && unsupportedPids.has("0128")) {
-                        document.getElementById('valO221').innerText = "N/A";
-                    }
-                    if (!isStreaming) break;
-
-                    // Bank 2 Sensor 2
-                    let cO222 = await queryPid("0119", 300);
-                    let mO222 = cO222.match(/4119([0-9A-F]{2})/);
-                    if (mO222) document.getElementById('valO222').innerText = (parseInt(mO222[1], 16) / 200).toFixed(2) + "V";
-                    else if (unsupportedPids.has("0119")) document.getElementById('valO222').innerText = "N/A";
-                    if (!isStreaming) break;
-
-                    // Pedal Pos APP
-                    let cApp = await queryPid("0149", 300);
-                    let mApp = cApp.match(/4149([0-9A-F]{2})/);
-                    if (mApp) document.getElementById('valApp').innerText = Math.round((parseInt(mApp[1], 16) * 100) / 255) + "%";
-                    else if (unsupportedPids.has("0149")) document.getElementById('valApp').innerText = "N/A";
-                }
-                if (!isStreaming) break;
-
-                // Tier 3: Temperatures, Rail Pressure & Battery (Every 4th Cycle)
-                if (loopCycle % 4 === 0) {
-                    let cEct = await queryPid("0105", 350);
-                    let mEct = cEct.match(/4105([0-9A-F]{2})/);
-                    if (mEct) {
-                        lastEct = Math.round((parseInt(mEct[1], 16) - 40) * 1.8 + 32);
-                        document.getElementById('valEct').innerText = lastEct + " °F";
-                    }
-                    if (!isStreaming) break;
-
-                    let cIat = await queryPid("010F", 300);
-                    let mIat = cIat.match(/410F([0-9A-F]{2})/);
-                    if (mIat) document.getElementById('valIat').innerText = Math.round((parseInt(mIat[1], 16) - 40) * 1.8 + 32) + " °F";
-                    else if (unsupportedPids.has("010F")) document.getElementById('valIat').innerText = "N/A";
-                    if (!isStreaming) break;
-
-                    let cAat = await queryPid("0146", 300);
-                    let mAat = cAat.match(/4146([0-9A-F]{2})/);
-                    if (mAat) document.getElementById('valAat').innerText = Math.round((parseInt(mAat[1], 16) - 40) * 1.8 + 32) + " °F";
-                    else if (unsupportedPids.has("0146")) document.getElementById('valAat').innerText = "N/A";
-                    if (!isStreaming) break;
-
-                    let cEot = await queryPid("015C", 300);
-                    let mEot = cEot.match(/415C([0-9A-F]{2})/);
-                    if (mEot) document.getElementById('valEot').innerText = Math.round((parseInt(mEot[1], 16) - 40) * 1.8 + 32) + " °F";
-                    else if (unsupportedPids.has("015C")) document.getElementById('valEot').innerText = "N/A";
-                    if (!isStreaming) break;
-
-                    // Fuel Rail Pressure
-                    let cFrp = await queryPid("0123", 300);
-                    let mFrp = cFrp.match(/4123([0-9A-F]{4})/);
-                    if (mFrp) {
-                        let a = parseInt(mFrp[1].substr(0, 2), 16);
-                        let b = parseInt(mFrp[1].substr(2, 2), 16);
-                        document.getElementById('valFrp').innerText = Math.round(((a * 256) + b) * 10 * 0.145038) + " PSI";
-                    } else {
-                        let cFrp2 = await queryPid("010A", 300);
-                        let m2 = cFrp2.match(/410A([0-9A-F]{2})/);
-                        if (m2) document.getElementById('valFrp').innerText = Math.round(parseInt(m2[1], 16) * 3 * 0.145038) + " PSI";
-                        else if (unsupportedPids.has("0123") && unsupportedPids.has("010A")) document.getElementById('valFrp').innerText = "N/A";
-                    }
-                    if (!isStreaming) break;
-
-                    let cFli = await queryPid("012F", 300);
-                    let mFli = cFli.match(/412F([0-9A-F]{2})/);
-                    if (mFli) document.getElementById('valFli').innerText = Math.round((parseInt(mFli[1], 16) * 100) / 255) + "%";
-                    else if (unsupportedPids.has("012F")) document.getElementById('valFli').innerText = "N/A";
-                    if (!isStreaming) break;
-
-                    let cEvp = await queryPid("012E", 300);
-                    let mEvp = cEvp.match(/412E([0-9A-F]{2})/);
-                    if (mEvp) document.getElementById('valEvap').innerText = Math.round((parseInt(mEvp[1], 16) * 100) / 255) + "%";
-                    else if (unsupportedPids.has("012E")) document.getElementById('valEvap').innerText = "N/A";
-                    if (!isStreaming) break;
-
-                    let cBaro = await queryPid("0133", 300);
-                    let mBaro = cBaro.match(/4133([0-9A-F]{2})/);
-                    if (mBaro) document.getElementById('valBaro').innerText = (parseInt(mBaro[1], 16) * 0.2953).toFixed(1) + " inHg";
-                    else if (unsupportedPids.has("0133")) document.getElementById('valBaro').innerText = "N/A";
-                    if (!isStreaming) break;
-
-                    let resVolt = await sendCmd("ATRV", 350);
-                    let vMatch = (resVolt || '').match(/([0-9]+\\.[0-9]+)/);
-                    if (vMatch) {
-                        lastVolt = parseFloat(vMatch[1]);
-                        document.getElementById('valVolt').innerText = lastVolt.toFixed(1) + "V";
-                    }
-
-                    // Query All OEM Enhanced PIDs across Domestic & Asian profiles
-                    let currentOem = getActiveOemProfile();
-                    await queryEnhancedPids(currentOem);
-
-                    evaluateTestDriveTriggers(lastS1, lastL1, lastS2, lastL2, lastEct, lastVolt);
-                }
-            } catch (err) {
-                console.error("Telemetry error:", err);
-            }
-            await new Promise(r => setTimeout(r, 20));
-        }
-    }
-
-    // --- ONE-TAP AUTOMATED CONNECTION, FAST CAN HANDSHAKE & STREAM SEQUENCE ---
-    document.getElementById('bleBtn').addEventListener('click', async () => {
-        try {
-            log("Opening Bluetooth selector...");
-            const device = await navigator.bluetooth.requestDevice({
-                filters: [
-                    { namePrefix: 'VEEPEAK' },
-                    { namePrefix: 'OBD' },
-                    { namePrefix: 'IOS-Vlink' }
-                ],
-                optionalServices: [NORDIC_SERVICE, FFF0_SERVICE]
-            });
-
-            log("Connecting to " + device.name + "...");
-            const server = await device.gatt.connect();
-
-            let service = null;
-            try {
-                service = await server.getPrimaryService(NORDIC_SERVICE);
-                rxChar = await service.getCharacteristic(NORDIC_RX);
-                txChar = await service.getCharacteristic(NORDIC_TX);
-            } catch(e) {
-                service = await server.getPrimaryService(FFF0_SERVICE);
-                rxChar = await service.getCharacteristic(FFF2_RX);
-                txChar = await service.getCharacteristic(FFF1_TX);
-            }
-
-            await txChar.startNotifications();
-            txChar.addEventListener('characteristicvaluechanged', onData);
-
-            log("Resetting Veepeak adapter (ATZ)...");
-            await sendCmd("ATZ", 1200);
-            await sendCmd("ATE0", 400);
-            await sendCmd("ATL0", 400);
-            await sendCmd("ATH0", 400);
-            await sendCmd("ATAT1", 400);
-
-            // Fast Handshake: Attempt High-Speed CAN (Protocol 6) first
-            log("Establishing ISO 15765-4 CAN link (ATSP6)...");
-            await sendCmd("ATSP6", 400);
-            let p00 = await sendCmd("0100", 2500);
-
-            // If ATSP6 did not get 4100, fall back to Auto-Protocol (ATSP0)
-            if (!parseCleanHex(p00).includes("4100")) {
-                log("Scanning legacy protocols (ATSP0)...");
-                await sendCmd("ATSP0", 400);
-                p00 = await sendCmd("0100", 8000);
-            }
-
-            // Connection Verification Guard: Stop immediately if ECM is not communicating
-            if (!parseCleanHex(p00).includes("4100")) {
-                log("ECM not responding. Ensure key is ON (Engine running or KOEO).");
-                alert("⚠️ ECM not responding to 0100. Make sure the vehicle ignition is turned fully ON (or engine running), then tap Connect & Auto-Scan again.");
-                return;
-            }
-
-            unsupportedPids.clear();
-            o2B1Probe = null;
-            o2B2Probe = null;
-
-            // Activate All Utility Buttons
-            ['pauseBtn', 'testDriveBtn', 'clearDtcBtn', 'aiCheckBtn', 'pullVinBtn'].forEach(id => {
-                const b = document.getElementById(id);
-                b.disabled = false;
-                b.style.cursor = 'pointer';
-            });
-            document.getElementById('pauseBtn').style.backgroundColor = '#EF4444';
-            document.getElementById('pauseBtn').style.color = '#FFFFFF';
-            document.getElementById('testDriveBtn').style.backgroundColor = '#10B981';
-            document.getElementById('testDriveBtn').style.color = '#0E1117';
-            document.getElementById('clearDtcBtn').style.backgroundColor = '#EF4444';
-            document.getElementById('clearDtcBtn').style.color = '#FFFFFF';
-            document.getElementById('aiCheckBtn').style.backgroundColor = '#F59E0B';
-            document.getElementById('aiCheckBtn').style.color = '#0E1117';
-            document.getElementById('pullVinBtn').style.backgroundColor = '#A855F7';
-            document.getElementById('pullVinBtn').style.color = '#FFFFFF';
-
-            // 1. AUTO-LOAD I/M READINESS MONITORS
-            log("Auto-loading I/M Readiness monitors (Mode 01 01)...");
-            await loadReadinessMonitors();
-
-            // 2. AUTO-LOAD MODE $06 ON-BOARD MONITORS (CYLINDERS 1-8 & DUAL CATS)
-            log("Auto-scanning Mode $06 monitors & cylinder misfire counts...");
-            await loadMode6Data();
-
-            // 3. AUTO-START LIVE TELEMETRY & ENHANCED PIDS STREAM
-            log("All diagnostic monitors loaded! Starting live telemetry stream...");
-            isStreaming = true;
-            runLiveLoop();
-
-        } catch (err) {
-            log("Error: " + err.message);
-        }
-    });
-
-    // --- PAUSE / RESUME STREAM BUTTON ---
-    document.getElementById('pauseBtn').addEventListener('click', () => {
-        const btn = document.getElementById('pauseBtn');
-        if (isStreaming) {
-            isStreaming = false;
-            btn.innerText = "▶️ Resume Live Stream";
-            btn.style.backgroundColor = "#38BDF8";
-            btn.style.color = "#0E1117";
-            log("Live telemetry stream paused.");
-        } else {
-            isStreaming = true;
-            btn.innerText = "⏸️ Pause Stream";
-            btn.style.backgroundColor = "#EF4444";
-            btn.style.color = "#FFFFFF";
-            log("Streaming live telemetry...");
-            runLiveLoop();
-        }
-    });
-
-    // --- TEST DRIVE AI WATCHDOG TOGGLE ---
-    document.getElementById('testDriveBtn').addEventListener('click', () => {
-        const btn = document.getElementById('testDriveBtn');
-        const banner = document.getElementById('driveBanner');
-
-        if (!isTestDriveActive) {
-            isTestDriveActive = true;
-            btn.innerText = "⏹️ Stop Test Drive AI";
-            btn.style.backgroundColor = "#EF4444";
-            btn.style.color = "#FFFFFF";
-            banner.style.display = "block";
-            enableWakeLock();
-            speakAlert("Test Drive AI Activated. Telemetry watchdog and speech alerts active.");
-
-            if (!isStreaming) {
-                isStreaming = true;
-                const pauseBtn = document.getElementById('pauseBtn');
-                pauseBtn.innerText = "⏸️ Pause Stream";
-                pauseBtn.style.backgroundColor = "#EF4444";
-                pauseBtn.style.color = "#FFFFFF";
-                runLiveLoop();
-            }
-        } else {
-            isTestDriveActive = false;
-            btn.innerText = "🚗 Test Drive Audio";
-            btn.style.backgroundColor = "#10B981";
-            btn.style.color = "#0E1117";
-            banner.style.display = "none";
-            disableWakeLock();
-            speakAlert("Test Drive AI Deactivated.");
-        }
-    });
-
-    // --- MODE 04: CLEAR CODES & RESET MONITORS ---
-    document.getElementById('clearDtcBtn').addEventListener('click', async () => {
-        if (!confirm("⚠️ Are you sure you want to CLEAR all DTC fault codes and RESET all I/M emissions readiness monitors on this vehicle?")) {
-            return;
-        }
-
-        const wasStreaming = isStreaming;
-        isStreaming = false;
-        document.getElementById('pauseBtn').innerText = "▶️ Resume Live Stream";
-        document.getElementById('pauseBtn').style.backgroundColor = "#38BDF8";
-
-        log("Sending Mode 04 Clear DTCs command to ECM...");
-        let res = await sendCmd("04", 3000);
-        let clean = parseCleanHex(res);
-
-        if (clean.includes("44") || clean.includes("OK") || clean.includes(">")) {
-            log("SUCCESS: Fault codes cleared and readiness monitors reset!");
-            alert("✅ Mode 04 Successful: Fault codes cleared and emissions monitors reset.");
-            document.getElementById('readinessBox').innerHTML = "<div style='color: #EF4444; font-weight: 700;'>Monitors have been RESET by Mode 04 command. Re-run or reconnect to verify.</div>";
-        } else {
-            log("Mode 04 command response: " + res);
-            alert("Result: " + res);
-        }
-
-        if (wasStreaming) {
-            isStreaming = true;
-            document.getElementById('pauseBtn').innerText = "⏸️ Pause Stream";
-            document.getElementById('pauseBtn').style.backgroundColor = "#EF4444";
-            runLiveLoop();
-        }
-    });
-
-    // --- MANUAL AI TELEMETRY, READINESS & MODE 06 EVALUATION ---
-    document.getElementById('aiCheckBtn').addEventListener('click', async () => {
-        const vBox = document.getElementById('aiVerdictBox');
-        if (!GEMINI_API_KEY) {
-            vBox.innerHTML = "<span style='color: #EF4444;'>Error: GEMINI_API_KEY is missing from Streamlit Secrets.</span>";
-            return;
-        }
-
-        vBox.innerHTML = "<span style='color: #F59E0B;'>🤖 Gemini 2.5 Flash is analyzing live telemetry, OEM enhanced data, I/M monitors, and Mode $06 results...</span>";
-
-        const pids = {
-            "RPM": document.getElementById('valRpm').innerText,
-            "Load": document.getElementById('valLoad').innerText,
-            "Speed": document.getElementById('valSpd').innerText,
-            "TPS": document.getElementById('valTps').innerText,
-            "APP_Pedal": document.getElementById('valApp').innerText,
-            "ECT": document.getElementById('valEct').innerText,
-            "IAT": document.getElementById('valIat').innerText,
-            "AAT_Ambient": document.getElementById('valAat').innerText,
-            "OilTemp": document.getElementById('valEot').innerText,
-            "MAP": document.getElementById('valMap').innerText,
-            "MAF": document.getElementById('valMaf').innerText,
-            "Baro": document.getElementById('valBaro').innerText,
-            "FuelRailPressure": document.getElementById('valFrp').innerText,
-            "FuelLevel": document.getElementById('valFli').innerText,
-            "STFT1": document.getElementById('valStft').innerText,
-            "LTFT1": document.getElementById('valLtft').innerText,
-            "STFT2": document.getElementById('valStft2').innerText,
-            "LTFT2": document.getElementById('valLtft2').innerText,
-            "TransFluidTemp": document.getElementById('valTft').innerText,
-            "EngineOilPress": document.getElementById('valEop').innerText,
-            "CylHeadTemp_VCM": document.getElementById('valCht').innerText,
-            "TCC_Slip": document.getElementById('valTccSlip').innerText,
-            "CommandedGear": document.getElementById('valGear').innerText,
-            "KnockRetard": document.getElementById('valKr').innerText,
-            "Ethanol_FRP2": document.getElementById('valEth').innerText,
-            "Hybrid_SOC": document.getElementById('valSoc').innerText,
-            "Timing": document.getElementById('valTime').innerText,
-            "O2_B1S1": document.getElementById('valO21').innerText,
-            "O2_B1S2": document.getElementById('valO22').innerText,
-            "O2_B2S1": document.getElementById('valO221').innerText,
-            "O2_B2S2": document.getElementById('valO222').innerText,
-            "EvapPurge": document.getElementById('valEvap').innerText,
-            "Voltage": document.getElementById('valVolt').innerText
-        };
-
-        const prompt = `
-You are an expert ASE Master / L1 Diagnostic Technician.
-Perform a full diagnostic telemetry check for this vehicle:
-Vehicle: ${VEHICLE_CONTEXT}
-Active DTC: ${DTC_CONTEXT}
-
-LIVE STREAMING SENSOR DATA (MODE 01 & UDS 0x22 ENHANCED PIDS):
-${JSON.stringify(pids, null, 2)}
-
-I/M READINESS MONITORS (MODE 01 01):
-${readinessSummary || "Not checked yet"}
-
-MODE $06 ON-BOARD TEST DATA:
-${mode6RawData || "No Mode 6 scanned yet"}
+    connected = true; enableBtns(true);
+    $("bleBtn").textContent = "✅ Connected";
+
+    log("Reading VIN & codes…");
+    await readVin(); await readDtcs();
+    log("Reading I/M readiness…"); await loadReadiness();
+    log("Reading Mode $06…"); await loadMode6();
+    startStream();
+    if (vinRead || dtcs.stored.length || dtcs.pending.length) sendSync(true);   // push VIN + codes into the app automatically (no page reload)
+  } catch (err) {
+    log("Error: " + err.message);
+  } finally {
+    $("bleBtn").disabled = connected;
+  }
+});
+
+function sendSync(auto) {
+  sendValue({ type: "sync", id: "sync-" + Date.now(), vin: vinRead, dtcs, auto: !!auto });
+  log(`Sent to app → VIN ${vinRead || "not reported"} · ${dtcs.stored.length} stored / ${dtcs.pending.length} pending code(s)`);
+}
+
+$("pauseBtn").addEventListener("click", () => { streaming ? (stopStream(), log("Paused.")) : startStream(); });
+$("driveBtn").addEventListener("click", () => {
+  driveOn = !driveOn;
+  $("driveBanner").style.display = driveOn ? "block" : "none";
+  $("driveBtn").textContent = driveOn ? "⏹️ Stop Test Drive" : "🚗 Test Drive Audio";
+  wake(driveOn);
+  lastSpeak = 0; speak(driveOn ? "Test drive monitoring on." : "Test drive monitoring off.");
+  lastDriveAi = Date.now();
+  if (driveOn && !streaming) startStream();
+});
+$("readBtn").addEventListener("click", async () => {
+  log("Re-reading codes, readiness and Mode $06…");
+  await txn(async () => { await readDtcs(); await loadReadiness(); });
+  await txn(loadMode6);
+  log(streaming ? "Streaming live data…" : "Codes refreshed.");
+});
+$("clearBtn").addEventListener("click", async () => {
+  if (!confirm("Clear ALL fault codes and reset ALL readiness monitors?\n\nBest done key ON, engine OFF. Freeze frame data will be lost.")) return;
+  log("Sending Mode 04…");
+  const ok = await txn(async () => {
+    await setHeader("7DF");
+    const raw = await sendCmd("04", 5000);
+    await setHeader(baseHeader);
+    return messages(raw).some((m) => m.startsWith("44"));
+  });
+  if (ok) {
+    log("Codes cleared. Re-reading…");
+    await txn(async () => { await readDtcs(); await loadReadiness(); });
+    log("Codes cleared and monitors reset.");
+  } else {
+    log("ECM did not confirm the clear. Try key ON, engine OFF.");
+    alert("The ECM did not confirm the clear (no 44 response). Try again with key ON, engine OFF.");
+  }
+});
+$("aiBtn").addEventListener("click", () => requestAi("full"));
+$("syncBtn").addEventListener("click", async () => { if (!vinRead) await txn(readVin); sendSync(false); });
+$("oemSel").addEventListener("change", () => { if (connected) buildEnhanced(); });
+</script>
+</body>
+</html>
+'''
+
+
+def _ble_component_dir() -> str:
+  """Write the dashboard page to a temp folder so the whole app lives in this one file."""
+  d = Path(tempfile.gettempdir()) / "ble_dashboard"
+  d.mkdir(exist_ok=True)
+  f = d / "index.html"
+  if not f.exists() or f.read_text(encoding="utf-8") != BLE_DASHBOARD_HTML:
+    f.write_text(BLE_DASHBOARD_HTML, encoding="utf-8")
+  return str(d)
+
+
+_ble_dashboard = components.declare_component("ble_dashboard", path=_ble_component_dir())
+
+
+def _fmt_dtcs(d: dict) -> str:
+  return (f"Stored: {', '.join(d.get('stored') or []) or 'none'} | Pending: {', '.join(d.get('pending') or []) or 'none'}"
+          f" | Permanent: {', '.join(d.get('permanent') or []) or 'none'}")
+
+
+def handle_ble_event(ev: dict):
+  if ev.get("type") == "sync":
+    d = ev.get("dtcs") or {}
+    ss.ble_dtcs = d
+    codes = list(dict.fromkeys((d.get("stored") or []) + (d.get("pending") or [])))
+    vin = (ev.get("vin") or "").upper()
+    upd = {}
+    if VIN_RE.fullmatch(vin):
+      if vin == ss.active_vin or load_vehicle(vin):
+        upd["vin_input"] = vin
+    if codes:
+      upd["active_dtc"] = ", ".join(codes)
+    append_to_log(vin=vin or ss.active_vin, vehicle=ss.vehicle_info, dtc=", ".join(codes) or "No codes",
+                  customer=ss.customer_name, phone=ss.customer_phone)
+    queue_update(toast=f"Scanner synced: {vin or 'no VIN'} · {len(codes)} code(s)", **upd)
+
+  elif ev.get("type") == "ai":
+    vehicle = ss.vehicle_info or "General OBD-II Vehicle"
+    pids = json.dumps(ev.get("pids") or {}, indent=1)
+    dtcs = _fmt_dtcs(ev.get("dtcs") or {})
+    if ev.get("mode") == "drive":
+      prompt = f"""You are an expert ASE Master / L1 Diagnostic Technician monitoring a live test drive.
+Vehicle: {vehicle}
+Codes: {dtcs}
+LATEST SNAPSHOT UNDER ROAD LOAD ({ev.get('at')}):
+{pids}
+
+Give a concise 3-bullet live assessment, under 100 words total:
+1. Fuel delivery & trim state (Bank 1 vs Bank 2 under the current load).
+2. Drivetrain health (trans temp, oil pressure, TCC slip, knock) — only if those values are present.
+3. Any anomaly to inspect back in the bay."""
+      label = f"[Live Drive AI Check - {ev.get('at')}]"
+    else:
+      prompt = f"""You are an expert ASE Master / L1 Diagnostic Technician.
+Vehicle: {vehicle}
+Codes read from the vehicle: {dtcs}
+Technician-entered DTC: {ss.active_dtc or 'None'}
+
+LIVE DATA (Mode 01 + OEM enhanced PIDs; enhanced values are unverified beta, treat with caution):
+{pids}
+
+I/M READINESS: {ev.get('readiness') or 'Not read'}
+
+MODE $06 RESULTS (value [min..max]):
+{ev.get('mode6') or 'Not read'}
 
 DIAGNOSTIC TASK:
-1. Fuel Control & Trim Analysis: Total Trim (STFT + LTFT) on Bank 1 vs Bank 2. Single-bank vs dual-bank discrepancy.
-2. Powertrain & Drivetrain Health: Transmission fluid temp, engine oil pressure, CHT/VCM status, torque converter slip, and knock retard.
-3. Air Metering & O2/AFR Sensors: Sensor switching vs catalytic converter holding efficiency on both banks.
-4. Mode $06 Misfire & Monitor Integrity: Evaluate cylinder-by-cylinder misfire counts (Cyl 1-8+) and catalyst/EVAP/VVT monitors.
-5. Emissions Readiness State: Which monitors are not ready, and what drive cycle conditions are needed to set them?
-6. Immediate Master Tech Next Step: The single most definitive physical/electrical isolation test to condemn the root cause.
+1. Fuel control: total trim (STFT + LTFT) Bank 1 vs Bank 2; single- vs dual-bank pattern.
+2. Powertrain/drivetrain health from whatever enhanced data is present.
+3. Air metering & O2/AFR sensors: sensor activity vs catalyst storage on each bank.
+4. Mode $06: cylinder misfire counts and any failing or marginal monitor tests.
+5. Readiness: which monitors are incomplete and the drive-cycle conditions to set them.
+6. The single most definitive next physical/electrical test to confirm the root cause.
 
-Format with clean bold sections and direct shop-floor language.
-`;
+Use clean bold section headers and direct shop-floor language. Skip sections with no data."""
+      label = f"[Full AI Check - {ev.get('at')}]"
+    with st.spinner("Gemini is analyzing the scan data..."):
+      text = ask_gemini(prompt)
+    ss.ble_ai = {"id": ev.get("id"), "text": text, "label": label}
+    st.rerun()
 
-        try {
-            const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=" + GEMINI_API_KEY;
-            const payload = {
-                contents: [{ parts: [{ text: prompt }] }]
-            };
-            const response = await fetch(url, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload)
-            });
-            const data = await response.json();
-            if (data.candidates && data.candidates[0].content.parts[0].text) {
-                let markdownText = data.candidates[0].content.parts[0].text;
-                let formatted = markdownText
-                    .replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>')
-                    .replace(/### (.*?)\\n/g, '<h4 style="color:#00FF66; margin:8px 0 4px 0;">$1</h4>')
-                    .replace(/\\n/g, '<br>');
-                vBox.innerHTML = formatted;
-            } else {
-                vBox.innerHTML = "<span style='color: #EF4444;'>No diagnosis generated: " + JSON.stringify(data) + "</span>";
-            }
-        } catch(e) {
-            vBox.innerHTML = "<span style='color: #EF4444;'>API Error: " + e.message + "</span>";
-        }
-    });
 
-    document.getElementById('pullVinBtn').addEventListener('click', async () => {
-        isStreaming = false;
-        log("Querying 17-digit VIN (09 02)...");
-        const vinRaw = await sendCmd("0902", 1500);
-        const vin = parseVIN(vinRaw);
-
-        log("Querying Stored DTCs (03)...");
-        const dtcRaw = await sendCmd("03", 1500);
-        const dtc = parseDTC(dtcRaw);
-
-        log("Success! VIN: " + (vin || "Manual") + " | DTC: " + (dtc || "None") + ". Refreshing app...");
-
-        setTimeout(() => {
-            const targetUrl = new URL(window.top.location.href);
-            if (vin) targetUrl.searchParams.set("ble_vin", vin);
-            if (dtc) targetUrl.searchParams.set("ble_dtc", dtc);
-            window.top.location.href = targetUrl.toString();
-        }, 1000);
-    });
-    </script>
-    """
-
-  ble_html = ble_dashboard_template.replace("___GEMINI_KEY___", gemini_api_key)
-  ble_html = ble_html.replace(
-      "___VEHICLE_INFO___",
-      (st.session_state.vehicle_info or "General OBD-II Vehicle").replace(
-          '"', ""
-      ),
-  )
-  ble_html = ble_html.replace(
-      "___ACTIVE_DTC___",
-      (st.session_state.active_dtc or "None").replace('"', ""),
-  )
-  ble_html = ble_html.replace("___DETECTED_MAKE___", detected_make)
-
-  components.html(ble_html, height=1400)
+with tab2:
+  st.subheader("📊 Live Telemetry, OEM Enhanced PIDs & Monitors")
+  context_bar()
+  st.caption("Works in Chrome (Android, Windows, macOS, ChromeOS). Connecting reads the VIN and codes and fills them"
+             " into the other tabs automatically. The Bluetooth link stays up while you use the rest of the app.")
+  event = _ble_dashboard(vehicle=ss.vehicle_info, make=make_profile(), ai=ss.ble_ai, key="ble", default=None)
+  if isinstance(event, dict) and event.get("id") and event["id"] != ss.ble_last_event:
+    ss.ble_last_event = event["id"]
+    handle_ble_event(event)
 
 # ========================================================
 # --- TAB 3: IN-DEPTH DTC DIAGNOSTIC STRATEGY ---
 # ========================================================
 with tab3:
   st.subheader("Field Diagnostic Strategy & Testing Workflow")
-
-  if st.session_state.customer_name:
-    st.markdown(
-        f"👤 Customer: **{st.session_state.customer_name}** | 📞"
-        f" `{st.session_state.customer_phone or 'No phone'}`"
-    )
-
-  if st.session_state.vehicle_info:
-    st.success(
-        f"Active Vehicle: **{st.session_state.vehicle_info}** (VIN:"
-        f" `{st.session_state.active_vin or 'Manual'}`)"
-    )
+  if ss.customer_name:
+    st.markdown(f"👤 Customer: **{ss.customer_name}** | 📞 `{ss.customer_phone or 'No phone'}`")
+  if ss.vehicle_info:
+    st.success(f"Active Vehicle: **{ss.vehicle_info}** (VIN: `{ss.active_vin or 'Manual'}`)")
   else:
-    st.caption("Tip: Decode a vehicle in Tab 1 to carry vehicle specs over.")
+    st.caption("Tip: decode a vehicle in Tab 1 (or connect the scanner in Tab 2) to carry vehicle specs over.")
+  if ss.ble_dtcs:
+    st.caption(f"From scanner → {_fmt_dtcs(ss.ble_dtcs)}")
 
   col_input, col_engine, col_btn = st.columns([2.5, 2.5, 1.5])
   with col_input:
-    code_input = (
-        st.text_input(
-            "Enter OBD-II DTC (e.g., P200A, P0316, P0300):",
-            value=st.session_state.active_dtc,
-        )
-        .strip()
-        .upper()
-    )
-    if code_input:
-      st.session_state.active_dtc = code_input
-
+    st.text_input("OBD-II DTC(s) (e.g., P0316 or P0171, P0174):", key="active_dtc")
   with col_engine:
     ai_engine = st.selectbox(
         "Diagnostic AI Engine",
         options=["gemini", "perplexity"],
-        index=0,
-        format_func=lambda x: {
-            "gemini": "✨ Google Gemini 2.5 Flash (Deep Logic)",
-            "perplexity": "🌐 Perplexity Sonar Pro (Live Web & TSBs)",
-        }[x],
-        help=(
-            "Gemini provides deep circuit & mechanical logic; Perplexity checks"
-            " live technical databases and TSBs."
-        ),
+        format_func={"gemini": "✨ Google Gemini 2.5 Flash (Deep Logic)",
+                     "perplexity": "🌐 Perplexity Sonar Pro (Live Web & TSBs)"}.get,
+        help="Gemini provides deep circuit & mechanical logic; Perplexity checks live technical databases and TSBs.",
     )
-
   with col_btn:
     st.write("")
     lookup_clicked = st.button("Run Diagnostic Tree", use_container_width=True)
 
-  if code_input and lookup_clicked:
-    vehicle = st.session_state.vehicle_info or "General OBD-II Vehicle"
-
-    append_to_log(
-        vin=st.session_state.active_vin,
-        vehicle=vehicle,
-        dtc=code_input,
-        customer=st.session_state.customer_name,
-        phone=st.session_state.customer_phone,
-    )
-
+  code_input = ss.active_dtc.strip().upper()
+  if lookup_clicked and not code_input:
+    st.warning("Enter a fault code first.")
+  elif lookup_clicked:
+    vehicle = ss.vehicle_info or "General OBD-II Vehicle"
+    append_to_log(vin=ss.active_vin, vehicle=vehicle, dtc=code_input, customer=ss.customer_name, phone=ss.customer_phone)
     dtc_prompt = f"""
-You are an expert ASE master diagnostic technician. Provide a laser-focused, code-specific diagnostic testing workflow for fault code {code_input} on a {vehicle}.
+You are an expert ASE master diagnostic technician. Provide a laser-focused, code-specific diagnostic testing workflow for fault code(s) {code_input} on a {vehicle}.
 
 STRICT SCOPE RULES:
 - ONLY provide tests and checks for the exact subsystem, sensor, actuator, or circuit named in {code_input}.
-- DO NOT provide generic boilerplate checks. (For example: do NOT mention fuel pressure, fuel trims, spark/glow plugs, or engine compression UNLESS {code_input} directly involves those systems).
-- Focus on practical shop isolation: isolate circuit vs computer vs mechanical component.
+- DO NOT provide generic boilerplate checks (fuel pressure, fuel trims, spark, compression) UNLESS {code_input} directly involves those systems.
+- If several codes are given, say whether they likely share one root cause and which to diagnose first.
+- Focus on practical shop isolation: circuit vs computer vs mechanical component.
 
 Format strictly using these Markdown sections:
 
 ### 1. Code Definition & Setting Criteria
-- Exact technical definition of {code_input}
-- Exact conditions required for ECM to flag this fault (voltage out of range, commanded vs actual position mismatch, duty cycle threshold)
+- Exact technical definition and the conditions the ECM uses to set it.
 
 ### 2. Live Scan Data & Bi-Directional Active Tests
-- Only the specific live PIDs directly tied to this circuit/actuator (and their expected values)
-- Bi-directional / functional test to command the actuator and what to observe
+- Only the PIDs tied to this circuit/actuator (with expected values) and the functional test to command it.
 
 ### 3. Pinpoint Electrical & Circuit Checks (DMM / Scope)
-- Connector pinout checks at the component (e.g. 5V reference, ground drop limit, 12V feed, PWM control duty cycle)
-- Component resistance specification (solenoid coil resistance, motor winding resistance, potentiometer sweep)
+- Connector pinout checks (reference, ground drop limit, feed, PWM duty) and component resistance specs.
 
 ### 4. Physical & Mechanical Inspection
-- Visual and mechanical tests strictly for this mechanism (carbon buildup, binding linkages, vacuum diaphragm leaks, broken arm)
+- Visual/mechanical checks strictly for this mechanism.
 
 ### 5. Known Platform Pattern Failures & TSBs
-- Specific real-world failure patterns for {vehicle} on this specific system
+- Real-world failure patterns for {vehicle} on this system.
 """
-    with st.spinner(
-        f"Generating {code_input} strategy via {ai_engine.upper()}..."
-    ):
-      if ai_engine == "gemini":
-        result = query_gemini(dtc_prompt)
-      else:
-        result = query_perplexity(dtc_prompt, preset="low")
-      st.markdown(result)
+    with st.spinner(f"Generating {code_input} strategy via {ai_engine.upper()}..."):
+      text = ask_gemini(dtc_prompt) if ai_engine == "gemini" else ask_perplexity(dtc_prompt)
+    ss.dtc_result = {"title": f"{code_input} · {vehicle} · {ai_engine.title()}", "text": text}
+
+  if ss.dtc_result:  # stays on screen while you use other tabs
+    st.markdown(f"##### {ss.dtc_result['title']}")
+    st.markdown(ss.dtc_result["text"])
 
 # ========================================================
 # --- TAB 4: DIAGNOSTIC COPILOT & SCOPE LAB ---
 # ========================================================
 with tab4:
   st.subheader("⚡ Diagnostic Copilot & Scope Lab")
+  context_bar()
 
-  v_label = st.session_state.vehicle_info or "No Vehicle Selected (General)"
-  d_label = st.session_state.active_dtc or "None Specified"
-  c_label = st.session_state.customer_name or "None"
-  st.info(
-      f"📋 **Context:** Customer: `{c_label}` | Vehicle: `{v_label}` | Active"
-      f" DTC: `{d_label}`"
-  )
-
-  col_scope, col_scratch = st.columns([1, 1])
-
+  col_scope, col_scratch = st.columns(2)
   with col_scope:
     st.markdown("#### 📸 Scope & Meter Display Capture")
-    open_scope_cam = st.toggle("📷 Open Camera for Scope / Meter", value=False)
-    scope_capture = None
-    if open_scope_cam:
-      scope_capture = st.camera_input("Capture oscilloscope or meter")
-
-    scope_file = st.file_uploader(
-        "Or upload scope waveform file/image",
-        type=["png", "jpg", "jpeg"],
-        key="scope_upload",
-    )
-
+    scope_capture = st.camera_input("Capture oscilloscope or meter") if st.toggle("📷 Open Camera for Scope / Meter") else None
+    scope_file = st.file_uploader("Or upload scope waveform image", type=["png", "jpg", "jpeg"], key="scope_upload")
     active_img = scope_capture or scope_file
     pil_scope_image = None
     if active_img:
-      st.image(active_img, caption="Captured Scope / Meter Display")
-      pil_scope_image = Image.open(active_img)
+      st.image(active_img.getvalue(), caption="Captured Scope / Meter Display")
+      pil_scope_image = ImageOps.exif_transpose(Image.open(active_img))
 
   with col_scratch:
     st.markdown("#### 📝 Test Results Scratchpad")
     with st.expander("Enter Physical Test Readings", expanded=True):
-      comp_data = st.text_input(
-          "Compression / Leakdown (psi / % drop):",
-          placeholder="e.g., Cyl 1: 160, Cyl 2: 155, Cyl 3: 90, Cyl 4: 160",
-      )
-      fuel_data = st.text_input(
-          "Fuel Pressure (Running / 5-min Bleed-down):",
-          placeholder="e.g., 55 psi running, drops to 12 psi in 3 mins",
-      )
-      volt_data = st.text_input(
-          "Electrical / Voltage Drop:",
-          placeholder="e.g., Cranking battery drop 9.1V, engine ground drop 0.4V",
-      )
-      scope_notes = st.text_area(
-          "Scope Waveform Observations:",
-          placeholder=(
-              "e.g., Ignition coil burn time is 0.7ms; injector kick voltage is"
-              " only 35V; CKP missing tooth has uneven spacing"
-          ),
-          height=70,
-      )
+      comp_data = st.text_input("Compression / Leakdown (psi / % drop):",
+                                placeholder="e.g., Cyl 1: 160, Cyl 2: 155, Cyl 3: 90, Cyl 4: 160")
+      fuel_data = st.text_input("Fuel Pressure (Running / 5-min Bleed-down):",
+                                placeholder="e.g., 55 psi running, drops to 12 psi in 3 mins")
+      volt_data = st.text_input("Electrical / Voltage Drop:",
+                                placeholder="e.g., Cranking battery drop 9.1V, engine ground drop 0.4V")
+      scope_notes = st.text_area("Scope Waveform Observations:", height=70,
+                                 placeholder="e.g., Coil burn time 0.7ms; injector kick only 35V; CKP missing tooth uneven")
 
   if st.button("🔍 Analyze Entered Test Results & Scope Pattern with Gemini"):
     test_summary = f"""
-Customer: {c_label}
-Vehicle: {v_label}
-Active DTC: {d_label}
+Vehicle: {ss.vehicle_info or 'General'}
+Active DTC: {ss.active_dtc or 'None'}
 Compression/Leakdown: {comp_data or 'Not tested'}
 Fuel Pressure & Bleed-down: {fuel_data or 'Not tested'}
 Voltage Drop / Electrical: {volt_data or 'Not tested'}
 Scope Observations: {scope_notes or 'None reported'}
 """
-    with st.spinner(
-        "Gemini Vision is analyzing waveform signatures and physical"
-        " readings..."
-    ):
-      eval_res = analyze_scope_with_gemini(pil_scope_image, test_summary)
-      st.markdown("### Diagnostic Evaluation")
-      st.markdown(eval_res)
+    prompt = f"""
+You are an expert ASE Master / L1 diagnostic technician and automotive oscilloscope waveform specialist.
+Analyze this oscilloscope or multimeter capture (if attached) alongside the physical shop test readings.
+
+TEST CONTEXT:
+{test_summary}
+
+TASK:
+- Identify the signal type (secondary/primary ignition, injector voltage/current, CKP/CMP correlation, relative compression, PWM, sensor drop).
+- Evaluate key signatures: firing/inductive kV, dwell, burn line slope & turbulence, coil oscillations, ground bounce, attenuation, missing-tooth spacing.
+- Correlate waveform abnormalities with the physical readings.
+
+FORMAT STRICTLY AS:
+### 1. Scope Waveform & Electrical Findings
+### 2. Component Condemnation & Defect Root Cause
+### 3. Immediate Pinpoint Verification Step
+"""
+    parts = [{"text": prompt}] + ([img_part(pil_scope_image)] if pil_scope_image else [])
+    with st.spinner("Gemini Vision is analyzing waveform signatures and physical readings..."):
+      try:
+        ss.scope_result = gemini(parts)
+      except AIError as e:
+        ss.scope_result = f"⚠️ {e}"
+
+  if ss.scope_result:
+    st.markdown("### Diagnostic Evaluation")
+    st.markdown(ss.scope_result)
 
   st.write("---")
   st.markdown("#### 💬 Interactive Diagnostic Copilot (Gemini)")
-  st.caption(
-      "Ask follow-up questions, request specific pinout checks, or ask how to"
-      " isolate an intermittent fault."
-  )
+  hcol1, hcol2 = st.columns([4, 1])
+  hcol1.caption("Ask follow-up questions, request pinout checks, or ask how to isolate an intermittent fault.")
+  if ss.chat_history and hcol2.button("Clear chat"):
+    ss.chat_history = []
+    st.rerun()
 
-  for msg in st.session_state.chat_history:
+  for msg in ss.chat_history:
     with st.chat_message(msg["role"]):
       st.markdown(msg["content"])
 
-  user_question = st.chat_input(
-      "Ask a diagnostic question (e.g., 'How do I isolate a leaking injector"
-      " from a bad pump check valve?')"
-  )
-
+  user_question = st.chat_input("Ask a diagnostic question (e.g., 'How do I isolate a leaking injector from a bad pump check valve?')")
   if user_question:
-    st.session_state.chat_history.append(
-        {"role": "user", "content": user_question}
-    )
+    ss.chat_history.append({"role": "user", "content": user_question})
     with st.chat_message("user"):
       st.markdown(user_question)
-
-    history_context = ""
-    for m in st.session_state.chat_history[-6:]:
-      history_context += f"{m['role'].upper()}: {m['content']}\n"
-
+    history = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in ss.chat_history[-6:])
     chat_prompt = f"""
 You are an expert automotive diagnostic technician assisting a mechanic in the field.
-Customer: {c_label}
-Current Vehicle: {v_label}
-Active DTC: {d_label}
+Vehicle: {ss.vehicle_info or 'General'}
+Active DTC: {ss.active_dtc or 'None'}
+Scanner codes: {_fmt_dtcs(ss.ble_dtcs) if ss.ble_dtcs else 'Not scanned'}
 
-Recent Conversation & Test Data:
-{history_context}
+Recent conversation:
+{history}
 
-Respond directly, practically, and concisely to the latest question. Focus on physical shop tests, circuit checks, and logical isolation procedures.
+Respond directly, practically, and concisely to the latest question. Focus on physical shop tests, circuit checks, and logical isolation.
 """
     with st.chat_message("assistant"):
-      with st.spinner("Gemini Thinking..."):
-        bot_reply = query_gemini(chat_prompt)
-        st.markdown(bot_reply)
-        st.session_state.chat_history.append(
-            {"role": "assistant", "content": bot_reply}
-        )
+      with st.spinner("Gemini thinking..."):
+        reply = ask_gemini(chat_prompt)
+      st.markdown(reply)
+    ss.chat_history.append({"role": "assistant", "content": reply})
 
 # ========================================================
 # --- TAB 5: VEHICLE & DTC LOG ---
 # ========================================================
 with tab5:
   st.subheader("📋 Vehicle Diagnostic Scan History")
-  st.caption("Tracks customer tickets, VINs, and diagnostic fault codes.")
+  st.caption("Logged automatically when the scanner syncs or you run a diagnostic tree. Note: on Streamlit Cloud this"
+             " file resets whenever the app restarts, so export it regularly.")
 
   history = load_log()
-
   if history:
     st.dataframe(history, use_container_width=True)
-
-    col_csv, col_del = st.columns([1, 1])
+    col_csv, col_del = st.columns(2)
     with col_csv:
-      csv_data = "Timestamp,Customer,Phone,VIN,Vehicle,Fault Code (DTC)\n"
-      for r in history:
-        csv_data += f'"{r.get("Timestamp","")}","{r.get("Customer","")}","{r.get("Phone","")}","{r.get("VIN","")}","{r.get("Vehicle","")}","{r.get("Fault Code (DTC)","")}"\n'
-      st.download_button(
-          label="📥 Export Log to CSV",
-          data=csv_data,
-          file_name="diagnostic_scan_log.csv",
-          mime="text/csv",
-      )
+      with open(LOG_FILE, "rb") as f:
+        st.download_button("📥 Export Log to CSV", data=f.read(), file_name="diagnostic_scan_log.csv", mime="text/csv")
     with col_del:
-      if st.button("🗑️ Clear Log History"):
-        if os.path.exists(LOG_FILE):
-          os.remove(LOG_FILE)
-        st.success("Log cleared!")
-        st.rerun()
+      confirm = st.checkbox("Yes, delete all log entries")
+      if st.button("🗑️ Clear Log History", disabled=not confirm):
+        os.remove(LOG_FILE)
+        queue_update(toast="Log cleared")
   else:
-    st.info(
-        "No vehicles or DTCs logged yet. Run a code lookup in Tab 3 to start"
-        " logging."
-    )
+    st.info("No vehicles or DTCs logged yet. Connect the scanner (Tab 2) or run a code lookup (Tab 3) to start logging.")
