@@ -393,9 +393,6 @@ with tab1:
 # ========================================================
 # --- TAB 2: LIVE TELEMETRY, ENHANCED PIDS, MONITORS & MODE 06 ---
 # ========================================================
-# ========================================================
-# --- BLUETOOTH DASHBOARD PAGE (runs in the browser) ---
-# ========================================================
 BLE_DASHBOARD_HTML = r'''<!doctype html>
 <html>
 <head>
@@ -422,6 +419,7 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
   .tile .v { font-size:1.12rem; font-weight:700; }
   .tile.na { opacity:.4; }
   .enh .tile { border-color:var(--p); }
+  .grp { font-size:.75rem; color:var(--p); font-weight:700; text-transform:uppercase; margin:6px 0 4px; }
   .box { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:10px; margin-bottom:16px; font-size:.85rem; color:var(--muted); }
   .chips { display:flex; flex-wrap:wrap; gap:6px; }
   .chip { padding:4px 10px; border-radius:12px; font-weight:700; font-family:monospace; font-size:.9rem; border:1px solid; }
@@ -462,8 +460,9 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
   <h3 style="color:var(--g)">📈 LIVE DATA (MODE 01) <span id="rate" class="note"></span></h3>
   <div id="liveGrid" class="grid"></div>
 
-  <h3 style="color:var(--p)">🏭 OEM ENHANCED PIDS <span class="note">beta: verify readings against a factory-level scan tool before relying on them</span></h3>
-  <div id="enhGrid" class="grid enh"></div>
+  <h3 style="color:var(--p)">🏭 OEM ENHANCED DATA <span id="enhNote" class="note">connect to scan this vehicle's modules</span></h3>
+  <div id="enhBox" class="enh"><div class="box">Factory-level readings appear here as each module answers.</div></div>
+  <div class="note" style="margin:-10px 0 16px">Definitions from the open OBD database (OBDb, github.com/OBDb). Some are model-year specific, so sanity-check new readings against a factory scan tool.</div>
 
   <h3 style="color:var(--b)">📋 I/M READINESS</h3>
   <div id="readyBox" class="box">Loads automatically on connect.</div>
@@ -483,14 +482,14 @@ let lastHeight = 0;
 function fitHeight() { const h = document.documentElement.scrollHeight; if (h !== lastHeight) { lastHeight = h; toStreamlit("streamlit:setFrameHeight", { height: h }); } }
 new ResizeObserver(fitHeight).observe(document.body);
 
-let ARGS = { vehicle: "", make: "GENERIC", ai: null };
+let ARGS = { vehicle: "", make: "GENERIC", year: "", ai: null };
 let lastAiShown = null;
 window.addEventListener("message", (e) => {
   if (!e.data || e.data.type !== "streamlit:render") return;
   const a = e.data.args || {};
-  const makeChanged = a.make !== ARGS.make;
+  const changed = a.make !== ARGS.make || String(a.year) !== String(ARGS.year);
   ARGS = a;
-  if (makeChanged && connected) buildEnhanced();
+  if (changed && connected) buildEnhanced();
   if (a.ai && a.ai.id && a.ai.id !== lastAiShown) {
     lastAiShown = a.ai.id;
     if (a.ai.id === aiPendingId) aiPendingId = null;
@@ -515,10 +514,6 @@ const LIVE_TILES = [
   ["o2b1s2", "O2 B1S2", "v"], ["o2b2s1", "O2 B2S1", "v"], ["o2b2s2", "O2 B2S2", "v"], ["evap", "EVAP Purge", "w"],
   ["volt", "Battery Volt", "w"],
 ];
-const ENH_TILES = [
-  ["tft", "Trans Fluid Temp"], ["eop", "Oil Pressure"], ["cht", "Cyl Head Temp / VCM / TC Temp"], ["tcc", "TCC Slip"],
-  ["gear", "Commanded Gear"], ["kr", "Knock Retard"], ["eth", "Ethanol %"], ["soc", "Hybrid SOC"],
-];
 const LABEL = {};
 function makeTiles(gridId, tiles, color) {
   $(gridId).innerHTML = tiles.map(([id, label, c]) => {
@@ -527,7 +522,6 @@ function makeTiles(gridId, tiles, color) {
   }).join("");
 }
 makeTiles("liveGrid", LIVE_TILES);
-makeTiles("enhGrid", ENH_TILES, "p");
 
 const shown = {};   // tile id -> display text
 const num = {};     // tile id -> numeric value (for alerts)
@@ -594,11 +588,28 @@ const bytesOf = (hex) => { const b = []; for (let i = 0; i + 2 <= hex.length; i 
 const respCode = (svc) => (parseInt(svc, 16) + 0x40).toString(16).toUpperCase().padStart(2, "0");
 
 let isCan = false, curHeader = "7DF", baseHeader = "7DF", batchOK = false, fastOK = true;
-async function setHeader(h) {
-  if (!isCan || h === curHeader) return;
-  await sendCmd("ATSH" + h, 500);
-  curHeader = h;
+let baseProto = "6", curProto = "6", curCra = "";
+// Point the adapter at one module. 3-char headers are 11-bit CAN (e.g. 7E0, 700);
+// 4-char headers like DA10 are 29-bit (18 DA 10 F1), used by Honda, newer Stellantis, etc.
+async function setAddr(hdr, rax) {
+  if (!isCan) return;
+  const ext = hdr.length === 4;
+  const base29 = baseProto === "7" || baseProto === "9";
+  const want = ext ? (base29 ? baseProto : String(+baseProto + 1)) : (base29 ? String(+baseProto - 1) : baseProto);
+  if (want !== curProto) {
+    await sendCmd("ATSP" + want, 500);
+    curProto = want; curHeader = ""; curCra = "?";
+    if (ext) await sendCmd("ATCP18", 400);
+  }
+  const full = ext ? hdr + "F1" : hdr;
+  if (full !== curHeader) { await sendCmd("ATSH" + full, 500); curHeader = full; }
+  let cra = "";
+  if (ext) cra = "18DAF1" + (rax || hdr.slice(2));
+  else if (rax) cra = rax;
+  else if (hdr !== "7DF" && !/^7E[0-7]$/.test(hdr)) cra = (parseInt(hdr, 16) + 8).toString(16).toUpperCase();
+  if (cra !== curCra) { await sendCmd(cra ? "ATCRA" + cra : "ATCRA", 400); curCra = cra; }
 }
+const setHeader = (h) => setAddr(h, "");
 
 // Supported-ID bitmaps (Mode 01 PIDs / Mode 06 MIDs) -> Set of "0C", "A2", ...
 async function supported(svc, ranges) {
@@ -712,99 +723,658 @@ async function pollPids(pids) {
   }
 }
 
-// ===================== OEM enhanced DIDs (Service $22/$21) =====================
-// [header, request, decoder]; candidates are tried in order and the first that answers is locked in.
-const one = (f) => (b) => b.length ? f(b) : null;
-const two = (f) => (b) => b.length >= 2 ? f(b) : null;
-const C40 = one((b) => degF(b[0] - 40) + " °F");
-const GEAR = one((b) => "Gear " + b[0]);
-const ENH = {
-  HONDA: [
-    ["tft", [["7E1", "222201", (b) => b.length >= 27 ? degF(b[26] - 40) + " °F" : null], ["7E0", "222201", (b) => b.length >= 27 ? degF(b[26] - 40) + " °F" : null], ["7E1", "21D9", C40], ["7E0", "221627", C40]]],
-    ["cht", [["7E0", "222615", (b) => b.length >= 51 ? b[50] + " Cyls (VCM)" : null]]],
-    ["tcc", [["7E1", "221E14", two((b) => Math.round(u16(b) / 4) + " RPM")]]],
-    ["gear", [["7E1", "221E12", GEAR]]],
-  ],
-  TOYOTA: [
-    ["tft", [["7E0", "221627", C40], ["7E1", "221627", C40]]],
-    ["cht", [["7E0", "221628", one((b) => degF(b[0] - 40) + " °F (TC)")]]],
-    ["gear", [["7E0", "221621", GEAR]]],
-    ["tcc", [["7E0", "221620", one((b) => (b[0] & 1) ? "Locked" : "Unlocked")]]],
-    ["soc", [["7E0", "22015B", one((b) => (b[0] * 0.5).toFixed(1) + "%")]]],
-  ],
-  NISSAN: [
-    ["tft", [["7E1", "221017", C40], ["7E0", "221017", C40]]],
-    ["eot", [["7E0", "22114A", C40]], "ifEmpty"],
-    ["gear", [["7E1", "221621", GEAR]]],
-  ],
-  HYUNDAI: [
-    ["tft", [["7E1", "221627", C40]]],
-    ["eot", [["7E0", "221104", C40]], "ifEmpty"],
-    ["kr", [["7E0", "2211A6", one((b) => (b[0] * 0.1).toFixed(1) + "°")]]],
-  ],
-  SUBARU: [
-    ["tft", [["7E1", "221017", C40], ["7E0", "221017", C40]]],
-    ["eot", [["7E0", "22114A", C40]], "ifEmpty"],
-  ],
-  MAZDA: [
-    ["tft", [["7E1", "221E1C", two((b) => degF(u16(b) / 80) + " °F")]]],
-    ["gear", [["7E1", "221E12", GEAR]]],
-    ["tcc", [["7E1", "221E14", two((b) => Math.round(u16(b) / 4) + " RPM")]]],
-  ],
-  FORD: [
-    ["tft", [["7E0", "221E1C", two((b) => degF(u16(b) / 16 - 40) + " °F")], ["7E0", "221674", two((b) => degF(u16(b) * 5 / 72 - 18) + " °F")]]],
-    ["cht", [["7E0", "221624", two((b) => degF(u16(b) / 10 - 40) + " °F")]]],
-    ["tcc", [["7E0", "221E14", two((b) => Math.round(u16(b) / 4) + " RPM")]]],
-    ["gear", [["7E0", "221E12", GEAR]]],
-  ],
-  GM: [
-    ["tft", [["7E0", "221940", C40], ["7E2", "221940", C40]]],
-    ["eop", [["7E0", "22115C", one((b) => Math.round(b[0] * 0.579) + " PSI")]]],
-    ["kr", [["7E0", "2211A6", one((b) => (b[0] * 0.1).toFixed(1) + "°")]]],
-    ["tcc", [["7E0", "221943", two((b) => Math.round(u16(b) / 8) + " RPM")]]],
-    ["gear", [["7E0", "221944", GEAR]]],
-    ["eth", [["7E0", "220052", one((b) => Math.round(b[0] * 0.392) + "%")]]],
-  ],
-  CHRYSLER: [
-    ["eop", [["7E0", "221003", one((b) => Math.round(b[0] * 0.58) + " PSI")]]],
-    ["tft", [["7E0", "22B005", C40], ["7E2", "22B005", C40]]],
-    ["eot", [["7E0", "221002", C40]], "ifEmpty"],
-  ],
-};
-let enh = [];
+// ===================== OEM enhanced data (Service $22 / $21) =====================
+// Source: OBDb community database (github.com/OBDb), collected from ~40 popular Asian & domestic models.
+// Line format: hdr|rax|request|bitOffset|bitLen|mul|div|add|signed|littleEndian|unit|name|modelYears
+const OEM_RAW = `#TOYOTA
+700||221627|0|16|1|256|-40|0|0|C|trans fluid temp, pan v3|*
+700||2210A7|0|8|1|1|0|0|0||Misfire count, cylinder 1|*
+700||2210A7|8|8|1|1|0|0|0||Misfire count, cylinder 2|*
+700||2210A7|16|8|1|1|0|0|0||Misfire count, cylinder 3|*
+700||2210A7|24|8|1|1|0|0|0||Misfire count, cylinder 4|*
+7E0||2145|24|8|1|1|0|0|0||Cylinder #1 misfire count|*
+7E0||2145|32|8|1|1|0|0|0||Cylinder #2 misfire count|*
+7E0||2145|40|8|1|1|0|0|0||Cylinder #3 misfire count|*
+7E0||2145|48|8|1|1|0|0|0||Cylinder #4 misfire count|*
+7E0||2145|56|8|1|1|0|0|0||All cylinders misfire count|*
+700||221074|0|16|10|128|0|0|0|kPa|Engine oil pressure|*
+700||22107B|192|8|1|1|-40|0|0|C|Engine oil temp|*
+700||221F5C|0|8|1|1|-40|0|0|C|Engine oil temp, variation 2|*
+7E0||2151|72|8|1|1|-40|0|0|C|Engine oil temp|*
+700||221622|0|16|5333|21845000|0|0|0||trans shift state ratio|*
+700||221628|0|16|1|256|-40|0|0|C|trans fluid post-converter temp v3|*
+700||221638|0|8|1|1|-40|0|0|C|trans fluid temp|*
+701||221622|0|16|5333|21845000|0|0|0||trans shift state ratio|*
+701||221627|0|16|0.00703125|1|-40|0|0|F|trans fluid pan temp|*
+701||221628|0|16|0.00703125|1|-40|0|0|F|trans fluid post-converter temp|*
+7E0||2182|0|16|1|256|-40|0|0|C|trans temp, pan|*
+7E0||2182|16|16|1|256|-40|0|0|C|trans temp, torque converter|*
+7E0||21BD|0|8|50|1|0|0|0|rpm|trans output shaft speed|*
+7E0||21BE|0|8|40|1|0|0|0|kPa|Continuously variable trans oil pressure|*
+7E0||21D9|0|16|1|256|-40|0|0|C|trans fluid temp v14|*
+7E0||21D9|24|8|1|1|-40|0|0|C|trans fluid temp v21|*
+7E0||21D9|32|16|1|256|-40|0|0|C|trans fluid temp v5|*
+7E0||21D9|48|16|1|256|-40|0|0|C|trans fluid temp v8|*
+700||221620|7|1|1|1|0|0|0|onoff|Lock up state|*
+700||221621|0|8|1|1|0|0|0||Gear|*
+701||221620|7|1|1|1|0|0|0|onoff|Lock up state|*
+7E0||21DA|0|8|1|1|0|0|0||Current gear|*
+700||22105C|16|16|312.5|10000|-1024|0|0||Knock feedback value|*
+700||221F6D|8|16|10|1|0|0|0|kPa|High fuel pressure, target|*
+700||221F6D|24|16|10|1|0|0|0|kPa|High fuel pressure, actual|*
+700||221F6D|64|16|10|1|0|0|0|kPa|Low fuel pressure|*
+7D2||221040|16|8|1|1|-40|0|0|C|Transaxle oil temp|*
+7E1||2182|0|16|1|256|-40|0|0|C|trans fluid temp v10|*
+7E1||2182|16|16|1|256|-40|0|0|C|trans fluid temp v11|*
+7E1||21D9|0|16|1|256|-40|0|0|C|trans fluid temp v14|*
+7E1||21D9|24|8|1|1|-40|0|0|C|trans fluid temp v21|*
+7E1||21D9|32|16|1|256|-40|0|0|C|trans fluid temp v9|*
+7E1||21D9|48|16|1|256|-40|0|0|C|trans fluid temp v12|*
+7E0||2185|0|8|1|1|0|0|0||Gear|*
+7E0||2185|8|1|1|1|0|0|0|onoff|Gear lock-up|*
+#NISSAN
+7E1||2101|152|8|9|5|-67|0|0|F|trans fluid temp v1|*
+7E1||2101|160|8|9|5|-67|0|0|F|trans fluid temp v2|*
+7E1||2101|120|16|1|1|0|1|0|rpm|Torque converter slip|*
+7E0||221137|0|8|1|2|-64|0|0|deg|Intake camshaft advance, bank 2|*
+758|778|220201|0|8|1|4|0|0|0|psi|Front left tire pressure|*
+758|778|220202|0|8|1|4|0|0|0|psi|Front right tire pressure|*
+758|778|220203|0|8|1|4|0|0|0|psi|Rear right tire pressure|*
+758|778|220204|0|8|1|4|0|0|0|psi|Rear left tire pressure|*
+7E0||221124|0|8|1|1|-100|0|0|%|Air/fuel ratio adjustment, bank 2|*
+7E0||221205|0|16|1|200|0|0|0|V|Mass air flow sensor voltage, bank 2|*
+7E0||221307|1|1|1|1|0|0|0||Air conditioning compressor|*
+7E0||221307|6|1|1|1|0|0|0||Idle control mode|*
+7E0||221307|1|1|1|1|0|0|0|onoff|Air conditioning compressor|*
+7E0||221307|6|1|1|1|0|0|0|onoff|Idle control mode|*
+7E0||221186|0|8|1|1|0|0|0|L|Remaining fuel|*
+#HONDA
+DA1D|1D|222201|208|8|1|1|-40|0|0|C|Automatic trans fluid temp|*
+DA1E|1E|222201|208|8|1|1|-40|0|0|C|trans fluid temp v4|*
+DA1E|1E|223083|112|8|1|1|-40|0|0|C|trans fluid temp|*
+DA11|11|222663|160|16|1|1|0|0|0||Misfire count #1 v3|*
+DA11|11|222663|176|16|1|1|0|0|0||Misfire count #2 v3|*
+DA11|11|222663|192|16|1|1|0|0|0||Misfire count #3 v3|*
+DA11|11|222663|208|16|1|1|0|0|0||Misfire count #4 v3|*
+DA11|11|222663|272|16|1|1|0|0|0||Misfire count #1 v2|*
+DA11|11|222663|288|16|1|1|0|0|0||Misfire count #2 v2|*
+DA11|11|222663|304|16|1|1|0|0|0||Misfire count #3 v2|*
+DA11|11|222663|320|16|1|1|0|0|0||Misfire count #4 v2|*
+DA11|11|22266C|48|8|1|1|0|0|0||Misfire count #1 v1|*
+DA11|11|22266C|56|8|1|1|0|0|0||Misfire count #2 v1|*
+DA11|11|22266C|64|8|1|1|0|0|0||Misfire count #3 v1|*
+DA11|11|22266C|72|8|1|1|0|0|0||Misfire count #4 v1|*
+DA10|10|222666|88|8|1|1|-40|0|0|C|Engine oil temp v3|*
+DA10|10|222666|112|8|1|1|-40|0|0|C|Engine oil temp v4|*
+DA60|60|227060|256|16|1|1|0|0|0||Maintenance, trans fluid|*
+DA0E|0E|222612|352|8|1|1|0|0|0||Current gear v2|*
+DA0E|0E|222612|368|8|1|1|0|0|0||Current gear v3|*
+DA1D|1D|222663|272|16|1|1|0|0|0||Misfire count 1|*
+DA1D|1D|222663|288|16|1|1|0|0|0||Misfire count 2|*
+DA1D|1D|222663|304|16|1|1|0|0|0||Misfire count 3|*
+DA1D|1D|222663|320|16|1|1|0|0|0||Misfire count 4|*
+DA11|11|222663|224|16|1|1|0|0|0||Misfire count #5 v3|*
+DA11|11|222663|240|16|1|1|0|0|0||Misfire count #6 v3|*
+DA11|11|222663|336|16|1|1|0|0|0||Misfire count #5 v2|*
+DA11|11|222663|352|16|1|1|0|0|0||Misfire count #6 v2|*
+DA11|11|22266C|80|8|1|1|0|0|0||Misfire count #5 v1|*
+DA11|11|22266C|88|8|1|1|0|0|0||Misfire count #6 v1|*
+DA11|11|222662|80|8|1.99|255|0|0|0||Knock control|*
+DA11|11|222666|88|8|1|1|-40|0|0|C|Engine oil temp v1|*
+DA11|11|222666|112|8|1|1|-40|0|0|C|Engine oil temp v2|*
+DA10|10|222663|272|16|1|1|0|0|0||Misfire count #1|*
+DA10|10|222663|288|16|1|1|0|0|0||Misfire count #2|*
+DA10|10|222663|304|16|1|1|0|0|0||Misfire count #3|*
+DA10|10|222663|320|16|1|1|0|0|0||Misfire count #4|*
+DA1D|1D|222221|184|8|1|1|0|0|0||Current gear|*
+DA60|60|227060|224|16|1|1|0|0|0||Maintenance, tire rotation|*
+DA0E|0E|222663|160|16|1|1|0|0|0||Misfire count #1 v3|*
+DA0E|0E|222663|176|16|1|1|0|0|0||Misfire count #2 v3|*
+DA0E|0E|222663|192|16|1|1|0|0|0||Misfire count #3 v3|*
+DA0E|0E|222663|208|16|1|1|0|0|0||Misfire count #4 v3|*
+DA0E|0E|222663|224|16|1|1|0|0|0||Misfire count #5 v3|*
+DA0E|0E|222663|240|16|1|1|0|0|0||Misfire count #6 v3|*
+#SUBARU
+7A3||2210D2|0|8|1|1|-50|0|0|C|Continuously variable trans temp|*
+7A3||22113D|0|8|256|65535|0|0|0||Target gear ratio|*
+7A3||22113E|0|16|256|65535|0|0|0||Actual gear ratio|*
+7E0||2210E7|0|8|1|1|-40|0|0|C|Engine oil temp|*
+7E0||221299|0|8|1|1|0|0|0|%|trans lock-up|*
+7E1||221017|0|8|1|1|-50|0|0|C|CVT fluid temp|2010-
+7E1||221065|0|8|1|2|0|0|0|%|AWD transfer clutch duty|2010-
+7E1||22300E|0|16|1|1|0|0|0|rpm|CVT primary pulley speed|2010-
+7E1||2230D0|0|16|1|1|0|0|0|rpm|CVT secondary pulley speed|2010-
+7E1||2230DA|0|16|1|255|0|0|0||CVT gear ratio, actual|2010-
+7E1||2230F8|0|16|1|255|0|0|0||CVT gear ratio, target|2010-
+7A2||220023|0|16|1|1|0|0|0|kPa|Fuel rail pressure|*
+7E1||221045|0|8|1|2|0|0|0|%|Torque converter lock-up duty|2010-
+7E0||2210EC|0|8|1|1|-50|0|0|deg|Exhaust VVT retard angle right|*
+7E0||2210ED|0|8|1|1|-50|0|0|deg|Exhaust VVT retard angle left|*
+7E0||221291|0|8|1|1|-50|0|0|deg|Exhaust VVT retard, target angle right|*
+7E0||221292|0|8|1|1|-50|0|0|deg|Exhaust VVT retard, target angle left|*
+7A2||22003C|0|16|1|1|0|0|0|C|Exhaust gas temp, catalyst inlet|*
+7A2||22114B|0|8|5|1|-40|0|0|C|Estimated catalyst temp|*
+7A2||2210AC|0|8|20|51|0|0|0|%|Primary boost control|*
+7E0||2210AC|0|8|20|51|0|0|0|%|Primary boost control|*
+7E0||22128F|0|8|1|1|-50|0|0|deg|Intake VVT advance, target angle right|*
+7E0||221290|0|8|1|1|-50|0|0|deg|Intake VVT advance, target angle left|*
+7E0||221352|0|8|20|51|0|0|0|%|Split ratio of fuel injection 1|*
+7E0||221353|0|8|20|51|0|0|0|%|Split ratio of fuel injection 2|*
+7E0||221354|0|8|20|51|0|0|0|%|Split ratio of fuel injection 3|*
+7E0||221355|0|8|20|51|0|0|0|%|Split ratio of fuel injection 4|*
+7E7||221037|0|8|25.5|255|0|0|0|V|12V aux battery voltage|*
+7E7||221039|0|8|25.5|255|0|0|0|V|12V engine restart battery voltage|*
+7A2||220005|0|8|1|1|-40|0|0|C|Coolant temp|*
+7E0||220005|0|8|1|1|-40|0|0|C|Coolant temp|*
+7A2||22003E|0|16|1|1|0|0|0|C|Exhaust gas temp at DPF inlet|*
+7A2||2210A7|0|8|1|1|-40|0|0|C|Fuel temp|*
+7A2||2210B3|0|8|100|255|0|0|0|%|Fuel pump duty|*
+7A2||2210E6|0|16|1|100|0|0|0||Fuel tank air pressure|*
+7A2||22111F|0|8|1|1|-40|0|0|C|Inlet air temp, after air filter|*
+7A2||22114C|0|8|5|1|-40|0|0|C|Estimated DPF temp|*
+7A2||221251|0|8|1|1|0|0|0||Sub fuel pump relay switch|*
+7A2||22307A|0|8|1.8|1|-40|0|0|F|Inlet air temp|*
+7E0||221276|0|8|1|50|0|0|0|V|Sub throttle sensor|*
+7E0||221277|0|8|1|50|0|0|0|V|Main throttle sensor|*
+7E0||221289|0|16|1|100|0|0|0|gps|Idle mass air flow|*
+7E0||22128A|0|16|1|100|-300|0|0|gps|Idle mass air flow feedback correction|*
+7E0||22128E|0|16|1|100|-300|0|0|gps|Idle dirty throttle correction|*
+7E0||2212CE|0|8|1|2|-40|0|0|C|Ambient temp for sensor signal|*
+#GM
+7E0||22115C|0|8|3|5|-21.6|0|0|psi|Engine oil pressure 2|*
+7E0||221940|0|8|1|1|-40|0|0|C|trans fluid temp v1|*
+7E2||221940|0|8|1|1|-40|0|0|C|trans fluid temp|*
+7E2||221941|0|16|1|4|0|1|0|rpm|trans input shaft speed, 2|*
+7E2||22280D|0|8|1|1|-40|0|0|C|trans fluid temp v6|*
+7E2||22199A|0|8|1|1|0|0|0||Current gear v2|*
+7E0||2211EA|0|8|1|1|0|0|0||Misfires, current, cylinder 5|-2012;-2020;-2017
+7E0||2211EB|0|8|1|1|0|0|0||Misfires, current, cylinder 6|-2012;-2020;-2017
+7E0||221200|0|8|1|1|0|0|0||Total misfire|*
+7E0||221205|0|8|1|1|0|0|0||Misfires, current, cylinder 2|*
+7E0||221206|0|8|1|1|0|0|0||Misfires, current, cylinder 1|*
+7E0||221207|0|8|1|1|0|0|0||Misfires, current, cylinder 3|*
+7E0||221208|0|8|1|1|0|0|0||Misfires, current, cylinder 4|*
+7E0||221154|0|8|1|1|-40|0|0|C|Calculated engine oil temp|*
+7E0||221C1B|0|8|400|100|0|0|0|kPa|Calculated engine oil pressure|*
+7E0||222344|0|8|400|100|0|0|0|kPa|Engine oil absolute pressure|*
+7E0||222345|0|8|400|100|0|0|0|kPa|Engine oil pressure|*
+7E0||223318|0|1|1|1|0|0|0|onoff|Engine oil pressure control solenoid valve command|*
+7E0||22199A|0|8|1|1|0|0|0||Current gear|*
+7E0||223201|0|8|1|1|0|0|0||Current gear v3|*
+7E2||2219D4|0|16|1|4|0|1|0|rpm|Clutch slip, AT C3, ring|*
+7E2||222851|0|16|1|4|0|1|0|rpm|Clutch slip, AT C1, ring|*
+7E0||2211A6|0|8|22|100|0|0|0|deg|Knock retard|*
+7E0||22125D|0|8|1|1|0|0|0|deg|Knock retard, alternate|*
+7E0||2212D9|0|8|45|100|0|0|0|deg|Total knock retard|*
+7E2||222862|0|16|1|1|0|1|0||trans pressure|*
+241|641|224005|0|32|1|1|0|0|0|hex|Front left tire sensor ID|*
+241|641|224006|0|32|1|1|0|0|0|hex|Front right tire sensor ID|*
+241|641|224007|0|32|1|1|0|0|0|hex|Rear right tire sensor ID|*
+241|641|224008|0|32|1|1|0|0|0|hex|Rear left tire sensor ID|*
+241|641|225005|0|16|1|16|0|0|0|kPa|Front left tire pressure|*
+241|641|225006|0|16|1|16|0|0|0|kPa|Front right tire pressure|*
+241|641|225007|0|16|1|16|0|0|0|kPa|Rear right tire pressure|*
+241|641|225008|0|16|1|16|0|0|0|kPa|Rear left tire pressure|*
+7E0||2211EC|0|8|1|1|0|0|0||Misfire current, cylinder 7|-2020
+7E0||2211ED|0|8|1|1|0|0|0||Misfire current, cylinder 8|-2020
+7E2||2219A1|0|8|1|1|0|0|0||Gear ratio|*
+7E0||22248E|0|8|1|1|0|0|0|psi|Left front tire pressure|*
+7E0||22248F|0|8|1|1|0|0|0|psi|Right front tire pressure|*
+7E0||222490|0|8|1|1|0|0|0|psi|Right rear tire pressure|*
+7E0||222491|0|8|1|1|0|0|0|psi|Left rear tire pressure|*
+7E0||22119E|0|8|1|10|0|0|0||Air/fuel ratio, commanded|*
+7E0||22114B|0|8|1|51|0|0|0|V|Exhaust gas recirculation voltage|*
+7E0||221170|0|8|1|2.55|0|0|0|%|Evaporative emissions purge|*
+DA40|40|224005|0|32|1|1|0|0|0|hex|Front left tire sensor ID|*
+#FORD
+7DF||221E1C|0|16|1|16|0|0|0|C|trans temp|*
+7E0||221E1A|0|16|2|1|0|1|0|kPa|trans pressure, commanded|*
+7E0||220345|0|32|1|1|0|0|0||Misfire events, latest cycle|*
+7E0||220382|0|8|1|64|0|1|0||Misfire acceleration, cylinder 1|*
+7E0||220388|0|8|1|64|0|1|0||Misfire acceleration, cylinder 2|*
+7E0||22038A|0|8|1|64|0|1|0||Misfire acceleration, cylinder 3|*
+7E0||22038B|0|8|1|64|0|1|0||Misfire acceleration, cylinder 4|*
+7E0||220398|0|8|1|64|0|1|0||Misfire acceleration, cylinder 6|*
+7E0||220415|0|16|1|1|0|1|0|kPa|Oil pressure|*
+7E0||221E1C|0|16|1|16|0|1|0|C|trans oil temp|*
+7E0||221E16|0|16|1|4096|0|0|0||Axle gear ratio, measured|*
+7E0||221E19|0|16|16|65535|0|0|0||Gear ratio, commanded|*
+7E0||221E1F|0|8|1|1|0|0|0||Gear, engaged|*
+726||222813|0|16|1|20|0|0|0|psi|Tire pressure, front left|*
+726||222814|0|16|1|20|0|0|0|psi|Tire pressure, front right|*
+726||222815|0|16|1|20|0|0|0|psi|Tire pressure, rear right outer|*
+726||222816|0|16|1|20|0|0|0|psi|Tire pressure, rear left outer|*
+726||222817|0|16|1|20|0|0|0|psi|Tire pressure, rear right inner|*
+726||222818|0|16|1|20|0|0|0|psi|Tire pressure, rear left inner|*
+7E0||22038C|0|8|1|64|0|1|0||Misfire acceleration, cylinder 5|2009-
+7E0||220403|0|16|1|1|0|0|0||Knock sensor, 1|*
+7E0||220404|0|16|1|1|0|0|0||Knock sensor, 2|*
+7E0||2205AC|0|8|1|1|0|0|0||Knock counter, cylinder 1|*
+7E0||2205AD|0|8|1|1|0|0|0||Knock counter, cylinder 2|*
+7E0||2205AE|0|8|1|1|0|0|0||Knock counter, cylinder 3|*
+7E0||2205AF|0|8|1|1|0|0|0||Knock counter, cylinder 4|*
+7E0||220324|0|16|5|1023|0|0|0|V|Fuel rail sensor voltage, high pressure|*
+7E0||2203DC|0|16|1.4503773969|1|0|0|0|psi|Fuel pressure, high desired|*
+7E0||22041F|0|8|435|1000|0|0|0|psi|Fuel pressure, low desired|*
+7E0||220548|0|16|10000|137892|0|1|0|psi|Fuel pressure, low actual|*
+7E0||22054D|0|16|1|1024|0|1|0|V|Fuel pressure sensor voltage, low|*
+7E0||2205B0|0|8|1|1|0|0|0||Knock counter, cylinder 5|2009-
+7E0||2205B1|0|8|1|1|0|0|0||Knock counter, cylinder 6|2009-
+7E0||220316|0|16|25|8192|0|0|0|%|Camshaft solenoid duty cycle, intake|*
+7E0||220317|0|16|25|8192|0|0|0|%|Camshaft solenoid duty cycle, exhaust|*
+7E0||220318|0|16|1|16|0|0|0|deg|Camshaft position, intake actual|*
+7E0||220319|0|16|1|16|0|0|0|deg|Camshaft position, exhaust actual|*
+7E0||22031A|0|16|1|16|0|1|0|deg|Camshaft position error, intake|*
+7E0||22031B|0|16|1|16|0|0|0|deg|Camshaft position error, exhaust|*
+7E0||2203BB|0|16|1|16|0|1|0|deg|Camshaft position, exhaust desired|*
+7E0||2203BC|0|16|1|16|0|1|0|deg|Camshaft position, intake desired|*
+7E0||220462|0|16|100|32768|0|0|0|%|Wastegate duty cycle|*
+7E0||22F43C|0|16|1|10|-40|0|0|C|Catalyst temp|*
+7E0||22046F|0|8|1|1|0|0|0||Injection mode|*
+7E0||22030F|0|16|1|32768|0|0|0||Lambda, commanded|*
+#CHRYSLER
+7E0||213A|80|8|4|1|0|0|0|F|trans sump temp v1|*
+7E0||213A|96|16|9|320|32|0|0|F|trans torque converter temp v1|*
+7E0||21CA|80|8|4|1|0|0|0|F|trans sump temp v2|*
+7E0||21CA|96|16|9|320|32|0|0|F|trans torque converter temp v2|*
+7E0||22B010|0|16|1|64|0|0|0|F|trans fluid temp v3|*
+7E1||210A|128|8|9|5|-58|0|0|F|trans temp v2|*
+7E1||2130|88|8|1|1|-50|0|0|C|trans fluid temp v3|*
+7E1||213A|72|16|1|64|0|0|0|F|trans sump temp|*
+7E1||2172|32|16|1|64|0|0|0|F|trans fluid temp v1|*
+7E1||2208DF|0|8|1|1|-40|0|0|C|trans fluid temp|*
+7E1||225034|0|16|1|10|-40|0|0|bar|trans main cylinder pressure|*
+7E1||225043|0|8|1|1|-40|0|0|C|trans fluid temp|*
+DA18|18|2204FE|0|8|1|1|-40|0|0|C|trans fluid temp|*
+DA18|18|221018|0|16|1|1|-500|0|0|Nm|trans-reported torque|*
+7E0||212D|56|8|9|5|-83|0|0|F|Engine oil temp|*
+7E0||22022A|0|8|29|50|0|0|0|psi|Engine oil pressure|*
+7E1||2204FE|0|8|1.8|1|-40|0|0|F|trans temp|2011-2023;-2024
+7E0||2118|0|16|1|64|0|0|0|F|trans fluid temp v.2|*
+7E0||22A002|0|8|9|5|-58|0|0|F|trans fluid temp v2|*
+7E0||22A09F|0|8|1|1|0|0|0||trans gear, commanded|*
+7E0||22A0A0|0|8|1|1|0|0|0||trans gear, actual|*
+7E0||22A0A3|0|16|9|640|0|0|0|F|trans sump temp|*
+7E0||22A0A4|0|16|9|320|0|0|0|F|trans torque converter temp|*
+7E1||223C22|0|8|1|10|0|0|0||Current gear|*
+DA18|18|22051A|0|4|1|1|0|0|0||Desired gear|2024-;2025-;2020-
+DA18|18|22051A|4|4|1|1|0|0|0||Current gear|2024-;2025-;2020-
+7E0||2201A9|0|16|1|13107|0|0|0|V|Knock sensor 1|*
+7E0||2201AA|0|16|1|13107|0|0|0|V|Knock sensor 2|*
+7E0||2201AE|0|16|1|2|0|0|0|deg|Short term knock retard|*
+7E0||21D2|56|8|1|1|-64|0|0|C|Engine oil temp|*
+DA10|10|2118|0|16|1|4|0|1|0|F|trans oil temp|2025-
+7E1||2204FE|0|8|1|1|-40|0|0|C|Automatic trans fluid temp|*
+DA18||221D07|0|8|25|1|0|0|0|rpm|trans output speed|*
+DA18||221D08|0|8|25|1|0|0|0|rpm|trans input speed|*
+DA18||221D09|0|8|1|1|-50|0|0|C|Automatic trans temp|*
+7E0||22B028|0|16|1|1|0|1|0|rpm|Torque converter slip|*
+7E0||22A001|48|16|1|1|0|1|0|rpm|Torque converter slip v2|*
+DA18|18|222102|0|16|1|4|0|0|0|rpm|Gearbox output speed|*
+DAC7|C7|220123|0|32|1|1|0|0|0|hex|Front left tire sensor id|2024-;2025-;2020-
+DAC7|C7|220124|0|32|1|1|0|0|0|hex|Front right tire sensor id|2024-;2025-;2020-
+DAC7|C7|220125|0|32|1|1|0|0|0|hex|Rear left tire sensor id|2024-;2025-;2020-
+DAC7|C7|220127|0|32|1|1|0|0|0|hex|Rear right tire sensor id|2024-;2025-;2020-
+DAC7|C7|22012F|4|1|1|1|0|0|0|noyes|Rear left tire pressure invalid?|2024-;2025-;2020-
+DAC7|C7|22012F|5|1|1|1|0|0|0|noyes|Rear right tire pressure invalid?|2024-;2025-;2020-
+DAC7|C7|22012F|6|1|1|1|0|0|0|noyes|Front right tire pressure invalid?|2024-;2025-;2020-
+#MAZDA
+7E1||221E1C|0|16|9|80|32|0|0|F|trans temp|*
+7E0||220415|0|16|1|1|0|1|0|kPa|Engine oil pressure|*
+7E0||221310|0|16|1|100|-40|0|0|C|Engine oil temp|*
+7E0||2182|0|16|1|256|-40|0|0|C|trans temp, pan|*
+7E0||2182|16|16|1|256|-40|0|0|C|trans temp, torque converter|*
+7E0||2211BD|0|16|9|80|32|0|0|F|trans temp v5|*
+7E0||2217B3|0|8|42|25|-57|0|0|F|trans temp v1|*
+7E0||221E1A|0|16|2|1|0|1|0|kPa|trans pressure, commanded|*
+7E0||221E1C|0|16|1|16|0|1|0|C|trans oil temp|*
+7E1||2211BD|0|16|9|80|32|0|0|F|trans temp v6|*
+7E1||2217B3|0|8|42|25|-57|0|0|F|trans temp v5|*
+7E0||221101|4|1|1|1|0|0|0|onoff|In gear switch|*
+700||2210A5|0|8|1|1|0|0|0||Misfire count, all|*
+700||2210A7|0|8|1|1|0|0|0||Misfire count, cylinder 1|*
+700||2210A7|8|8|1|1|0|0|0||Misfire count, cylinder 2|*
+700||2210A7|16|8|1|1|0|0|0||Misfire count, cylinder 3|*
+700||2210A7|24|8|1|1|0|0|0||Misfire count, cylinder 4|*
+7E0||220345|0|32|1|1|0|0|0||Misfire events, latest cycle|*
+7E0||220382|0|8|1|64|0|1|0||Misfire acceleration, cylinder 1|*
+7E0||220388|0|8|1|64|0|1|0||Misfire acceleration, cylinder 2|*
+7E0||22038A|0|8|1|64|0|1|0||Misfire acceleration, cylinder 3|*
+7E0||22038B|0|8|1|64|0|1|0||Misfire acceleration, cylinder 4|*
+7E0||22038C|0|8|1|64|0|1|0||Misfire acceleration, cylinder 5|*
+7E0||220398|0|8|1|64|0|1|0||Misfire acceleration, cylinder 6|*
+7E0||22053B|0|8|1|1|0|0|0||Catalyst damaging misfires, cylinder 1|*
+7E0||22053B|8|8|1|1|0|0|0||Catalyst damaging misfires, cylinder 2|*
+7E0||22053B|16|8|1|1|0|0|0||Catalyst damaging misfires, cylinder 3|*
+7E0||22053B|24|8|1|1|0|0|0||Catalyst damaging misfires, cylinder 4|*
+7E0||22053B|64|8|1|1|0|0|0||Emission failure misfires, cylinder 1|*
+7E0||22053B|72|8|1|1|0|0|0||Emission failure misfires, cylinder 2|*
+7E0||22053B|80|8|1|1|0|0|0||Emission failure misfires, cylinder 3|*
+7E0||22053B|88|8|1|1|0|0|0||Emission failure misfires, cylinder 4|*
+7E0||221746|0|8|100|284|0|0|0|deg|Knock retard|*
+700||221074|0|16|10|128|0|0|0|kPa|Engine oil pressure|*
+700||221F5C|0|8|1|1|-40|0|0|C|Engine oil temp|*
+7E0||2151|72|8|1|1|-40|0|0|C|Engine oil temp|*
+7E0||22DA01|6|1|1|1|0|0|0|onoff|Oil pressure solenoid valve, open|*
+7E0||22F45C|0|8|1|1|0|0|0||Engine oil pressure|*
+7E0||221E16|0|16|1|4096|0|0|0||Axle gear ratio, measured|*
+7E0||221E19|0|16|16|65535|0|0|0||Gear ratio, commanded|*
+7E0||221E1F|0|8|1|1|0|0|0||Gear, engaged|*
+7E1||221E12|0|8|1|1|0|0|0||Gear|*
+7E1||221E24|0|8|1|1|0|0|0||Torque converter lock-up|*
+7E0||2216F0|0|16|1|1|0|0|0||Tire revolutions per mile|*
+7E0||220403|0|16|1|1|0|0|0||Knock sensor, 1|*
+#HYUNDAI
+7E0||210D|48|16|1|1|0|0|1||Emission-relevant misfires, cylinder #1|*
+7E0||210D|64|16|1|1|0|0|1||Emission-relevant misfires, cylinder #2|*
+7E0||210D|80|16|1|1|0|0|1||Emission-relevant misfires, cylinder #3|*
+7E0||210D|96|16|1|1|0|0|1||Emission-relevant misfires, cylinder #4|*
+7E0||210D|176|16|1|1|0|0|1||Misfires total counter, cylinder #1|*
+7E0||210D|192|16|1|1|0|0|1||Misfires total counter, cylinder #2|*
+7E0||210D|208|16|1|1|0|0|1||Misfires total counter, cylinder #3|*
+7E0||210D|224|16|1|1|0|0|1||Misfires total counter, cylinder #4|*
+7E0||210D|432|16|1|1|0|0|1||Misfires total counter, all cylinders|*
+7E0||211D|32|16|1|1|0|0|1||Misfires, cylinder 1|*
+7E0||211D|48|16|1|1|0|0|1||Misfires, cylinder 2|*
+7E0||211D|64|16|1|1|0|0|1||Misfires, cylinder 3|*
+7E0||211D|80|16|1|1|0|0|1||Misfires, cylinder 4|*
+7E0||211D|160|16|1|1|0|0|1||Misfires harmful for catalyst cylinder 1|*
+7E0||211D|176|16|1|1|0|0|1||Misfires harmful for catalyst cylinder 2|*
+7E0||211D|192|16|1|1|0|0|1||Misfires harmful for catalyst cylinder 3|*
+7E0||211D|208|16|1|1|0|0|1||Misfires harmful for catalyst cylinder 4|*
+7E0||21A0|264|8|1|1|-40|0|0|C|trans fluid temp|*
+7E1||21A0|104|8|1|1|-40|0|0|C|Automatic trans fluid temp|*
+7E1||2201A0|104|8|1|1|-40|0|0|C|Automatic trans fluid temp|*
+7E1||2201A5|32|8|1|1|0|0|0||Dual-clutch trans odd shaft, gear engaged|*
+7E1||2201A5|40|8|1|1|0|0|0||Dual-clutch trans even shaft, gear engaged|*
+7E1||2201A5|48|8|1|1|-40|0|0|C|Dual-clutch trans fluid temp 1|*
+7E1||2201A5|56|8|1|1|-40|0|0|C|Dual-clutch trans fluid temp 2|*
+7E1||2201A5|192|16|19.53|10000|0|0|0|bar|Dual-clutch trans clutch 1, pressure sensor A|*
+7E1||2201A5|208|16|19.53|10000|0|0|0|bar|Dual-clutch trans clutch 2, pressure sensor B|*
+7E1||2201A5|224|16|19.53|10000|0|0|0|bar|Dual-clutch trans line pressure, sensor C|*
+770||22BC04|35|1|1|1|0|0|0|noyes|Reverse gear selected|*
+7E0||2108|128|16|1|1|0|0|1||Emission relevant misfires total, cylinder 1|*
+7E0||2108|144|16|1|1|0|0|1||Emission relevant misfires total, cylinder 2|*
+7E0||2108|160|16|1|1|0|0|1||Emission relevant misfires total, cylinder 3|*
+7E0||2108|176|16|1|1|0|0|1||Emission relevant misfires total, cylinder 4|*
+7E0||2108|192|16|1|1|0|0|1||Emission relevant misfires total, cylinder 5|*
+7E0||2108|208|16|1|1|0|0|1||Emission relevant misfires total, cylinder 6|*
+7E0||2108|256|16|1|1|0|0|1||Catalyst damaging misfires total, cylinder 1|*
+7E0||2108|272|16|1|1|0|0|1||Catalyst damaging misfires total, cylinder 2|*
+7E0||2108|288|16|1|1|0|0|1||Catalyst damaging misfires total, cylinder 3|*
+7E0||2108|304|16|1|1|0|0|1||Catalyst damaging misfires total, cylinder 4|*
+7E0||2108|320|16|1|1|0|0|1||Catalyst damaging misfires total, cylinder 5|*
+7E0||2108|336|16|1|1|0|0|1||Catalyst damaging misfires total, cylinder 6|*
+7E0||2108|384|16|1|1|0|0|1||Emission relevant misfires total all cylinders|*
+7E0||2108|400|16|1|1|0|0|1||Catalyst damaging misfires total all cylinders|*
+7E0||2108|536|8|1|1|0|0|0||Misfires current, cylinder 1|*
+7E0||2108|544|8|1|1|0|0|0||Misfires current, cylinder 2|*
+7E0||2108|552|8|1|1|0|0|0||Misfires current, cylinder 3|*
+#TOYOTA
+7E0||2137|32|16|2048|65535|-1024|0|0|deg|Knock adjust|*
+7E0||2137|48|16|2048|65535|-1024|0|0|deg|Knock feedback|*
+7E0||21B2|0|16|2048|65535|-64|0|0|deg|Knock adjust|*
+7E0||21B2|16|16|2048|65535|-64|0|0|deg|Knock feedback|*
+700||22106F|0|16|639.9|65535|0|0|0|deg|Intake vvt target angle b1|*
+700||221071|0|16|639.9|65535|0|0|0|deg|Exhaust vvt target angle b1|*
+700||221087|0|16|639.9|65535|0|0|0|deg|Intake vvt change angle bank 1|*
+700||221088|0|16|639.9|65535|0|0|0|deg|Exhaust VVT change angle, bank 1|*
+700||2210CD|0|16|1|10|-3276.8|0|0|kPa|Low fuel pressure|*
+700||22113C|0|16|10|1|0|0|0|kPa|Fuel pressure 1|*
+700||22113C|16|16|10|1|0|0|0|kPa|Fuel pressure 2|*
+700||22113C|32|16|10|1|0|0|0|kPa|Fuel pressure 3|*
+700||22113C|48|16|10|1|0|0|0|kPa|Fuel pressure 4|*
+700||2211C4|0|16|10|1|0|0|0|kPa|Fuel pressure 1|*
+700||2211C4|16|16|10|1|0|0|0|kPa|Fuel pressure 2|*
+700||2211C4|32|16|10|1|0|0|0|kPa|Fuel pressure 3|*
+700||2211C4|48|16|10|1|0|0|0|kPa|Fuel pressure 4|*
+700||2211C4|64|16|10|1|0|0|0|kPa|Fuel pressure 5|*
+700||2211C4|80|16|10|1|0|0|0|kPa|Fuel pressure 6|*
+700||221F3C|0|16|1|10|-40|0|0|C|Catalyst temp, bank 1 sensor 1|*
+700||221F3E|0|16|1|10|-40|0|0|C|Catalyst temp, bank 1 sensor 2|*
+7E0||2105|16|16|1|10|-40|0|0|C|Catalyst temp B1S1|*
+#HONDA
+DA10|10|222662|80|8|2|255|0|0|0||Knock control|*
+DA0E|0E|222666|88|8|1|1|-40|0|0|C|Engine oil temp v3|*
+DA0E|0E|222666|112|8|1|1|-40|0|0|C|Engine oil temp v4|*
+DA11|11|222662|96|16|1|10|-40|0|0|C|Catalyst temp|*
+DA26|26|226001|64|16|1|1|0|0|0|kPa|Front right tire pressure|*
+DA26|26|226001|80|16|1|1|0|0|0|kPa|Front left tire pressure|*
+DA26|26|226001|96|16|1|1|0|0|0|kPa|Rear right tire pressure|*
+DA26|26|226001|112|16|1|1|0|0|0|kPa|Rear left tire pressure|*
+DA01|01|22202C|1608|16|1|10|0|1|0|C|Engine coolant temp sensor 1|2023-
+DA01|01|22202C|1624|16|1|10|0|1|0|C|Engine coolant temp sensor 2|2023-
+DA01|01|22202C|1640|16|1|10|0|1|0|C|Engine coolant temp sensor 3|2023-
+DA01|01|22202C|1656|16|1|10|0|1|0|C|Engine coolant temp sensor 4|2023-
+#GM
+7E2||221141|0|8|1|10|0|0|0|V|Ignition voltage|*
+7E0||221C43|0|8|1|1|-40|0|0|C|Power electronics coolant temp|*
+#FORD
+7E0||22033C|0|16|5|1024|0|0|0|V|Throttle inlet pressure sensor voltage|*
+7E0||22035A|0|16|5|1023|0|0|0|V|Barometric pressure sensor voltage|*
+7E0||22035F|0|16|1|1024|0|0|0|V|O2 sensor voltage, rear|*
+7E0||22038E|0|16|1|1000|0|0|0|V|Evaporative pressure sensor voltage|*
+7E0||220460|0|16|1|1024|0|1|0|V|Charge air temp sensor voltage|*
+7E0||221279|0|16|5|1023|0|0|0|V|Intake temp sensor voltage|*
+7E0||22038F|0|16|1|64|0|1|0|C|Coolant temp|*
+#CHRYSLER
+7E0||22B028|0|16|9|640|0|1|0|rpm|Torque converter slip v1|-2024
+DA10|10|22192D|0|8|1|1|0|0|0||Gear engaged|2025-
+DA18||221D12|0|8|1|1|0|0|0||Gear|*
+DAC7|C7|22013C|0|16|1|1000|0|0|0|bar|Front left tire pressure|2025-;2020-
+DAC7|C7|22013D|0|16|1|1000|0|0|0|bar|Front right tire pressure|2025-;2020-
+DAC7|C7|22013E|0|16|1|1000|0|0|0|bar|Rear left tire pressure|2025-;2020-
+DAC7|C7|22013F|0|16|1|1000|0|0|0|bar|Rear right tire pressure|2025-;2020-
+7E0||221F59|0|16|61|12500|0|0|0|V|Wastegate position sensor|*
+DA10|10|221946|0|16|1|20|0|0|0|bar|Fuel rail pressure commanded|2025-
+DA10|10|221947|0|16|1|20|0|0|0|bar|Fuel rail pressure measured|2025-
+7E0||2202A1|24|8|29|200|0|0|0|psi|Fuel rail pressure|*
+7E0||221D89|0|16|1|1000|0|0|0||Fuel rail pressure, target|*
+7E0||22A067|8|16|2|1|0|0|0|bar|Fuel rail pressure|*
+7DA||22A020|0|8|1541|4250|0|0|0|psi|Front left tire pressure|-2016
+7DA||22A021|0|8|1541|4250|0|0|0|psi|Front right tire pressure|-2016
+7DA||22A022|0|8|1541|4250|0|0|0|psi|Rear left tire pressure|-2016
+7DA||22A023|0|8|1541|4250|0|0|0|psi|Rear right tire pressure|-2016
+DA40|40|221004|0|8|1|10|0|0|0|V|Battery voltage, BCM|*
+7E0||22059E|0|16|1|10|0|1|0|deg|Cam crank difference|-2024
+DA10|10|22195A|0|16|1|10|-3276.8|0|0|kPa|Turbo boost pressure|2025-
+7E0||21B2|32|16|1|441|0|0|0|psi|Boost pressure estimate|*
+7E0||21DA|112|16|9|20|32|0|0|F|Variable geometry turbo compressor outlet air temp|*
+#MAZDA
+7E0||2205AD|0|8|1|1|0|0|0||Knock counter, cylinder 2|*
+7E0||2205AE|0|8|1|1|0|0|0||Knock counter, cylinder 3|*
+7E0||2205AF|0|8|1|1|0|0|0||Knock counter, cylinder 4|*
+7E0||2205B0|0|8|1|1|0|0|0||Knock counter, cylinder 5|*
+7E0||2205B1|0|8|1|1|0|0|0||Knock counter, cylinder 6|*
+700||2210CD|0|16|1|10|-3276.75|0|0|kPa|Low fuel pressure sensor|*
+7E0||22041F|0|8|435|1000|0|0|0|psi|Fuel pressure, low desired|*
+7E0||220548|0|16|10000|137892|0|1|0|psi|Fuel pressure, low actual|*
+7E0||22054D|0|16|1|1024|0|1|0|V|Fuel pressure sensor voltage, low|*
+7E0||221410|0|16|1|125|0|0|0||Injector fuel pulse width|*
+7E0||2203DF|0|16|100|65535|0|0|0|%|Variable geometry turbocharger open|*
+7E0||220462|0|16|100|32768|0|0|0|%|Wastegate duty cycle|*
+7E0||221305|0|16|1|6400|0|0|0|bar|Boost, desired|*
+7E0||2216E1|0|8|25|64|0|0|0|%|Wastegate duty cycle|*
+7E0||221723|0|8|5|8|-39.4|0|0|C|Boosted air temp|*
+7E0||22F43C|0|16|1|10|-40|0|0|C|Catalyst temp|*
+7E0||220301|0|16|1|1024|0|0|0|V|Map voltage|*
+7E0||220914|0|16|1|1000|0|0|0|V|APP sensor 1 voltage|*
+7E0||220915|0|16|1|1000|0|0|0|V|APP sensor 2 voltage|*
+7E0||220917|0|16|1|1000|0|0|0|V|Throttle position 1 voltage|*
+7E0||220918|0|16|1|1000|0|0|0|V|Throttle position 2 voltage|*
+7E0||22097C|0|16|1|2048|0|0|0|V|Generator voltage desired|*
+#HYUNDAI
+7E0||2100|200|8|1|1|0|0|0||Knock detected|*
+7E0||22E00A|96|8|1|5|0|1|0|deg|Knock retard, cylinder 1|*
+7E0||22E00A|104|8|1|5|0|1|0|deg|Knock retard, cylinder 2|*
+7E0||22E00A|112|8|1|5|0|1|0|deg|Knock retard, cylinder 3|*
+7E0||22E00A|120|8|1|5|0|1|0|deg|Knock retard, cylinder 4|*
+7E0||2101|272|8|0.75|1|-48|0|0|C|Engine oil temp|*
+7E0||22E001|272|8|3|4|-48|0|0|C|Engine oil temp|*
+7E0||22E011|304|8|1|1|-40|0|0|C|Calculated oil temp|*
+7E0||2221A0|16|8|9|5|-40|0|0|F|trans fluid temp|*
+7E0||21A0|104|16|1|4|-512|0|0|rpm|Torque converter slip|*
+7E0||22ED05|176|8|1|1|0|0|0||Gear|*
+7E1||21A1|32|8|1|1|0|0|0||Current gear|*
+7E1||2201A0|128|16|1|4|-512|0|0|rpm|Torque converter slip|*
+7E1||2201A0|160|8|1|1|0|0|0||Gear selector|*
+7E1||2201A0|168|8|1|1|0|0|0||Current gear|*
+7E1||2201A0|176|8|1|1|0|0|0||Commanded gear|*
+7E1||2201A4|188|4|1|1|0|0|0||Current gear|*
+7E1||2201A4|196|4|1|1|0|0|0||Next gear|*
+7E0||2119|104|8|0.75|1|-191.25|0|0|deg|Ignition retard due to knock control 1|*
+7E0||2119|112|8|0.75|1|-191.25|0|0|deg|Ignition retard due to knock control 2|*
+7E0||2119|120|8|0.75|1|-191.25|0|0|deg|Ignition retard due to knock control 3|*
+7E0||2119|128|8|0.75|1|-191.25|0|0|deg|Ignition retard due to knock control 4|*`;
+const OEM_DB = {};
+(function parseOem() {
+  let prof = null;
+  for (const line of OEM_RAW.split("\n")) {
+    if (!line) continue;
+    if (line[0] === "#") { prof = line.slice(1); OEM_DB[prof] = OEM_DB[prof] || []; continue; }
+    const f = line.split("|");
+    OEM_DB[prof].push({ hdr: f[0], rax: f[1], req: f[2], bix: +f[3], len: +f[4], mul: +f[5], div: +f[6], add: +f[7],
+      sign: f[8] === "1", lsb: f[9] === "1", unit: f[10], name: f[11], yrs: f[12] });
+  }
+})();
+function yearOk(yrs, year) {
+  if (!yrs || yrs === "*" || !year) return true;
+  return yrs.split(";").some((r) => {
+    if (r.includes("/")) return r.split("/").map(Number).includes(year);
+    const [a, b] = r.split("-");
+    return (!a || year >= +a) && (!b || year <= +b);
+  });
+}
+function extractBits(bytes, bix, len, lsb, sign) {
+  if (bix + len > bytes.length * 8) return null;
+  let v = 0;
+  if (lsb && len % 8 === 0 && bix % 8 === 0) {
+    for (let i = len / 8 - 1; i >= 0; i--) v = v * 256 + bytes[bix / 8 + i];
+  } else {
+    for (let i = 0; i < len; i++) { const bit = bix + i; v = v * 2 + ((bytes[bit >> 3] >> (7 - (bit & 7))) & 1); }
+  }
+  if (sign && v >= 2 ** (len - 1)) v -= 2 ** len;
+  return v;
+}
+function fmtOem(sig, v) {
+  const x = v * sig.mul / sig.div + sig.add;
+  const r1 = (n) => (Math.abs(n) >= 100 ? Math.round(n) : Math.round(n * 10) / 10);
+  switch (sig.unit) {
+    case "C": return x <= -39.5 || x > 300 ? null : degF(x) + " °F";
+    case "F": return x <= -39.5 || x > 570 ? null : Math.round(x) + " °F";
+    case "kPa": return r1(x * 0.145038) + " psi";
+    case "bar": return r1(x * 14.5038) + " psi";
+    case "psi": return r1(x) + " psi";
+    case "kph": return Math.round(x * 0.621371) + " mph";
+    case "Nm": return Math.round(x * 0.737562) + " lb-ft";
+    case "onoff": case "onoff2": return x ? "ON" : "OFF";
+    case "yesno": case "noyes": return x ? "YES" : "NO";
+    case "hex": return v.toString(16).toUpperCase();
+    case "V": return x.toFixed(2) + " V";
+    case "%": return r1(x) + "%";
+    case "deg": return r1(x) + "°";
+    case "": return String(r1(x));
+    default: return r1(x) + " " + sig.unit;
+  }
+}
+function cleanName(n) {
+  n = n.replace(/,?\s*(v\.?\s?\d+|var\.?\s?\d+|variation \d+)\s*$/i, "").replace(/,\s*$/, "").trim();
+  return n.charAt(0).toUpperCase() + n.slice(1);
+}
+function oemGroup(name) {
+  if (/misfire/i.test(name)) return "Misfire counters";
+  if (/tire/i.test(name)) return "Tire pressure (TPMS)";
+  if (/trans|gear|cvt|torque converter|lock.?up|clutch|shaft|gearbox|transaxle|pulley|awd/i.test(name)) return "Transmission";
+  if (/fuel|inject|rail|boost|turbo|wastegate|throttle|air|lambda|map |egr|purge|evap/i.test(name)) return "Fuel, air & boost";
+  if (/volt|battery|generator/i.test(name)) return "Electrical";
+  return "Engine, oil & knock";
+}
+const GROUP_ORDER = ["Transmission", "Engine, oil & knock", "Misfire counters", "Fuel, air & boost", "Tire pressure (TPMS)", "Electrical"];
+
+let oemCmds = [], oemRR = 0, oemFound = 0;
 function profile() { const s = $("oemSel").value; return s === "AUTO" ? (ARGS.make || "GENERIC") : s; }
 function buildEnhanced() {
-  ENH_TILES.forEach(([id]) => setTile(id, "--"));
-  const list = isCan ? (ENH[profile()] || []) : [];
-  enh = list
-    .filter(([tile, , mode]) => !(mode === "ifEmpty" && active.some((p) => PIDS[p].tile === tile)))
-    .map(([tile, cands]) => ({ tile, cands, idx: 0, ok: false, miss: 0 }));
-  const used = new Set(enh.map((e) => e.tile));
-  ENH_TILES.forEach(([id]) => { if (!used.has(id)) setTile(id, "N/A"); });
+  const year = parseInt(ARGS.year, 10) || 0;
+  const sigs = isCan ? (OEM_DB[profile()] || []).filter((g) => yearOk(g.yrs, year)) : [];
+  const byCmd = new Map();
+  sigs.forEach((g) => {
+    const k = g.hdr + "|" + g.rax + "|" + g.req;
+    if (!byCmd.has(k)) byCmd.set(k, { hdr: g.hdr, rax: g.rax, req: g.req, sigs: [], state: "new" });
+    byCmd.get(k).sigs.push(g);
+  });
+  oemCmds = [...byCmd.values()];
+  // Same request, same quantity at different byte offsets = layouts for different models.
+  // Keep only the most widely used layout so we never show two conflicting values.
+  oemCmds.forEach((c) => {
+    const seen = new Set();
+    c.sigs = c.sigs.filter((g) => { g.label = cleanName(g.name); if (seen.has(g.label)) return false; seen.add(g.label); return true; });
+  });
+  oemRR = 0; oemFound = 0;
+  $("enhBox").innerHTML = '<div class="box">' + (oemCmds.length
+    ? `Checking ${oemCmds.length} factory data requests for ${esc(profile())}…`
+    : (isCan ? "No OEM definitions for this make yet — pick a profile above if Auto-Detect is wrong." : "OEM data needs a CAN vehicle (most 2008+).")) + "</div>";
+  updateEnhNote();
 }
-async function readDid(hdr, req) {
-  await setHeader(hdr);
-  const raw = await sendCmd(req, 600);
+function updateEnhNote() {
+  const checked = oemCmds.filter((c) => c.state !== "new").length;
+  $("enhNote").textContent = oemCmds.length
+    ? `${profile()} · checked ${checked}/${oemCmds.length} requests · ${oemFound} readings found`
+    : "";
+}
+function oemTile(sig) {
+  if (sig.tile) return sig.tile;
+  const box = $("enhBox");
+  if (box.firstElementChild && box.firstElementChild.classList.contains("box")) box.innerHTML = "";
+  const grp = oemGroup(sig.name);
+  let sec = document.querySelector(`[data-grp="${grp}"]`);
+  if (!sec) {
+    sec = document.createElement("div");
+    sec.dataset.grp = grp;
+    sec.innerHTML = `<div class="grp">${esc(grp)}</div><div class="grid" style="margin-bottom:10px"></div>`;
+    const after = [...box.children].find((c) => GROUP_ORDER.indexOf(c.dataset.grp) > GROUP_ORDER.indexOf(grp));
+    box.insertBefore(sec, after || null);
+  }
+  const id = "oem" + (oemTile.n = (oemTile.n || 0) + 1);
+  const label = sig.label || cleanName(sig.name);
+  LABEL[id] = `${label} [OEM ${sig.hdr} ${sig.req}]`;
+  sec.lastElementChild.insertAdjacentHTML("beforeend",
+    `<div class="tile" id="t_${id}" title="${esc(sig.hdr + " " + sig.req)}"><div class="l">${esc(label)}</div><div class="v" id="v_${id}" style="color:var(--p)">--</div></div>`);
+  sig.tile = id; oemFound++;
+  return id;
+}
+async function readOem(cmd) {
+  await setAddr(cmd.hdr, cmd.rax);
+  const raw = await sendCmd(cmd.req, 500);
   if (isErr(raw)) return null;
-  const pre = respCode(req.slice(0, 2)) + req.slice(2);
+  const pre = respCode(cmd.req.slice(0, 2)) + cmd.req.slice(2);
   for (const m of messages(raw)) if (m.startsWith(pre)) return bytesOf(m.slice(pre.length));
   return null;
 }
 async function pollEnhanced() {
-  const jobs = enh.filter((e) => e.idx < e.cands.length)
-    .sort((a, b) => a.cands[a.idx][0].localeCompare(b.cands[b.idx][0]));   // group by module = fewer header switches
-  for (const e of jobs) {
-    const [hdr, req, fn] = e.cands[e.idx];
-    const b = await readDid(hdr, req);
-    let v = null; try { v = b ? fn(b) : null; } catch (_) {}
-    if (v != null) { setTile(e.tile, v); e.ok = true; e.miss = 0; continue; }
-    e.miss++;
-    if (!e.ok || e.miss >= 3) {
-      e.idx++; e.ok = false; e.miss = 0;
-      if (e.idx >= e.cands.length) setTile(e.tile, "N/A");
+  const fresh = oemCmds.filter((c) => c.state === "new").slice(0, 6);      // discovery: probe a few new requests
+  const live = oemCmds.filter((c) => c.state === "live");
+  const due = [];
+  for (let i = 0; i < Math.min(4, live.length); i++) due.push(live[(oemRR + i) % live.length]);
+  oemRR += 4;
+  const jobs = [...fresh, ...due].sort((a, b) => (a.hdr + a.rax).localeCompare(b.hdr + b.rax));   // fewer module switches
+  for (const c of jobs) {
+    const bytes = await readOem(c);
+    let any = false;
+    if (bytes) for (const g of c.sigs) {
+      const v = extractBits(bytes, g.bix, g.len, g.lsb, g.sign);
+      const text = v == null ? null : fmtOem(g, v);
+      if (text == null) continue;
+      any = true;
+      setTile(oemTile(g), text);
     }
+    if (c.state === "new") { c.state = any ? "live" : "dead"; c.miss = 0; }
+    else if (any) c.miss = 0;
+    else if (++c.miss >= 3) c.state = "dead";
   }
-  await setHeader(baseHeader);
+  await setAddr(baseHeader, "");
+  updateEnhNote();
+  if (oemCmds.length && !oemFound && oemCmds.every((c) => c.state !== "new"))
+    $("enhBox").innerHTML = '<div class="box">This vehicle did not answer any of the stored factory requests for this make.</div>';
 }
 
 // ===================== DTCs, VIN, Readiness, Mode $06 =====================
@@ -950,7 +1520,8 @@ async function liveLoop(token) {
       const m = (r || "").match(/(\d+\.\d+)/);
       if (m) setTile("volt", parseFloat(m[1]).toFixed(1) + " V", parseFloat(m[1]));
     }
-    if (enh.length && cycle % 12 === 0) await txn(pollEnhanced);
+    const discovering = oemCmds.some((c) => c.state === "new");
+    if (oemCmds.length && cycle % (discovering ? 2 : 5) === 0) await txn(pollEnhanced);
     if (cycle % 10 === 0) {
       const secs = (performance.now() - t0) / 1000;
       $("rate").textContent = `· ${(cycle / secs).toFixed(1)} refresh/s${batchOK ? " · multi-PID" : ""}`;
@@ -1032,6 +1603,7 @@ async function connectGatt() {
 }
 
 async function initVehicle() {
+  isCan = false; curCra = "";
   log("Resetting adapter…");
   await sendCmd("ATZ", 2000);
   for (const c of ["ATE0", "ATL0", "ATS0", "ATH0", "ATAT1"]) await sendCmd(c, 500);
@@ -1049,6 +1621,7 @@ async function initVehicle() {
 
   const dpn = (await sendCmd("ATDPN", 500)).replace(/[\s>]/g, "").toUpperCase();
   isCan = /^A?[6-9]$/.test(dpn);
+  baseProto = curProto = dpn.slice(-1); curCra = "";
   batchOK = false; fastOK = true; baseHeader = "7DF";
 
   if (isCan) {   // talk to the engine computer directly: no duplicate replies from other modules, faster
@@ -1236,7 +1809,8 @@ with tab2:
   context_bar()
   st.caption("Works in Chrome (Android, Windows, macOS, ChromeOS). Connecting reads the VIN and codes and fills them"
              " into the other tabs automatically. The Bluetooth link stays up while you use the rest of the app.")
-  event = _ble_dashboard(vehicle=ss.vehicle_info, make=make_profile(), ai=ss.ble_ai, key="ble", default=None)
+  event = _ble_dashboard(vehicle=ss.vehicle_info, make=make_profile(),
+                         year=ss.vehicle_details.get("Model Year", ""), ai=ss.ble_ai, key="ble", default=None)
   if isinstance(event, dict) and event.get("id") and event["id"] != ss.ble_last_event:
     ss.ble_last_event = event["id"]
     handle_ble_event(event)
