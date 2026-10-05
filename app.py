@@ -497,6 +497,18 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
   .mon .l { font-size:.74rem; color:var(--muted); } .mon .v { font-size:.88rem; font-weight:700; }
   #aiBox { border-color:var(--o); color:#fff; font-size:.9rem; line-height:1.45; min-height:80px; }
   #aiBox h4 { color:var(--g); margin:8px 0 4px; }
+  .tile { cursor:pointer; user-select:none; }
+  .tile:hover { border-color:var(--muted); }
+  .tile.sel { outline:2px solid var(--w); outline-offset:-2px; }
+  #graphs { margin-bottom:12px; }
+  .gbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px; font-size:.8rem; color:var(--muted); }
+  .gbar button { padding:4px 10px; font-size:.78rem; background:var(--card); color:var(--w); border:1px solid var(--line); }
+  .gbar button.on { border-color:var(--g); color:var(--g); }
+  .chart { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:6px 8px 4px; margin-bottom:8px; }
+  .chart .hd { display:flex; justify-content:space-between; align-items:baseline; gap:8px; font-size:.8rem; color:var(--muted); }
+  .chart .hd b { color:var(--w); font-size:.95rem; }
+  .chart .hd .x { cursor:pointer; padding:0 4px; color:var(--muted); }
+  .chart canvas { width:100%; height:120px; display:block; touch-action:pan-y; }
   .note { font-size:.72rem; color:var(--s); font-weight:400; }
 </style>
 </head>
@@ -529,6 +541,10 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
   <div id="clearWarn" class="box" style="display:none;border-color:var(--o);color:var(--o);font-weight:700"></div>
 
   <h3 style="color:var(--g)">📈 LIVE DATA (MODE 01) <span id="rate" class="note"></span></h3>
+  <div id="graphs">
+    <div class="gbar" id="gbar">📈 Tap any reading to graph it live (up to 4 at once).</div>
+    <div id="charts"></div>
+  </div>
   <div id="liveGrid" class="grid"></div>
 
   <h3 style="color:var(--o)">🕓 HISTORY COUNTERS <span class="note">read every ~30 s; spot cars with freshly cleared codes</span></h3>
@@ -612,11 +628,117 @@ const shown = {};   // tile id -> display text
 const num = {};     // tile id -> numeric value (for alerts)
 function setTile(id, text, n) {
   shown[id] = text;
+  recordHist(id, text);
   if (n !== undefined) num[id] = n;
   const v = $("v_" + id); if (!v) return;
   v.textContent = text;
   $("t_" + id).classList.toggle("na", text === "N/A");
 }
+
+// ===================== Live graphs =====================
+// Every numeric reading is recorded (last ~10 min), so a graph opened later already has history.
+const HIST = {}, HIST_MAX = 4000, MAX_CHARTS = 4;
+let graphSel = [], graphWin = 60, frozenAt = null, hoverT = null;
+function toNumber(text) {
+  const t = String(text).replace(/,/g, "");
+  if (/^(ON|YES|Locked)$/i.test(t)) return 1;
+  if (/^(OFF|NO|Unlocked)$/i.test(t)) return 0;
+  const mm = t.match(/^(\d+):(\d\d)$/);              // run time m:ss -> minutes
+  if (mm) return +mm[1] + mm[2] / 60;
+  const m = t.match(/-?\d+(\.\d+)?/);
+  return m ? parseFloat(m[0]) : null;
+}
+function recordHist(id, text) {
+  if (text === "--" || text === "N/A") return;
+  const v = toNumber(text);
+  if (v == null || !isFinite(v)) return;
+  const h = HIST[id] || (HIST[id] = []);
+  h.push([performance.now() / 1000, v]);
+  if (h.length > HIST_MAX) h.splice(0, h.length - HIST_MAX);
+}
+function unitOf(id) { const t = shown[id] || ""; const u = t.replace(/,/g, "").replace(/^[^0-9-]*-?[0-9.]+\s*/, "").trim(); return u.length <= 8 ? u : ""; }
+function fmtNum(v) { const a = Math.abs(v); return a >= 100 ? Math.round(v).toString() : a >= 10 ? v.toFixed(1) : v.toFixed(2); }
+function renderGraphBar() {
+  const wins = [[30, "30 s"], [60, "1 min"], [180, "3 min"], [600, "10 min"]];
+  $("gbar").innerHTML = graphSel.length
+    ? wins.map(([w, l]) => `<button data-win="${w}" class="${w === graphWin ? "on" : ""}">${l}</button>`).join("") +
+      `<button id="gFreeze" class="${frozenAt ? "on" : ""}">${frozenAt ? "▶ Resume" : "⏸ Freeze"}</button>` +
+      `<button id="gClear">Clear graphs</button><span>Tap a reading to add or remove it.</span>`
+    : "📈 Tap any reading to graph it live (up to 4 at once).";
+}
+function toggleGraph(id) {
+  const i = graphSel.indexOf(id);
+  if (i >= 0) graphSel.splice(i, 1);
+  else { if (graphSel.length >= MAX_CHARTS) graphSel.shift(); graphSel.push(id); }
+  document.querySelectorAll(".tile.sel").forEach((t) => t.classList.remove("sel"));
+  graphSel.forEach((g) => { const t = $("t_" + g); if (t) t.classList.add("sel"); });
+  $("charts").innerHTML = graphSel.map((g) => `<div class="chart" data-id="${g}"><div class="hd"><span><b>${esc(LABEL[g] || g)}</b> <span class="cur"></span></span><span><span class="rng"></span> <span class="x" title="Remove">✕</span></span></div><canvas></canvas></div>`).join("");
+  renderGraphBar();
+  drawCharts();
+}
+document.addEventListener("click", (e) => {
+  const tile = e.target.closest(".tile");
+  if (tile && tile.id.startsWith("t_")) { toggleGraph(tile.id.slice(2)); return; }
+  const x = e.target.closest(".chart .x");
+  if (x) { toggleGraph(x.closest(".chart").dataset.id); return; }
+  const wb = e.target.closest("[data-win]");
+  if (wb) { graphWin = +wb.dataset.win; renderGraphBar(); drawCharts(); return; }
+  if (e.target.id === "gFreeze") { frozenAt = frozenAt ? null : performance.now() / 1000; renderGraphBar(); drawCharts(); return; }
+  if (e.target.id === "gClear") { graphSel.slice().forEach(toggleGraph); }
+});
+function pointerT(ev, canvas) {
+  const r = canvas.getBoundingClientRect(), pt = ev.touches ? ev.touches[0] : ev;
+  const f = Math.min(1, Math.max(0, (pt.clientX - r.left - 44) / (r.width - 52)));
+  const now = frozenAt || performance.now() / 1000;
+  return now - graphWin + f * graphWin;
+}
+["mousemove", "touchmove", "touchstart"].forEach((evn) => document.addEventListener(evn, (ev) => {
+  const c = ev.target.closest && ev.target.closest(".chart canvas");
+  hoverT = c ? pointerT(ev, c) : null;
+  if (c) drawCharts();
+}, { passive: true }));
+document.addEventListener("mouseleave", () => { hoverT = null; });
+function drawCharts() {
+  const now = frozenAt || performance.now() / 1000, t0 = now - graphWin;
+  const css = getComputedStyle(document.documentElement);
+  const gridC = css.getPropertyValue("--line").trim(), textC = css.getPropertyValue("--muted").trim();
+  document.querySelectorAll("#charts .chart").forEach((box) => {
+    const id = box.dataset.id, cv = box.querySelector("canvas");
+    const all = HIST[id] || [], pts = all.filter((p) => p[0] >= t0 && p[0] <= now);
+    const color = getComputedStyle($("v_" + id) || box).color;
+    const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+    if (cv.width !== Math.round(W * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+    const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+    const L = 44, R = 8, T = 6, B = 16, pw = W - L - R, ph = H - T - B;
+    const u = unitOf(id);
+    box.querySelector(".cur").textContent = shown[id] || "";
+    if (!pts.length) { g.fillStyle = textC; g.font = "12px sans-serif"; g.fillText("Waiting for data…", L, T + ph / 2); box.querySelector(".rng").textContent = ""; return; }
+    let lo = Math.min(...pts.map((p) => p[1])), hi = Math.max(...pts.map((p) => p[1]));
+    box.querySelector(".rng").textContent = `min ${fmtNum(lo)} · max ${fmtNum(hi)}${u ? " " + u : ""}`;
+    if (hi - lo < 1e-9) { lo -= 1; hi += 1; } else { const pad = (hi - lo) * 0.08; lo -= pad; hi += pad; }
+    const X = (t) => L + (t - t0) / graphWin * pw, Y = (v) => T + (1 - (v - lo) / (hi - lo)) * ph;
+    // recessive grid + y labels
+    g.strokeStyle = gridC; g.lineWidth = 1; g.fillStyle = textC; g.font = "10px sans-serif"; g.textAlign = "right"; g.textBaseline = "middle";
+    for (let k = 0; k <= 2; k++) { const v = lo + (hi - lo) * k / 2, y = Y(v); g.beginPath(); g.moveTo(L, y); g.lineTo(L + pw, y); g.stroke(); g.fillText(fmtNum(v), L - 4, y); }
+    g.textAlign = "left"; g.textBaseline = "alphabetic"; g.fillText(`-${graphWin >= 60 ? graphWin / 60 + " min" : graphWin + " s"}`, L, H - 3);
+    g.textAlign = "right"; g.fillText(frozenAt ? "frozen" : "now", L + pw, H - 3);
+    // line
+    g.strokeStyle = color; g.lineWidth = 2; g.lineJoin = "round"; g.beginPath();
+    pts.forEach((p, i) => (i ? g.lineTo(X(p[0]), Y(p[1])) : g.moveTo(X(p[0]), Y(p[1])))); g.stroke();
+    const last = pts[pts.length - 1];
+    g.fillStyle = color; g.beginPath(); g.arc(X(last[0]), Y(last[1]), 4, 0, 7); g.fill();
+    // synced crosshair + readout
+    if (hoverT != null && hoverT >= t0) {
+      let best = pts[0]; for (const p of pts) if (Math.abs(p[0] - hoverT) < Math.abs(best[0] - hoverT)) best = p;
+      const x = X(best[0]);
+      g.strokeStyle = textC; g.lineWidth = 1; g.beginPath(); g.moveTo(x, T); g.lineTo(x, T + ph); g.stroke();
+      g.fillStyle = color; g.beginPath(); g.arc(x, Y(best[1]), 4, 0, 7); g.fill();
+      const ago = Math.max(0, now - best[0]).toFixed(1);
+      box.querySelector(".cur").textContent = `${fmtNum(best[1])}${u ? " " + u : ""} (${ago}s ago)`;
+    }
+  });
+}
+setInterval(() => { if (graphSel.length && !frozenAt) drawCharts(); }, 250);
 
 // ===================== ELM327 transport =====================
 const NORDIC = ["6e400001-b5a3-f393-e0a9-e50e24dcca9e", "6e400002-b5a3-f393-e0a9-e50e24dcca9e", "6e400003-b5a3-f393-e0a9-e50e24dcca9e"];
