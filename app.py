@@ -487,7 +487,7 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
   .tile { background:var(--card); border:1px solid var(--line); padding:8px 4px; border-radius:6px; text-align:center; }
   .tile .l { font-size:.68rem; color:var(--muted); text-transform:uppercase; }
   .tile .v { font-size:1.12rem; font-weight:700; }
-  .tile.na { opacity:.4; }
+  .tile.na { display:none; }   /* hide PIDs this vehicle does not support */
   .enh .tile { border-color:var(--p); }
   .grp { font-size:.75rem; color:var(--p); font-weight:700; text-transform:uppercase; margin:6px 0 4px; }
   .box { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:10px; margin-bottom:16px; font-size:.85rem; color:var(--muted); }
@@ -526,9 +526,13 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
 
   <h3 style="color:var(--r)">🚨 FAULT CODES</h3>
   <div id="dtcBox" class="box">Codes are read automatically on connect.</div>
+  <div id="clearWarn" class="box" style="display:none;border-color:var(--o);color:var(--o);font-weight:700"></div>
 
   <h3 style="color:var(--g)">📈 LIVE DATA (MODE 01) <span id="rate" class="note"></span></h3>
   <div id="liveGrid" class="grid"></div>
+
+  <h3 style="color:var(--o)">🕓 HISTORY COUNTERS <span class="note">read every ~30 s; spot cars with freshly cleared codes</span></h3>
+  <div id="histGrid" class="grid"></div>
 
   <h3 style="color:var(--p)">🏭 OEM ENHANCED DATA <span id="enhNote" class="note">connect to scan this vehicle's modules</span></h3>
   <div id="enhBox" class="enh"><div class="box">Factory-level readings appear here as each module answers.</div></div>
@@ -582,7 +586,17 @@ const LIVE_TILES = [
   ["frp", "Fuel Rail Press", "t"], ["fli", "Fuel Level", "t"], ["stft1", "STFT B1", "y"], ["ltft1", "LTFT B1", "y"],
   ["stft2", "STFT B2", "y"], ["ltft2", "LTFT B2", "y"], ["timing", "Ign Timing", "p"], ["o2b1s1", "O2 B1S1", "v"],
   ["o2b1s2", "O2 B1S2", "v"], ["o2b2s1", "O2 B2S1", "v"], ["o2b2s2", "O2 B2S2", "v"], ["evap", "EVAP Purge", "w"],
-  ["volt", "Battery Volt", "w"],
+  ["volt", "Battery Volt", "w"], ["fss", "Fuel System", "g"], ["absload", "Absolute Load", "b"],
+  ["cmdlam", "Commanded λ", "v"], ["fuelrate", "Fuel Rate", "t"], ["cmv", "ECM Voltage", "w"],
+  ["cat1", "Cat Temp B1", "o"], ["cat2", "Cat Temp B2", "o"], ["egrcmd", "EGR Commanded", "w"],
+  ["egrerr", "EGR Error", "w"], ["evapvp", "EVAP Vapor Press", "w"], ["eth", "Ethanol", "t"],
+  ["frpabs", "Fuel Rail (abs)", "t"], ["boost", "Boost (abs)", "g"], ["egt", "EGT B1 S1", "o"],
+  ["runtime", "Run Time", "s"],
+];
+const HIST_TILES = [
+  ["clrDist", "Miles Since Codes Cleared", "o"], ["clrTime", "Run Time Since Cleared", "o"],
+  ["warmups", "Warm-ups Since Cleared", "o"], ["milDist", "Miles With MIL On", "r"],
+  ["milTime", "Run Time With MIL On", "r"], ["odo", "Odometer", "w"],
 ];
 const LABEL = {};
 function makeTiles(gridId, tiles, color) {
@@ -592,6 +606,7 @@ function makeTiles(gridId, tiles, color) {
   }).join("");
 }
 makeTiles("liveGrid", LIVE_TILES);
+makeTiles("histGrid", HIST_TILES);
 
 const shown = {};   // tile id -> display text
 const num = {};     // tile id -> numeric value (for alerts)
@@ -736,8 +751,33 @@ const PIDS = {
   "2F": { tile: "fli", tier: 3, len: 1, fn: pct },
   "2E": { tile: "evap", tier: 3, len: 1, fn: pct },
   "33": { tile: "baro", tier: 3, len: 1, fn: (b) => (b[0] * 0.2953).toFixed(1) + " inHg" },
+  // --- extra SAE J1979 PIDs ---
+  "03": { tile: "fss", tier: 2, len: 2, fn: (b) => { const f = (x) => ({ 1: "OL cold", 2: "CL", 4: "OL load/decel", 8: "OL fault", 16: "CL O2 fault" }[x] || (x ? "0x" + x.toString(16) : ""));
+          return f(b[0]) + (b[1] ? " / " + f(b[1]) : ""); } },
+  "43": { tile: "absload", tier: 2, len: 2, fn: (b) => Math.round(u16(b) * 100 / 255) + "%" },
+  "44": { tile: "cmdlam", tier: 2, len: 2, fn: (b) => "λ " + (u16(b) / 32768).toFixed(3) },
+  "5E": { tile: "fuelrate", tier: 2, len: 2, fn: (b) => (u16(b) / 20 * 0.264172).toFixed(2) + " gal/h" },
+  "42": { tile: "cmv", tier: 3, len: 2, fn: (b) => (u16(b) / 1000).toFixed(2) + " V" },
+  "3C": { tile: "cat1", tier: 3, len: 2, fn: (b) => degF(u16(b) / 10 - 40) + " °F" },
+  "3D": { tile: "cat2", tier: 3, len: 2, fn: (b) => degF(u16(b) / 10 - 40) + " °F" },
+  "2C": { tile: "egrcmd", tier: 3, len: 1, fn: pct },
+  "2D": { tile: "egrerr", tier: 3, len: 1, fn: trim },
+  "32": { tile: "evapvp", tier: 3, len: 2, fn: (b) => (s16(u16(b)) / 4 * 0.0040146).toFixed(2) + " inH2O" },
+  "52": { tile: "eth", tier: 3, len: 1, fn: pct },
+  "59": { tile: "frpabs", tier: 3, len: 2, fn: (b) => Math.round(u16(b) * 10 * 0.145038) + " PSI" },
+  "70": { tile: "boost", tier: 3, len: 10, fn: (b) => (b[0] & 0x02) ? (u16(b, 3) * 0.03125 * 0.145038).toFixed(1) + " PSI" : null },
+  "78": { tile: "egt", tier: 3, len: 9, fn: (b) => (b[0] & 0x01) ? degF(u16(b, 1) / 10 - 40) + " °F" : null },
+  "1F": { tile: "runtime", tier: 3, len: 2, fn: (b) => mmss(u16(b)) },
+  "31": { tile: "clrDist", tier: 4, len: 2, fn: (b) => Math.round(u16(b) * 0.621371) + " mi", n: (b) => u16(b) * 0.621371 },
+  "4E": { tile: "clrTime", tier: 4, len: 2, fn: (b) => hrsMin(u16(b)) },
+  "30": { tile: "warmups", tier: 4, len: 1, fn: (b) => String(b[0]), n: (b) => b[0] },
+  "21": { tile: "milDist", tier: 4, len: 2, fn: (b) => Math.round(u16(b) * 0.621371) + " mi" },
+  "4D": { tile: "milTime", tier: 4, len: 2, fn: (b) => hrsMin(u16(b)) },
+  "A6": { tile: "odo", tier: 4, len: 4, fn: (b) => Math.round((((b[0] * 256 + b[1]) * 256 + b[2]) * 256 + b[3]) / 10 * 0.621371).toLocaleString() + " mi" },
 };
-const TIER_EVERY = { 1: 1, 2: 2, 3: 6 };
+const TIER_EVERY = { 1: 1, 2: 2, 3: 6, 4: 30 };
+const mmss = (sec) => Math.floor(sec / 60) + ":" + String(sec % 60).padStart(2, "0");
+const hrsMin = (min) => (min >= 60 ? Math.floor(min / 60) + " h " : "") + (min % 60) + " min";
 let active = [];   // PIDs actually polled, chosen from what the ECM says it supports
 
 function choosePids(sup) {
@@ -747,6 +787,9 @@ function choosePids(sup) {
     rpm: ["0C"], load: ["04"], tps: ["11"], spd: ["0D"], stft1: ["06"], ltft1: ["07"], stft2: ["08"], ltft2: ["09"],
     timing: ["0E"], maf: ["10"], map: ["0B"], app: ["49"], ect: ["05"], iat: ["0F"], aat: ["46"], eot: ["5C"],
     frp: ["23", "0A"], fli: ["2F"], evap: ["2E"], baro: ["33"],
+    fss: ["03"], absload: ["43"], cmdlam: ["44"], fuelrate: ["5E"], cmv: ["42"], cat1: ["3C"], cat2: ["3D"],
+    egrcmd: ["2C"], egrerr: ["2D"], evapvp: ["32"], eth: ["52"], frpabs: ["59"], boost: ["70"], egt: ["78"],
+    runtime: ["1F"], clrDist: ["31"], clrTime: ["4E"], warmups: ["30"], milDist: ["21"], milTime: ["4D"], odo: ["A6"],
     o2b1s1: ["24", "34", "14"], o2b1s2: ["15"],
     o2b2s1: alt1D ? ["26", "36", "16"] : ["28", "38", "18"], o2b2s2: alt1D ? ["17"] : ["19"],
   };
@@ -758,8 +801,21 @@ function choosePids(sup) {
 }
 function applyPid(pid, b) {
   const d = PIDS[pid]; if (!d || b.length < d.len) return;
-  setTile(d.tile, d.fn(b), d.n ? d.n(b) : undefined);
+  const text = d.fn(b);
+  if (text == null) return;
+  setTile(d.tile, text, d.n ? d.n(b) : undefined);
+  if (pid === "31" || pid === "30") checkCleared();
 }
+// Warn when codes were cleared recently (common on cars that come in "with no codes")
+function checkCleared() {
+  const mi = num.clrDist, wu = num.warmups, el = $("clearWarn");
+  const recent = (mi !== undefined && mi < 50) || (wu !== undefined && wu < 5);
+  el.style.display = recent ? "block" : "none";
+  if (recent) el.textContent = `⚠️ Codes were cleared recently: ${mi !== undefined ? Math.round(mi) + " miles" : ""}` +
+    `${mi !== undefined && wu !== undefined ? " / " : ""}${wu !== undefined ? wu + " warm-up cycles" : ""} ago. ` +
+    "Check readiness monitors; codes may not have had time to come back.";
+}
+
 function parse01(raw, wanted) {
   const got = {};
   for (const m of messages(raw)) {
@@ -786,7 +842,8 @@ async function pollPids(pids) {
     return;
   }
   for (const p of pids) {
-    let raw = await sendCmd("01" + p + (isCan && fastOK ? "1" : ""), 800);
+    const fast = isCan && fastOK && PIDS[p].len <= 5;   // single-frame replies only
+    let raw = await sendCmd("01" + p + (fast ? "1" : ""), 800);
     if (isCan && fastOK && /\?/.test(raw)) { fastOK = false; raw = await sendCmd("01" + p, 800); }
     const got = parse01(raw, [p]);
     if (got[p]) applyPid(p, got[p]);
@@ -1701,7 +1758,7 @@ async function initVehicle() {
   }
 
   log("Reading supported PIDs…");
-  const sup = await supported("01", ["00", "20", "40"]);
+  const sup = await supported("01", ["00", "20", "40", "60", "80", "A0"]);
   choosePids(sup);
 
   if (isCan && active.length >= 2) {   // can this ECU answer several PIDs in one request?
