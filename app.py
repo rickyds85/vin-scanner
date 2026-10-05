@@ -58,7 +58,7 @@ ss = st.session_state
 DEFAULTS = {
     "customer_name": "", "customer_phone": "", "customer_address": "",
     "vin_input": "", "active_vin": "", "vehicle_info": "", "vehicle_make": "",
-    "vehicle_details": {}, "vin_error": "", "active_dtc": "",
+    "vehicle_details": {}, "vin_error": "", "active_dtc": "", "sel_codes": [], "manual_dtc": "", "scan_data": {},
     "chat_history": [], "dtc_result": None, "scope_result": None,
     "ble_ai": None, "ble_last_event": None, "ble_dtcs": {},
 }
@@ -71,6 +71,20 @@ for _k, _v in ss.pop("_pending", {}).items():
     ss[_k] = _v
 if _toast := ss.pop("_toast", None):
     st.toast(_toast)
+
+DTC_RE = re.compile(r"[PCBU][0-3][0-9A-F]{3}")
+
+
+def current_codes() -> list[str]:
+  """Codes picked from the scanner plus any typed in by hand."""
+  codes = list(ss.get("sel_codes") or [])
+  for c in re.split(r"[,\s;/]+", (ss.get("manual_dtc") or "").upper()):
+    if DTC_RE.fullmatch(c) and c not in codes:
+      codes.append(c)
+  return codes
+
+
+ss.active_dtc = ", ".join(current_codes())
 
 
 def queue_update(toast: str | None = None, **values):
@@ -295,15 +309,14 @@ if "ble_vin" in st.query_params or "ble_dtc" in st.query_params:
   if VIN_RE.fullmatch(_qv) and load_vehicle(_qv):
     _upd["vin_input"] = _qv
   if _qd:
-    _upd["active_dtc"] = _qd
+    _upd["manual_dtc"] = _qd
   queue_update(**_upd)
 
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab5 = st.tabs([
     "📷 VIN & Customer Info",
     "📊 Live Telemetry, Mode $06 & Monitors",
-    "🔧 In-Depth Diagnostic Strategy",
-    "⚡ Copilot & Scope Lab",
+    "🔧 Diagnose (Strategy, Scope & Copilot)",
     "📋 Vehicle & DTC Log",
 ])
 
@@ -1668,7 +1681,8 @@ $("bleBtn").addEventListener("click", async () => {
     log("Reading I/M readiness…"); await loadReadiness();
     log("Reading Mode $06…"); await loadMode6();
     startStream();
-    if (vinRead || dtcs.stored.length || dtcs.pending.length) sendSync(true);   // push VIN + codes into the app automatically (no page reload)
+    // give live data a few seconds to fill in, then push VIN + codes + snapshot into the app
+    setTimeout(() => { if (connected) sendSync(true); }, 4000);   // push VIN + codes into the app automatically (no page reload)
   } catch (err) {
     log("Error: " + err.message);
   } finally {
@@ -1677,7 +1691,8 @@ $("bleBtn").addEventListener("click", async () => {
 });
 
 function sendSync(auto) {
-  sendValue({ type: "sync", id: "sync-" + Date.now(), vin: vinRead, dtcs, auto: !!auto });
+  sendValue({ type: "sync", id: "sync-" + Date.now(), vin: vinRead, dtcs, auto: !!auto,
+    pids: snapshot(), readiness: readinessSummary, mode6: mode6Summary, at: new Date().toLocaleTimeString() });
   log(`Sent to app → VIN ${vinRead || "not reported"} · ${dtcs.stored.length} stored / ${dtcs.pending.length} pending code(s)`);
 }
 
@@ -1746,17 +1761,17 @@ def handle_ble_event(ev: dict):
   if ev.get("type") == "sync":
     d = ev.get("dtcs") or {}
     ss.ble_dtcs = d
+    ss.scan_data = {k: ev.get(k) for k in ("pids", "readiness", "mode6", "at")}
     codes = list(dict.fromkeys((d.get("stored") or []) + (d.get("pending") or [])))
     vin = (ev.get("vin") or "").upper()
     upd = {}
     if VIN_RE.fullmatch(vin):
       if vin == ss.active_vin or load_vehicle(vin):
         upd["vin_input"] = vin
-    if codes:
-      upd["active_dtc"] = ", ".join(codes)
+    upd["sel_codes"] = codes  # scanned codes go straight into the Diagnose tab
     append_to_log(vin=vin or ss.active_vin, vehicle=ss.vehicle_info, dtc=", ".join(codes) or "No codes",
                   customer=ss.customer_name, phone=ss.customer_phone)
-    queue_update(toast=f"Scanner synced: {vin or 'no VIN'} · {len(codes)} code(s)", **upd)
+    queue_update(toast=f"Scanner synced: {vin or 'no VIN'} · {len(codes)} code(s) sent to the Diagnose tab", **upd)
 
   elif ev.get("type") == "ai":
     vehicle = ss.vehicle_info or "General OBD-II Vehicle"
@@ -1816,47 +1831,69 @@ with tab2:
     handle_ble_event(event)
 
 # ========================================================
-# --- TAB 3: IN-DEPTH DTC DIAGNOSTIC STRATEGY ---
+# --- TAB 3: DIAGNOSE (STRATEGY + SCOPE LAB + COPILOT) ---
 # ========================================================
-with tab3:
-  st.subheader("Field Diagnostic Strategy & Testing Workflow")
-  if ss.customer_name:
-    st.markdown(f"👤 Customer: **{ss.customer_name}** | 📞 `{ss.customer_phone or 'No phone'}`")
-  if ss.vehicle_info:
-    st.success(f"Active Vehicle: **{ss.vehicle_info}** (VIN: `{ss.active_vin or 'Manual'}`)")
-  else:
-    st.caption("Tip: decode a vehicle in Tab 1 (or connect the scanner in Tab 2) to carry vehicle specs over.")
-  if ss.ble_dtcs:
-    st.caption(f"From scanner → {_fmt_dtcs(ss.ble_dtcs)}")
+def scan_context() -> str:
+  """Everything the scanner captured, for the AI prompts."""
+  if not ss.ble_dtcs and not ss.scan_data:
+    return "No scanner data (codes entered by hand)."
+  sd = ss.scan_data or {}
+  pids = json.dumps(sd.get("pids") or {}, indent=0) if sd.get("pids") else "not captured"
+  return (f"Scanner codes: {_fmt_dtcs(ss.ble_dtcs)}\n"
+          f"I/M readiness: {sd.get('readiness') or 'not read'}\n"
+          f"Mode $06 results: {sd.get('mode6') or 'not read'}\n"
+          f"Live data snapshot at sync ({sd.get('at') or '?'}): {pids}")
 
-  col_input, col_engine, col_btn = st.columns([2.5, 2.5, 1.5])
-  with col_input:
-    st.text_input("OBD-II DTC(s) (e.g., P0316 or P0171, P0174):", key="active_dtc")
+
+with tab3:
+  st.subheader("🔧 Diagnose: Strategy, Scope Lab & Copilot")
+  context_bar()
+
+  # ---------- 1. Codes ----------
+  st.markdown("#### 1 · Fault codes")
+  d = ss.ble_dtcs or {}
+  kinds = {}
+  for kind in ("permanent", "pending", "stored"):  # stored wins if a code is in more than one list
+    for c in d.get(kind) or []:
+      kinds[c] = kind
+  options = list(dict.fromkeys(list(kinds) + list(ss.sel_codes or [])))
+  if options:
+    st.multiselect(
+        "Codes from the scanner (tap ✕ to leave one out):", options=options, key="sel_codes",
+        format_func=lambda c: f"{c} · {kinds.get(c, 'added')}",
+    )
+  else:
+    st.caption("Connect the scanner on the Live Telemetry tab — the codes it reads show up here automatically.")
+  st.text_input("Add codes by hand (optional):", key="manual_dtc", placeholder="e.g. P0171, P0174")
+
+  codes = current_codes()
+  code_str = ", ".join(codes)
+  col_engine, col_btn = st.columns([3, 1.4])
   with col_engine:
     ai_engine = st.selectbox(
-        "Diagnostic AI Engine",
+        "AI engine",
         options=["gemini", "perplexity"],
-        format_func={"gemini": "✨ Google Gemini 2.5 Flash (Deep Logic)",
-                     "perplexity": "🌐 Perplexity Sonar Pro (Live Web & TSBs)"}.get,
-        help="Gemini provides deep circuit & mechanical logic; Perplexity checks live technical databases and TSBs.",
+        format_func={"gemini": "✨ Google Gemini 2.5 Flash (deep circuit logic)",
+                     "perplexity": "🌐 Perplexity (live web, TSBs)"}.get,
     )
   with col_btn:
     st.write("")
-    lookup_clicked = st.button("Run Diagnostic Tree", use_container_width=True)
+    lookup_clicked = st.button("Run Diagnostic Tree", use_container_width=True, type="primary", disabled=not codes)
 
-  code_input = ss.active_dtc.strip().upper()
-  if lookup_clicked and not code_input:
-    st.warning("Enter a fault code first.")
-  elif lookup_clicked:
+  if lookup_clicked:
     vehicle = ss.vehicle_info or "General OBD-II Vehicle"
-    append_to_log(vin=ss.active_vin, vehicle=vehicle, dtc=code_input, customer=ss.customer_name, phone=ss.customer_phone)
+    append_to_log(vin=ss.active_vin, vehicle=vehicle, dtc=code_str, customer=ss.customer_name, phone=ss.customer_phone)
     dtc_prompt = f"""
-You are an expert ASE master diagnostic technician. Provide a laser-focused, code-specific diagnostic testing workflow for fault code(s) {code_input} on a {vehicle}.
+You are an expert ASE master diagnostic technician. Provide a laser-focused, code-specific diagnostic testing workflow for fault code(s) {code_str} on a {vehicle}.
+
+DATA FROM THE SHOP'S SCAN TOOL (use it to sharpen the plan; ignore if irrelevant):
+{scan_context()}
 
 STRICT SCOPE RULES:
-- ONLY provide tests and checks for the exact subsystem, sensor, actuator, or circuit named in {code_input}.
-- DO NOT provide generic boilerplate checks (fuel pressure, fuel trims, spark, compression) UNLESS {code_input} directly involves those systems.
+- ONLY provide tests and checks for the exact subsystem, sensor, actuator, or circuit named in {code_str}.
+- DO NOT provide generic boilerplate checks (fuel pressure, fuel trims, spark, compression) UNLESS the codes directly involve those systems.
 - If several codes are given, say whether they likely share one root cause and which to diagnose first.
+- If the scan data already points somewhere (a failing Mode $06 test, a misfire counter, a trim), say so up front.
 - Focus on practical shop isolation: circuit vs computer vs mechanical component.
 
 Format strictly using these Markdown sections:
@@ -1864,38 +1901,36 @@ Format strictly using these Markdown sections:
 ### 1. Code Definition & Setting Criteria
 - Exact technical definition and the conditions the ECM uses to set it.
 
-### 2. Live Scan Data & Bi-Directional Active Tests
+### 2. What the Scan Data Already Tells Us
+- Only if scanner data is present; otherwise skip this section.
+
+### 3. Live Scan Data & Bi-Directional Active Tests
 - Only the PIDs tied to this circuit/actuator (with expected values) and the functional test to command it.
 
-### 3. Pinpoint Electrical & Circuit Checks (DMM / Scope)
+### 4. Pinpoint Electrical & Circuit Checks (DMM / Scope)
 - Connector pinout checks (reference, ground drop limit, feed, PWM duty) and component resistance specs.
 
-### 4. Physical & Mechanical Inspection
+### 5. Physical & Mechanical Inspection
 - Visual/mechanical checks strictly for this mechanism.
 
-### 5. Known Platform Pattern Failures & TSBs
+### 6. Known Platform Pattern Failures & TSBs
 - Real-world failure patterns for {vehicle} on this system.
 """
-    with st.spinner(f"Generating {code_input} strategy via {ai_engine.upper()}..."):
+    with st.spinner(f"Building the {code_str} test plan via {ai_engine.title()}..."):
       text = ask_gemini(dtc_prompt) if ai_engine == "gemini" else ask_perplexity(dtc_prompt)
-    ss.dtc_result = {"title": f"{code_input} · {vehicle} · {ai_engine.title()}", "text": text}
+    ss.dtc_result = {"title": f"{code_str} · {vehicle} · {ai_engine.title()}", "text": text}
 
   if ss.dtc_result:  # stays on screen while you use other tabs
-    st.markdown(f"##### {ss.dtc_result['title']}")
-    st.markdown(ss.dtc_result["text"])
+    with st.expander(f"📋 Test plan: {ss.dtc_result['title']}", expanded=True):
+      st.markdown(ss.dtc_result["text"])
 
-# ========================================================
-# --- TAB 4: DIAGNOSTIC COPILOT & SCOPE LAB ---
-# ========================================================
-with tab4:
-  st.subheader("⚡ Diagnostic Copilot & Scope Lab")
-  context_bar()
-
+  # ---------- 2. Scope lab ----------
+  st.write("---")
+  st.markdown("#### 2 · Scope & test readings")
   col_scope, col_scratch = st.columns(2)
   with col_scope:
-    st.markdown("#### 📸 Scope & Meter Display Capture")
     scope_capture = st.camera_input("Capture oscilloscope or meter") if st.toggle("📷 Open Camera for Scope / Meter") else None
-    scope_file = st.file_uploader("Or upload scope waveform image", type=["png", "jpg", "jpeg"], key="scope_upload")
+    scope_file = st.file_uploader("Or upload a scope / meter photo", type=["png", "jpg", "jpeg"], key="scope_upload")
     active_img = scope_capture or scope_file
     pil_scope_image = None
     if active_img:
@@ -1903,37 +1938,34 @@ with tab4:
       pil_scope_image = ImageOps.exif_transpose(Image.open(active_img))
 
   with col_scratch:
-    st.markdown("#### 📝 Test Results Scratchpad")
-    with st.expander("Enter Physical Test Readings", expanded=True):
-      comp_data = st.text_input("Compression / Leakdown (psi / % drop):",
-                                placeholder="e.g., Cyl 1: 160, Cyl 2: 155, Cyl 3: 90, Cyl 4: 160")
-      fuel_data = st.text_input("Fuel Pressure (Running / 5-min Bleed-down):",
-                                placeholder="e.g., 55 psi running, drops to 12 psi in 3 mins")
-      volt_data = st.text_input("Electrical / Voltage Drop:",
-                                placeholder="e.g., Cranking battery drop 9.1V, engine ground drop 0.4V")
-      scope_notes = st.text_area("Scope Waveform Observations:", height=70,
-                                 placeholder="e.g., Coil burn time 0.7ms; injector kick only 35V; CKP missing tooth uneven")
+    comp_data = st.text_input("Compression / Leakdown (psi / % drop):",
+                              placeholder="e.g., Cyl 1: 160, Cyl 2: 155, Cyl 3: 90, Cyl 4: 160")
+    fuel_data = st.text_input("Fuel Pressure (Running / 5-min Bleed-down):",
+                              placeholder="e.g., 55 psi running, drops to 12 psi in 3 mins")
+    volt_data = st.text_input("Electrical / Voltage Drop:",
+                              placeholder="e.g., Cranking battery drop 9.1V, engine ground drop 0.4V")
+    scope_notes = st.text_area("Scope Waveform Observations:", height=70,
+                               placeholder="e.g., Coil burn time 0.7ms; injector kick only 35V; CKP missing tooth uneven")
 
-  if st.button("🔍 Analyze Entered Test Results & Scope Pattern with Gemini"):
-    test_summary = f"""
-Vehicle: {ss.vehicle_info or 'General'}
-Active DTC: {ss.active_dtc or 'None'}
-Compression/Leakdown: {comp_data or 'Not tested'}
-Fuel Pressure & Bleed-down: {fuel_data or 'Not tested'}
-Voltage Drop / Electrical: {volt_data or 'Not tested'}
-Scope Observations: {scope_notes or 'None reported'}
-"""
+  if st.button("🔍 Analyze Readings & Scope Pattern"):
     prompt = f"""
 You are an expert ASE Master / L1 diagnostic technician and automotive oscilloscope waveform specialist.
 Analyze this oscilloscope or multimeter capture (if attached) alongside the physical shop test readings.
 
-TEST CONTEXT:
-{test_summary}
+Vehicle: {ss.vehicle_info or 'General'}
+Fault codes: {code_str or 'None'}
+{scan_context()}
+
+PHYSICAL TEST READINGS:
+Compression/Leakdown: {comp_data or 'Not tested'}
+Fuel Pressure & Bleed-down: {fuel_data or 'Not tested'}
+Voltage Drop / Electrical: {volt_data or 'Not tested'}
+Scope Observations: {scope_notes or 'None reported'}
 
 TASK:
 - Identify the signal type (secondary/primary ignition, injector voltage/current, CKP/CMP correlation, relative compression, PWM, sensor drop).
 - Evaluate key signatures: firing/inductive kV, dwell, burn line slope & turbulence, coil oscillations, ground bounce, attenuation, missing-tooth spacing.
-- Correlate waveform abnormalities with the physical readings.
+- Correlate waveform abnormalities with the physical readings, the fault codes and the scan data.
 
 FORMAT STRICTLY AS:
 ### 1. Scope Waveform & Electrical Findings
@@ -1948,13 +1980,14 @@ FORMAT STRICTLY AS:
         ss.scope_result = f"⚠️ {e}"
 
   if ss.scope_result:
-    st.markdown("### Diagnostic Evaluation")
-    st.markdown(ss.scope_result)
+    with st.expander("🔬 Scope & readings evaluation", expanded=True):
+      st.markdown(ss.scope_result)
 
+  # ---------- 3. Copilot ----------
   st.write("---")
-  st.markdown("#### 💬 Interactive Diagnostic Copilot (Gemini)")
+  st.markdown("#### 3 · Copilot chat")
   hcol1, hcol2 = st.columns([4, 1])
-  hcol1.caption("Ask follow-up questions, request pinout checks, or ask how to isolate an intermittent fault.")
+  hcol1.caption("Ask follow-ups about the codes, the test plan or your readings. It already knows the vehicle and scan data.")
   if ss.chat_history and hcol2.button("Clear chat"):
     ss.chat_history = []
     st.rerun()
@@ -1969,11 +2002,14 @@ FORMAT STRICTLY AS:
     with st.chat_message("user"):
       st.markdown(user_question)
     history = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in ss.chat_history[-6:])
+    plan = (ss.dtc_result or {}).get("text", "")[:3000]
     chat_prompt = f"""
 You are an expert automotive diagnostic technician assisting a mechanic in the field.
 Vehicle: {ss.vehicle_info or 'General'}
-Active DTC: {ss.active_dtc or 'None'}
-Scanner codes: {_fmt_dtcs(ss.ble_dtcs) if ss.ble_dtcs else 'Not scanned'}
+Fault codes being worked: {code_str or 'None'}
+{scan_context()}
+Current test plan (if any): {plan or 'none yet'}
+Latest scope/readings evaluation (if any): {(ss.scope_result or 'none')[:1500]}
 
 Recent conversation:
 {history}
@@ -2007,4 +2043,4 @@ with tab5:
         os.remove(LOG_FILE)
         queue_update(toast="Log cleared")
   else:
-    st.info("No vehicles or DTCs logged yet. Connect the scanner (Tab 2) or run a code lookup (Tab 3) to start logging.")
+    st.info("No vehicles or DTCs logged yet. Connect the scanner (Live Telemetry tab) or run a diagnostic tree (Diagnose tab) to start logging.")
