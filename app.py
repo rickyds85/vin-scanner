@@ -59,7 +59,8 @@ DEFAULTS = {
     "customer_name": "", "customer_phone": "", "customer_address": "",
     "vin_input": "", "active_vin": "", "vehicle_info": "", "vehicle_make": "",
     "vehicle_details": {}, "vin_error": "", "active_dtc": "", "sel_codes": [], "manual_dtc": "", "scan_data": {},
-    "chat_history": [], "dtc_result": None, "scope_result": None,
+    "chat_history": [], "dtc_result": None, "scope_result": None, "symptoms": "",
+    "man_make": "", "man_make_other": "", "man_model": "", "man_trim": "", "man_engine": "",
     "ble_ai": None, "ble_last_event": None, "ble_dtcs": {},
 }
 for _k, _v in DEFAULTS.items():
@@ -267,6 +268,41 @@ def load_vehicle(vin: str) -> bool:
   return True
 
 
+MANUAL_MAKES = [
+    "Acura", "Buick", "Cadillac", "Chevrolet", "Chrysler", "Dodge", "Ford", "Genesis", "GMC", "Honda", "Hyundai",
+    "Infiniti", "Jeep", "Kia", "Lexus", "Lincoln", "Mazda", "Mercury", "Mitsubishi", "Nissan", "Pontiac", "Ram",
+    "Saturn", "Scion", "Subaru", "Toyota", "Other...",
+]
+
+
+@st.cache_data(ttl=30 * 86400, show_spinner=False, max_entries=300)
+def models_for(make: str, year: int) -> list[str]:
+  """Model list from NHTSA for the dropdown (empty list if the lookup fails)."""
+  try:
+    r = http().get(f"https://vpic.nhtsa.dot.gov/api/vehicles/GetModelsForMakeYear/make/{make}/modelyear/{year}?format=json",
+                   timeout=10)
+    r.raise_for_status()
+    return sorted({m["Model_Name"].strip() for m in r.json().get("Results", []) if m.get("Model_Name")})
+  except Exception:
+    return []
+
+
+def set_manual_vehicle(year: str, make: str, model: str, trim: str, engine: str):
+  engine = engine.strip()
+  if engine and re.fullmatch(r"\d+(\.\d+)?", engine):
+    engine += "L"
+  d = {"Model Year": year, "Make": make, "Model": model}
+  if trim.strip():
+    d["Trim"] = trim.strip()
+  if engine:
+    d["Engine"] = engine
+  ss.vehicle_details = d
+  ss.vehicle_make = make.upper()
+  ss.vehicle_info = " ".join(x for x in (year, make, model, trim.strip()) if x) + (f" ({engine})" if engine else "")
+  ss.active_vin = ""
+  ss.vin_error = ""
+
+
 def make_profile() -> str:
   return MAKE_PROFILES.get(ss.vehicle_make, "GENERIC")
 
@@ -393,11 +429,32 @@ with tab1:
       ss._failed_vin = ""
       st.rerun()
 
-  if ss.active_vin and ss.vehicle_details:
-    if not vin_check_digit_ok(ss.active_vin):
+  with st.expander("🚗 No VIN? Enter the vehicle by hand", expanded=not ss.vehicle_details):
+    this_year = datetime.now().year
+    m1, m2, m3 = st.columns(3)
+    man_year = m1.selectbox("Year", [str(y) for y in range(this_year + 1, 1980, -1)], index=None, placeholder="Year",
+                            key="man_year")
+    man_make = m2.selectbox("Make", MANUAL_MAKES, index=None, placeholder="Make", key="man_make_sel")
+    if man_make == "Other...":
+      man_make = m2.text_input("Type the make", key="man_make_other").strip().title()
+    model_list = models_for(man_make, int(man_year)) if man_year and man_make else []
+    if model_list:
+      man_model = m3.selectbox("Model", model_list, index=None, placeholder="Model", key="man_model_sel")
+    else:
+      man_model = m3.text_input("Model", key="man_model", placeholder="e.g. Accord")
+    m4, m5 = st.columns(2)
+    man_trim = m4.text_input("Submodel / trim (optional)", key="man_trim", placeholder="e.g. EX-L, LT, SR5")
+    man_engine = m5.text_input("Engine size (optional)", key="man_engine", placeholder="e.g. 2.4L, 5.3L V8")
+    ready = bool(man_year and man_make and man_model)
+    if st.button("✅ Use this vehicle", disabled=not ready, type="primary"):
+      set_manual_vehicle(man_year, man_make, (man_model or "").strip(), man_trim, man_engine)
+      queue_update(toast=f"Vehicle set: {ss.vehicle_info}", vin_input="")
+
+  if ss.vehicle_details:
+    if ss.active_vin and not vin_check_digit_ok(ss.active_vin):
       st.warning("⚠️ VIN check digit (9th character) doesn't match. One character may be misread"
                  " (common with photos). Non-North-American VINs can ignore this.")
-    st.subheader(f"{ss.vehicle_info}  ·  `{ss.active_vin}`")
+    st.subheader(f"{ss.vehicle_info}  ·  " + (f"`{ss.active_vin}`" if ss.active_vin else "entered by hand (no VIN)"))
     col1, col2 = st.columns(2)
     for i, (k, v) in enumerate(ss.vehicle_details.items()):
       (col1 if i % 2 == 0 else col2).write(f"**{k}:** {v}")
@@ -1865,6 +1922,8 @@ with tab3:
   else:
     st.caption("Connect the scanner on the Live Telemetry tab — the codes it reads show up here automatically.")
   st.text_input("Add codes by hand (optional):", key="manual_dtc", placeholder="e.g. P0171, P0174")
+  st.text_area("Symptoms / customer complaint (optional — works with or without codes):", key="symptoms", height=80,
+               placeholder="e.g. Rough idle when cold, stumbles on hard acceleration, no check engine light")
 
   codes = current_codes()
   code_str = ", ".join(codes)
@@ -1878,13 +1937,53 @@ with tab3:
     )
   with col_btn:
     st.write("")
-    lookup_clicked = st.button("Run Diagnostic Tree", use_container_width=True, type="primary", disabled=not codes)
+    symptoms = ss.symptoms.strip()
+    lookup_clicked = st.button("Run Diagnostic Tree", use_container_width=True, type="primary",
+                               disabled=not (codes or symptoms))
+  if not (codes or symptoms):
+    st.caption("Add a code or describe the symptoms to build a test plan.")
 
-  if lookup_clicked:
+  if lookup_clicked and not codes:
+    vehicle = ss.vehicle_info or "General Vehicle"
+    append_to_log(vin=ss.active_vin, vehicle=vehicle, dtc=f"No code - {symptoms[:60]}",
+                  customer=ss.customer_name, phone=ss.customer_phone)
+    sym_prompt = f"""
+You are an expert ASE master diagnostic technician. There are NO trouble codes. Build a symptom-based diagnostic plan for a {vehicle}.
+
+CUSTOMER COMPLAINT / SYMPTOMS:
+{symptoms}
+
+DATA FROM THE SHOP'S SCAN TOOL (if any):
+{scan_context()}
+
+Format strictly using these Markdown sections:
+
+### 1. Most Likely Causes (ranked)
+- Ranked list for THIS vehicle and THESE symptoms, with a one-line reason each. Lead with known pattern failures for this platform.
+
+### 2. Questions to Ask / Conditions to Recreate
+- When it happens (cold/hot, load, speed, weather) and how to reproduce it on a test drive.
+
+### 3. Quick Checks First (cheap & fast)
+- Visual checks, scan-data PIDs to watch (with expected values), Mode $06 / misfire counters to look at.
+
+### 4. Pinpoint Tests to Confirm
+- Specific DMM / scope / pressure / smoke tests that separate the top causes from each other.
+
+### 5. Known Platform Pattern Failures & TSBs
+- Real-world failure patterns and TSBs for {vehicle} matching these symptoms.
+"""
+    with st.spinner(f"Building a symptom-based test plan via {ai_engine.title()}..."):
+      text = ask_gemini(sym_prompt) if ai_engine == "gemini" else ask_perplexity(sym_prompt)
+    ss.dtc_result = {"title": f"Symptoms · {vehicle} · {ai_engine.title()}", "text": text}
+
+  if lookup_clicked and codes:
     vehicle = ss.vehicle_info or "General OBD-II Vehicle"
     append_to_log(vin=ss.active_vin, vehicle=vehicle, dtc=code_str, customer=ss.customer_name, phone=ss.customer_phone)
     dtc_prompt = f"""
 You are an expert ASE master diagnostic technician. Provide a laser-focused, code-specific diagnostic testing workflow for fault code(s) {code_str} on a {vehicle}.
+
+CUSTOMER COMPLAINT / SYMPTOMS: {symptoms or 'not given'}
 
 DATA FROM THE SHOP'S SCAN TOOL (use it to sharpen the plan; ignore if irrelevant):
 {scan_context()}
@@ -1954,6 +2053,7 @@ Analyze this oscilloscope or multimeter capture (if attached) alongside the phys
 
 Vehicle: {ss.vehicle_info or 'General'}
 Fault codes: {code_str or 'None'}
+Symptoms: {ss.symptoms.strip() or 'not given'}
 {scan_context()}
 
 PHYSICAL TEST READINGS:
@@ -2007,6 +2107,7 @@ FORMAT STRICTLY AS:
 You are an expert automotive diagnostic technician assisting a mechanic in the field.
 Vehicle: {ss.vehicle_info or 'General'}
 Fault codes being worked: {code_str or 'None'}
+Symptoms / complaint: {ss.symptoms.strip() or 'not given'}
 {scan_context()}
 Current test plan (if any): {plan or 'none yet'}
 Latest scope/readings evaluation (if any): {(ss.scope_result or 'none')[:1500]}
