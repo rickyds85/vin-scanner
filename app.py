@@ -558,7 +558,7 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
   button { font-weight:700; font-size:.88rem; border:1px solid var(--line); padding:9px 14px; border-radius:5px; cursor:pointer; color:#0E1117; }
   button:disabled { background:#2D3748 !important; color:#718096 !important; cursor:not-allowed; }
   #bleBtn { background:var(--g); border:none; } #pauseBtn { background:var(--r); color:#fff; } #driveBtn { background:var(--t); }
-  #readBtn { background:var(--b); } #clearBtn { background:var(--r); color:#fff; } #aiBtn { background:var(--o); } #syncBtn { background:var(--v); color:#fff; }
+  #readBtn { background:var(--b); } #clearBtn { background:var(--r); color:#fff; } #aiBtn { background:var(--o); } #syncBtn { background:var(--v); color:#fff; } #modBtn { background:var(--b); }
   .oem { margin-left:auto; display:flex; align-items:center; gap:6px; font-size:.8rem; color:var(--muted); }
   select { background:var(--card); color:var(--g); border:1px solid var(--g); padding:6px 8px; border-radius:4px; font-weight:700; }
   #status { color:var(--muted); font-family:monospace; font-size:.85rem; margin-bottom:12px; }
@@ -602,6 +602,7 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
     <button id="readBtn" disabled>🔎 Re-read Codes</button>
     <button id="clearBtn" disabled>🗑️ Clear Codes</button>
     <button id="aiBtn" disabled>🤖 AI Check</button>
+    <button id="modBtn" disabled>🧭 Scan All Modules</button>
     <button id="syncBtn" disabled>📋 Send VIN &amp; Codes to App</button>
     <div class="oem">OEM Profile:
       <select id="oemSel">
@@ -620,6 +621,8 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
   <h3 style="color:var(--r)">🚨 FAULT CODES</h3>
   <div id="dtcBox" class="box">Codes are read automatically on connect.</div>
   <div id="clearWarn" class="box" style="display:none;border-color:var(--o);color:var(--o);font-weight:700"></div>
+  <h3 style="color:var(--b)">🧭 ALL MODULES <span id="modNote" class="note">ABS, airbag, body, HVAC, cluster… scanned automatically after connect</span></h3>
+  <div id="modBox" class="box">Not scanned yet.</div>
 
   <h3 style="color:var(--g)">📈 LIVE DATA (MODE 01) <span id="rate" class="note"></span></h3>
   <div id="graphs">
@@ -1774,6 +1777,159 @@ function renderDtcs() {
     (list.length ? `<span class="chips">${list.map((d) => `<span class="chip" style="color:var(--${c});border-color:var(--${c})">${d}</span>`).join("")}</span>` : `<span style="color:var(--g)">none</span>`) + "</div>";
   $("dtcBox").innerHTML = row("Stored (03)", dtcs.stored, "r") + row("Pending (07)", dtcs.pending, "o") + (isCan ? row("Permanent (0A)", dtcs.permanent, "v") : "");
 }
+// ===================== All-module code scan =====================
+// Asks every likely module for its codes: UDS $19 02 first, then older KWP ($18 / $13) and OBD $03 as fallbacks.
+const SWEEP = {
+  ALL: ["7E0", "7E1", "7E2", "7E3", "7E4", "7E5", "7E6", "7E7"],
+  TOYOTA: ["7B0", "7B1", "7B2", "7B3", "7C0", "7C4", "7C6", "7D0", "7D2", "7A1", "7A2", "781"],
+  HONDA: ["DA0E", "DA10", "DA11", "DA1D", "DA1E", "DA26", "DA28", "DA2B", "DA30", "DA3A", "DA40", "DA53", "DA60", "DAB0"],
+  NISSAN: ["740", "743", "744", "745", "746", "747", "752", "765", "79D"],
+  HYUNDAI: ["7A0", "7A5", "7B3", "7C6", "7D0", "7D1", "7D4", "770", "7C4"],
+  SUBARU: ["7A2", "7A3", "7B0", "7C0", "7C4", "7D0", "7D2", "7E2"],
+  MAZDA: ["720", "726", "730", "733", "737", "760", "764", "7A6"],
+  FORD: ["720", "724", "726", "727", "730", "732", "733", "737", "760", "764", "7A6", "7A7"],
+  GM: ["241|641", "243|643", "244|644", "247|647", "24A|64A", "24C|64C", "251|651", "252|652"],
+  CHRYSLER: ["740", "742", "744", "745", "747", "74A", "74F", "753", "75A", "783"],
+};
+const ADDR_NAMES = {
+  "7E0": "Engine (ECM/PCM)", "7E1": "Transmission (TCM)", "7E2": "Hybrid / 2nd powertrain", "7E3": "Powertrain module 4",
+  "7E4": "Battery / EV module", "7B0": "ABS / VSC", "7C0": "Instrument cluster", "7C4": "Air conditioning", "7A1": "Power steering",
+  "760": "ABS / brakes", "726": "Body (BCM)", "720": "Instrument cluster", "737": "Airbag (SRS)", "733": "HVAC", "727": "Audio / ACM",
+  "243": "ABS (EBCM)", "241": "Body (BCM)", "244": "Cluster", "247": "Airbag (SDM)", "251": "HVAC", "7D4": "Power steering (MDPS)",
+  "770": "Body (BCM)", "7D1": "ABS / ESC", "7D0": "Airbag (SRS)", "743": "Instrument cluster", "745": "Body (BCM)", "740": "Body",
+  "747": "ABS", "DA10": "Engine (PGM-FI)", "DA11": "Engine (PGM-FI)", "DA1E": "Transmission", "DA1D": "Transmission",
+  "DA28": "VSA / ABS", "DA53": "Airbag (SRS)", "DA40": "Body (MICU)", "DA60": "Instrument cluster", "DA26": "TPMS",
+};
+const PATH_MODULE = { Engine: "Engine", Transmission: "Transmission", Movement: "ABS / chassis", Control: "ABS / chassis",
+  "Control.Traction": "ABS / chassis", Brakes: "ABS / brakes", Climate: "HVAC / A/C", Tires: "TPMS", Battery: "Body / power",
+  Electrical: "Body / power", Lights: "Body (lighting)", Doors: "Body (doors)", Seatbelts: "Airbag / restraints" };
+let modResults = [], modScanning = false;
+
+function moduleList() {
+  const map = new Map();
+  const add = (hdr, rax, name) => {
+    if (!hdr || hdr === "7DF" || !/^([0-9A-F]{3}|DA[0-9A-F]{2})$/.test(hdr)) return;
+    const m = map.get(hdr) || { hdr, rax: rax || "", names: {} };
+    if (rax && !m.rax) m.rax = rax;
+    if (name) m.names[name] = (m.names[name] || 0) + 1;
+    map.set(hdr, m);
+  };
+  SWEEP.ALL.forEach((a) => add(a));
+  (SWEEP[profile()] || []).forEach((a) => { const [h, r] = a.split("|"); add(h, r); });
+  (Array.isArray(ARGS.oem) ? ARGS.oem : []).forEach((g) => add(g.hdr, g.rax, PATH_MODULE[g.path]));
+  (OEM_DB[profile()] || []).forEach((g) => add(g.hdr, g.rax));
+  return [...map.values()].map((m) => {
+    const best = Object.entries(m.names).sort((a, b) => b[1] - a[1])[0];
+    m.name = ADDR_NAMES[m.hdr] || (best ? best[0] : "Module");
+    return m;
+  });
+}
+function decodeDtc3(h) {   // 2-byte DTC + optional failure-type byte
+  const base = decodeDtc(h.slice(0, 4)), ftb = h.slice(4, 6);
+  return ftb && ftb !== "00" ? base + "-" + ftb : base;
+}
+function udsStatus(st) {
+  if (st & 0x08) return "stored";
+  if (st & 0x04) return "pending";
+  if (st & 0x01) return "active";
+  return "history";
+}
+async function askModule(mod, req, timeout) {
+  await setAddr(mod.hdr, mod.rax);
+  let msgs = messages(await sendCmd(req, timeout));
+  if (msgs.some((m) => /^7F..78/.test(m))) msgs = messages(await sendCmd(req, 2000));   // "busy, wait" -> ask again
+  return msgs;
+}
+async function readModuleCodes(mod) {
+  // 1) UDS ReadDTCInformation, all codes
+  let msgs = await askModule(mod, "1902FF", 600);
+  let r = msgs.find((m) => m.startsWith("5902"));
+  if (r) {
+    const codes = [];
+    for (let i = 6; i + 8 <= r.length; i += 8) {
+      const rec = r.substr(i, 8), st = parseInt(rec.slice(6, 8), 16);
+      if (rec.slice(0, 6) === "000000") continue;
+      codes.push({ code: decodeDtc3(rec.slice(0, 6)), status: udsStatus(st) });
+    }
+    return { alive: true, proto: "uds", codes };
+  }
+  const answered = msgs.length > 0;
+  // 2) KWP2000 ReadDTCByStatus
+  msgs = await askModule(mod, "1800FF00", 600);
+  r = msgs.find((m) => m.startsWith("58"));
+  if (r) {
+    const n = parseInt(r.slice(2, 4), 16) || 0, codes = [];
+    for (let k = 0, i = 4; k < n && i + 6 <= r.length; k++, i += 6) {
+      const st = parseInt(r.substr(i + 4, 2), 16);
+      codes.push({ code: decodeDtc(r.substr(i, 4)), status: (st & 0x40) ? "stored" : (st & 0x20) ? "pending" : "stored" });
+    }
+    return { alive: true, proto: "kwp", codes };
+  }
+  if (!answered && !msgs.length) return { alive: false };
+  // 3) Toyota-style $13 and 4) OBD $03 sent straight to this module
+  for (const [req, pre, proto] of [["13", "53", "t13"], ["03", "43", "obd"]]) {
+    msgs = await askModule(mod, req, 600);
+    r = msgs.find((m) => m.startsWith(pre));
+    if (r) {
+      const n = parseInt(r.slice(2, 4), 16) || 0, codes = [];
+      for (let k = 0, i = 4; k < n && i + 4 <= r.length; k++, i += 4) if (r.substr(i, 4) !== "0000") codes.push({ code: decodeDtc(r.substr(i, 4)), status: "stored" });
+      return { alive: true, proto, codes };
+    }
+  }
+  return { alive: true, proto: "", codes: [], unsupported: true };
+}
+async function scanModules() {
+  if (modScanning || !isCan) { if (!isCan) $("modBox").textContent = "All-module scan needs a CAN vehicle (most 2008+)."; return; }
+  modScanning = true; $("modBtn").disabled = true;
+  const list = moduleList();
+  modResults = [];
+  try {
+    for (let i = 0; i < list.length && connected; i++) {
+      const mod = list[i];
+      log(`Scanning modules ${i + 1}/${list.length} (${mod.name}, ${mod.hdr})…`);
+      const res = await txn(async () => { const r = await readModuleCodes(mod); await setAddr(baseHeader, ""); return r; });
+      if (res.alive) modResults.push(Object.assign(mod, res));
+      renderModules(i + 1, list.length);
+    }
+  } finally {
+    modScanning = false; $("modBtn").disabled = !connected;
+    renderModules();
+    log(streaming ? "Streaming live data…" : "Module scan done.");
+  }
+}
+function renderModules(done, total) {
+  const color = { stored: "r", active: "r", pending: "o", history: "s" };
+  const found = modResults.reduce((n, m) => n + m.codes.length, 0);
+  $("modNote").textContent = total && done < total
+    ? `scanning ${done}/${total}…`
+    : `${modResults.length} modules answered · ${found} code(s)`;
+  if (!modResults.length) { $("modBox").textContent = total ? "Scanning…" : "No modules answered."; return; }
+  $("modBox").innerHTML = modResults.map((m, i) => {
+    const chips = m.codes.length
+      ? m.codes.map((c) => `<span class="chip" title="${c.status}" style="color:var(--${color[c.status]});border-color:var(--${color[c.status]})">${esc(c.code)}<span style="font-weight:400;font-size:.7rem"> ${c.status}</span></span>`).join("")
+      : `<span style="color:var(--g)">${m.unsupported ? "answered, but codes not readable with generic commands" : "no codes"}</span>`;
+    const clr = m.codes.length && m.proto ? `<button data-clrmod="${i}" style="padding:3px 8px;font-size:.72rem;background:var(--card);color:var(--r);border:1px solid var(--r)">Clear</button>` : "";
+    return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:5px 0;border-bottom:1px solid var(--line)">
+      <span style="min-width:170px;color:var(--w);font-weight:700">${esc(m.name)} <span class="note">${m.hdr}</span></span>
+      <span class="chips" style="flex:1">${chips}</span>${clr}</div>`;
+  }).join("");
+}
+async function clearModule(i) {
+  const m = modResults[i]; if (!m) return;
+  if (!confirm(`Clear all codes in ${m.name} (${m.hdr})?\n\nKey ON, engine OFF is best.`)) return;
+  const req = { uds: "14FFFFFF", kwp: "14FF00", t13: "14FF00", obd: "04" }[m.proto];
+  const pre = m.proto === "obd" ? "44" : "54";
+  const ok = await txn(async () => { const msgs = await askModule(m, req, 3000); await setAddr(baseHeader, ""); return msgs.some((x) => x.startsWith(pre)); });
+  log(ok ? `${m.name}: codes cleared. Re-reading…` : `${m.name} did not confirm the clear.`);
+  const res = await txn(async () => { const r = await readModuleCodes(m); await setAddr(baseHeader, ""); return r; });
+  Object.assign(m, res); renderModules();
+  if (!ok) alert(`${m.name} did not confirm the clear. Some modules need the key ON / engine OFF, or a factory tool.`);
+}
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-clrmod]");
+  if (b) clearModule(+b.dataset.clrmod);
+});
+
 async function readVin() {
   const raw = await sendCmd("0902", 3000);
   let hex = "";
@@ -1946,7 +2102,7 @@ function showAi(text, label) {
 }
 
 // ===================== Connect / setup =====================
-const BTN_IDS = ["pauseBtn", "driveBtn", "readBtn", "clearBtn", "aiBtn", "syncBtn"];
+const BTN_IDS = ["pauseBtn", "driveBtn", "readBtn", "clearBtn", "aiBtn", "syncBtn", "modBtn"];
 const enableBtns = (on) => BTN_IDS.forEach((id) => { $(id).disabled = !on; });
 
 function onDisconnect() {
@@ -2032,8 +2188,9 @@ $("bleBtn").addEventListener("click", async () => {
     log("Reading I/M readiness…"); await loadReadiness();
     log("Reading Mode $06…"); await loadMode6();
     startStream();
-    // give live data a few seconds to fill in, then push VIN + codes + snapshot into the app
-    setTimeout(() => { if (connected) sendSync(true); }, 4000);   // push VIN + codes into the app automatically (no page reload)
+    await sleep(1500);
+    await scanModules();             // live data keeps updating between modules
+    if (connected) sendSync(true);   // push VIN + all codes + snapshot into the app (no page reload)
   } catch (err) {
     log("Error: " + err.message);
   } finally {
@@ -2042,7 +2199,8 @@ $("bleBtn").addEventListener("click", async () => {
 });
 
 function sendSync(auto) {
-  sendValue({ type: "sync", id: "sync-" + Date.now(), vin: vinRead, dtcs, auto: !!auto,
+  const modules = modResults.filter((m) => m.codes.length).map((m) => ({ name: m.name, addr: m.hdr, codes: m.codes }));
+  sendValue({ type: "sync", id: "sync-" + Date.now(), vin: vinRead, dtcs: Object.assign({}, dtcs, { modules }), auto: !!auto,
     pids: snapshot(), readiness: readinessSummary, mode6: mode6Summary, at: new Date().toLocaleTimeString() });
   log(`Sent to app → VIN ${vinRead || "not reported"} · ${dtcs.stored.length} stored / ${dtcs.pending.length} pending code(s)`);
 }
@@ -2057,6 +2215,7 @@ $("driveBtn").addEventListener("click", () => {
   lastDriveAi = Date.now();
   if (driveOn && !streaming) startStream();
 });
+$("modBtn").addEventListener("click", async () => { await scanModules(); sendSync(false); });
 $("readBtn").addEventListener("click", async () => {
   log("Re-reading codes, readiness and Mode $06…");
   await txn(async () => { await readDtcs(); await loadReadiness(); });
@@ -2104,8 +2263,17 @@ _ble_dashboard = components.declare_component("ble_dashboard", path=_ble_compone
 
 
 def _fmt_dtcs(d: dict) -> str:
-  return (f"Stored: {', '.join(d.get('stored') or []) or 'none'} | Pending: {', '.join(d.get('pending') or []) or 'none'}"
-          f" | Permanent: {', '.join(d.get('permanent') or []) or 'none'}")
+  out = (f"Engine/emissions (OBD-II) stored: {', '.join(d.get('stored') or []) or 'none'} | pending: "
+         f"{', '.join(d.get('pending') or []) or 'none'} | permanent: {', '.join(d.get('permanent') or []) or 'none'}")
+  mods = [f"{m.get('name')} [{m.get('addr')}]: " + ", ".join(f"{c.get('code')} ({c.get('status')})" for c in m.get("codes", []))
+          for m in d.get("modules") or [] if m.get("codes")]
+  return out + (" | Other modules -> " + "; ".join(mods) if mods else "")
+
+
+def module_codes(d: dict) -> dict:
+  """code -> 'Module name · status' for every module code the scanner found."""
+  return {c["code"]: f"{m.get('name', 'Module')} · {c.get('status', '')}"
+          for m in d.get("modules") or [] for c in m.get("codes", []) if c.get("code")}
 
 
 def handle_ble_event(ev: dict):
@@ -2114,6 +2282,8 @@ def handle_ble_event(ev: dict):
     ss.ble_dtcs = d
     ss.scan_data = {k: ev.get(k) for k in ("pids", "readiness", "mode6", "at")}
     codes = list(dict.fromkeys((d.get("stored") or []) + (d.get("pending") or [])))
+    for m in d.get("modules") or []:   # ABS, airbag, body, HVAC... (skip old "history" codes)
+      codes += [c["code"] for c in m.get("codes", []) if c.get("status") != "history" and c["code"] not in codes]
     vin = (ev.get("vin") or "").upper()
     upd = {}
     if VIN_RE.fullmatch(vin):
@@ -2206,9 +2376,10 @@ with tab3:
   st.markdown("#### 1 · Fault codes")
   d = ss.ble_dtcs or {}
   kinds = {}
+  kinds.update(module_codes(d))
   for kind in ("permanent", "pending", "stored"):  # stored wins if a code is in more than one list
     for c in d.get(kind) or []:
-      kinds[c] = kind
+      kinds[c] = f"Engine (OBD) · {kind}"
   options = list(dict.fromkeys(list(kinds) + list(ss.sel_codes or [])))
   if options:
     st.multiselect(
