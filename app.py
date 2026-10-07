@@ -303,6 +303,87 @@ def set_manual_vehicle(year: str, make: str, model: str, trim: str, engine: str)
   ss.vin_error = ""
 
 
+# --- Vehicle-specific factory data from the open OBD database (github.com/OBDb) ---
+OBDB_RAW = "https://raw.githubusercontent.com/OBDb/{repo}/{branch}/signalsets/v3/default.json"
+OBDB_MAKE_NAMES = {"GMC": "GMC", "BMW": "BMW", "MINI": "MINI", "MERCEDES-BENZ": "Mercedes-Benz", "LAND ROVER": "Land-Rover"}
+OBDB_SKIP_PATHS = {"Trips", "Seatbelts", "Lights", "Doors", "Clocks", "Details", "Stats", "DTCs", "ECU", "Cruise control"}
+OBDB_UNITS = {
+    "celsius": "C", "fahrenheit": "F", "kilopascal": "kPa", "psi": "psi", "bars": "bar", "volts": "V", "millivolts": "mV",
+    "rpm": "rpm", "percent": "%", "degrees": "deg", "scalar": "", "unknown": "", "kilometersPerHour": "kph",
+    "kilometers": "km", "miles": "mi", "offon": "onoff", "onoff": "onoff", "noyes": "yesno", "yesno": "yesno",
+    "milliseconds": "ms", "seconds": "s", "minutes": "min", "hours": "h", "milliamps": "mA", "amps": "A",
+    "gramsPerSecond": "gps", "newtonMeters": "Nm", "liters": "L", "hex": "hex", "metersPerSecondSquared": "m/s²",
+    "gravity": "g", "ampereHours": "Ah", "kilowatts": "kW", "millimeters": "mm", "megaohms": "MΩ",
+}
+
+
+def _obdb_repo_candidates(make: str, model: str) -> list[str]:
+  mk = OBDB_MAKE_NAMES.get(make.upper(), make.title().replace(" ", "-"))
+  mdl = model.strip()
+  cands = [mdl.replace(" ", "-"), mdl.split(" ")[0]]
+  if mdl.split(" ")[0] in ("Silverado", "Sierra"):
+    cands.append(mdl.split(" ")[0] + "-1500")
+  return list(dict.fromkeys(f"{mk}-{c}" for c in cands if c))
+
+
+def _year_ok(f: dict | None, year: int) -> bool:
+  if not f or not year:
+    return True
+  if year in (f.get("years") or []):
+    return True
+  if "from" not in f and "to" not in f:
+    return not f.get("years")
+  return f.get("from", 0) <= year <= f.get("to", 9999)
+
+
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=200)
+def obdb_signals(make: str, model: str, year: str) -> tuple[str, list[dict]]:
+  """Download this exact model's factory data definitions (one small JSON file) and trim it for the scanner."""
+  if not make or not model:
+    return "", []
+  y = int(year) if str(year).isdigit() else 0
+  for repo in _obdb_repo_candidates(make, model):
+    r = None
+    for branch in ("main", "master"):
+      try:
+        r = http().get(OBDB_RAW.format(repo=repo, branch=branch), timeout=10)
+      except requests.RequestException:
+        r = None
+      if r is not None and r.status_code == 200:
+        break
+    if r is None or r.status_code != 200:
+      continue
+    try:
+      cmds = r.json().get("commands", [])
+    except ValueError:
+      continue
+    out = []
+    for c in cmds:
+      hdr = str(c.get("hdr", "")).upper()
+      if c.get("eax") or c.get("tst") or c.get("fcm1") or c.get("pri") or not re.fullmatch(r"[0-9A-F]{3}|DA[0-9A-F]{2}", hdr):
+        continue
+      if not _year_ok(c.get("filter"), y):
+        continue
+      svc, pid = next(iter(c.get("cmd", {}).items()), ("", ""))
+      if svc in ("01", "02", "09") or not svc:
+        continue
+      for sig in c.get("signals", []):
+        f = sig.get("fmt", {})
+        if sig.get("path") in OBDB_SKIP_PATHS or not f.get("len") or f.get("len") > 32:
+          continue
+        out.append({
+            "hdr": hdr, "rax": str(c.get("rax", "")).upper(), "req": f"{svc}{pid}".upper(),
+            "bix": f.get("bix", 0), "len": f["len"], "mul": f.get("mul", 1), "div": f.get("div", 1), "add": f.get("add", 0),
+            "sign": bool(f.get("sign")), "lsb": bool(f.get("blsb")), "unit": OBDB_UNITS.get(f.get("unit", ""), f.get("unit", "")),
+            "min": f.get("min"), "max": f.get("max"), "nmin": f.get("nullmin"), "nmax": f.get("nullmax"),
+            "map": {k: (v.get("description") or v.get("value")) if isinstance(v, dict) else v for k, v in f["map"].items()} if f.get("map") else None,
+            "name": sig.get("name", sig.get("id", "")), "path": sig.get("path", ""),
+        })
+    if out:
+      return repo, out
+  return "", []
+
+
 def make_profile() -> str:
   return MAKE_PROFILES.get(ss.vehicle_make, "GENERIC")
 
@@ -524,7 +605,7 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
     <button id="syncBtn" disabled>📋 Send VIN &amp; Codes to App</button>
     <div class="oem">OEM Profile:
       <select id="oemSel">
-        <option value="AUTO">Auto-Detect</option><option value="HONDA">Honda / Acura</option>
+        <option value="AUTO">Auto (this vehicle)</option><option value="HONDA">Honda / Acura</option>
         <option value="TOYOTA">Toyota / Lexus / Scion</option><option value="NISSAN">Nissan / Infiniti</option>
         <option value="HYUNDAI">Hyundai / Kia / Genesis</option><option value="SUBARU">Subaru</option>
         <option value="MAZDA">Mazda</option><option value="FORD">Ford / Lincoln / Mercury</option>
@@ -577,7 +658,7 @@ let lastAiShown = null;
 window.addEventListener("message", (e) => {
   if (!e.data || e.data.type !== "streamlit:render") return;
   const a = e.data.args || {};
-  const changed = a.make !== ARGS.make || String(a.year) !== String(ARGS.year);
+  const changed = a.make !== ARGS.make || String(a.year) !== String(ARGS.year) || a.oem_src !== ARGS.oem_src;
   ARGS = a;
   if (changed && connected) buildEnhanced();
   if (a.ai && a.ai.id && a.ai.id !== lastAiShown) {
@@ -1506,7 +1587,10 @@ function extractBits(bytes, bix, len, lsb, sign) {
   return v;
 }
 function fmtOem(sig, v) {
+  if (sig.map) { const t = sig.map[String(v)]; return t == null ? null : String(t); }
   const x = v * sig.mul / sig.div + sig.add;
+  if ((sig.nmin != null && x <= sig.nmin) || (sig.nmax != null && x >= sig.nmax)) return null;      // "no value" markers
+  if ((sig.min != null && x < sig.min - 1e-6) || (sig.max != null && x > sig.max + 1e-6)) return null;  // impossible = wrong layout
   const r1 = (n) => (Math.abs(n) >= 100 ? Math.round(n) : Math.round(n * 10) / 10);
   switch (sig.unit) {
     case "C": return x <= -39.5 || x > 300 ? null : degF(x) + " °F";
@@ -1515,6 +1599,7 @@ function fmtOem(sig, v) {
     case "bar": return r1(x * 14.5038) + " psi";
     case "psi": return r1(x) + " psi";
     case "kph": return Math.round(x * 0.621371) + " mph";
+    case "km": return Math.round(x * 0.621371).toLocaleString() + " mi";
     case "Nm": return Math.round(x * 0.737562) + " lb-ft";
     case "onoff": case "onoff2": return x ? "ON" : "OFF";
     case "yesno": case "noyes": return x ? "YES" : "NO";
@@ -1530,84 +1615,112 @@ function cleanName(n) {
   n = n.replace(/,?\s*(v\.?\s?\d+|var\.?\s?\d+|variation \d+)\s*$/i, "").replace(/,\s*$/, "").trim();
   return n.charAt(0).toUpperCase() + n.slice(1);
 }
-function oemGroup(name) {
-  if (/misfire/i.test(name)) return "Misfire counters";
-  if (/tire/i.test(name)) return "Tire pressure (TPMS)";
-  if (/trans|gear|cvt|torque converter|lock.?up|clutch|shaft|gearbox|transaxle|pulley|awd/i.test(name)) return "Transmission";
-  if (/fuel|inject|rail|boost|turbo|wastegate|throttle|air|lambda|map |egr|purge|evap/i.test(name)) return "Fuel, air & boost";
-  if (/volt|battery|generator/i.test(name)) return "Electrical";
-  return "Engine, oil & knock";
+const PATH_GROUP = {
+  "Engine": "Engine", "Engine.Catalyst": "Engine", "Engine.DPF": "Engine", "Fluids": "Engine", "Engine.Misfires": "Misfire counters",
+  "Transmission": "Transmission", "Drivetrain": "Transmission", "Fuel": "Fuel & air", "Emissions": "Fuel & air",
+  "Battery": "Electrical", "Electrical": "Electrical", "Tires": "Tire pressure (TPMS)",
+  "Control": "Chassis, ABS & steering", "Control.Traction": "Chassis, ABS & steering", "Brakes": "Chassis, ABS & steering",
+  "Movement": "Wheel speeds & motion", "Orientation": "Wheel speeds & motion", "Climate": "Climate & A/C",
+};
+const GROUP_ORDER = ["Engine", "Transmission", "Misfire counters", "Fuel & air", "Electrical", "Tire pressure (TPMS)",
+  "Chassis, ABS & steering", "Wheel speeds & motion", "Climate & A/C", "Other"];
+const GROUP_CLOSED = new Set(["Chassis, ABS & steering", "Wheel speeds & motion", "Climate & A/C", "Other"]);
+function oemGroup(sig) {
+  if (sig.path) return PATH_GROUP[sig.path] || "Other";
+  const n = sig.name;
+  if (/misfire/i.test(n)) return "Misfire counters";
+  if (/tire/i.test(n)) return "Tire pressure (TPMS)";
+  if (/trans|gear|cvt|torque converter|lock.?up|clutch|shaft|gearbox|transaxle|pulley|awd/i.test(n)) return "Transmission";
+  if (/fuel|inject|rail|boost|turbo|wastegate|throttle|air|lambda|map |egr|purge|evap/i.test(n)) return "Fuel & air";
+  if (/volt|battery|generator/i.test(n)) return "Electrical";
+  return "Engine";
 }
-const GROUP_ORDER = ["Transmission", "Engine, oil & knock", "Misfire counters", "Fuel, air & boost", "Tire pressure (TPMS)", "Electrical"];
 
-let oemCmds = [], oemRR = 0, oemFound = 0;
+let oemCmds = [], oemRR = 0, oemFound = 0, oemModules = {};
 function profile() { const s = $("oemSel").value; return s === "AUTO" ? (ARGS.make || "GENERIC") : s; }
+function usingModelData() { return $("oemSel").value === "AUTO" && Array.isArray(ARGS.oem) && ARGS.oem.length > 0; }
+function oemSourceName() { return usingModelData() ? (ARGS.oem_src || "").replace(/-/g, " ") : profile(); }
 function buildEnhanced() {
   const year = parseInt(ARGS.year, 10) || 0;
-  const sigs = isCan ? (OEM_DB[profile()] || []).filter((g) => yearOk(g.yrs, year)) : [];
+  const model = usingModelData();
+  const sigs = !isCan ? [] : model ? ARGS.oem.map((g) => Object.assign({}, g))
+    : (OEM_DB[profile()] || []).filter((g) => yearOk(g.yrs, year)).map((g) => Object.assign({}, g));
   const byCmd = new Map();
   sigs.forEach((g) => {
+    g.label = cleanName(g.name);
+    g.group = oemGroup(g);
     const k = g.hdr + "|" + g.rax + "|" + g.req;
-    if (!byCmd.has(k)) byCmd.set(k, { hdr: g.hdr, rax: g.rax, req: g.req, sigs: [], state: "new" });
+    if (!byCmd.has(k)) byCmd.set(k, { hdr: g.hdr, rax: g.rax, req: g.req, sigs: [], state: "new", miss: 0 });
     byCmd.get(k).sigs.push(g);
   });
   oemCmds = [...byCmd.values()];
-  // Same request, same quantity at different byte offsets = layouts for different models.
-  // Keep only the most widely used layout so we never show two conflicting values.
-  oemCmds.forEach((c) => {
-    const seen = new Set();
-    c.sigs = c.sigs.filter((g) => { g.label = cleanName(g.name); if (seen.has(g.label)) return false; seen.add(g.label); return true; });
-  });
-  oemRR = 0; oemFound = 0;
+  if (!model) {
+    // Make-level list mixes layouts from several models: keep one layout per quantity so values never conflict.
+    oemCmds.forEach((c) => {
+      const seen = new Set();
+      c.sigs = c.sigs.filter((g) => (seen.has(g.label) ? false : (seen.add(g.label), true)));
+    });
+  }
+  // Probe the most useful systems first
+  const rank = (c) => Math.min(...c.sigs.map((g) => GROUP_ORDER.indexOf(g.group)));
+  oemCmds.sort((a, b) => rank(a) - rank(b));
+  oemRR = 0; oemFound = 0; oemModules = {}; oemTile.n = 0;
   $("enhBox").innerHTML = '<div class="box">' + (oemCmds.length
-    ? `Checking ${oemCmds.length} factory data requests for ${esc(profile())}…`
-    : (isCan ? "No OEM definitions for this make yet — pick a profile above if Auto-Detect is wrong." : "OEM data needs a CAN vehicle (most 2008+).")) + "</div>";
+    ? `Checking ${oemCmds.length} factory data requests (${esc(oemSourceName())})…`
+    : (isCan ? "No factory definitions for this vehicle yet. Pick a make in OEM Profile above to try the make-level list."
+             : "OEM data needs a CAN vehicle (most 2008+).")) + "</div>";
   updateEnhNote();
 }
 function updateEnhNote() {
   const checked = oemCmds.filter((c) => c.state !== "new").length;
   $("enhNote").textContent = oemCmds.length
-    ? `${profile()} · checked ${checked}/${oemCmds.length} requests · ${oemFound} readings found`
+    ? `${oemSourceName()} · checked ${checked}/${oemCmds.length} requests · ${oemFound} readings found`
     : "";
 }
 function oemTile(sig) {
   if (sig.tile) return sig.tile;
   const box = $("enhBox");
   if (box.firstElementChild && box.firstElementChild.classList.contains("box")) box.innerHTML = "";
-  const grp = oemGroup(sig.name);
-  let sec = document.querySelector(`[data-grp="${grp}"]`);
+  const grp = sig.group;
+  let sec = [...box.children].find((c) => c.dataset.grp === grp);
   if (!sec) {
-    sec = document.createElement("div");
+    sec = document.createElement("details");
     sec.dataset.grp = grp;
-    sec.innerHTML = `<div class="grp">${esc(grp)}</div><div class="grid" style="margin-bottom:10px"></div>`;
+    sec.open = !GROUP_CLOSED.has(grp);
+    sec.innerHTML = `<summary class="grp" style="cursor:pointer">${esc(grp)} <span class="cnt"></span></summary><div class="grid" style="margin:4px 0 10px"></div>`;
     const after = [...box.children].find((c) => GROUP_ORDER.indexOf(c.dataset.grp) > GROUP_ORDER.indexOf(grp));
     box.insertBefore(sec, after || null);
   }
   const id = "oem" + (oemTile.n = (oemTile.n || 0) + 1);
-  const label = sig.label || cleanName(sig.name);
-  LABEL[id] = `${label} [OEM ${sig.hdr} ${sig.req}]`;
+  LABEL[id] = `${sig.label} [OEM ${sig.hdr} ${sig.req}]`;
   sec.lastElementChild.insertAdjacentHTML("beforeend",
-    `<div class="tile" id="t_${id}" title="${esc(sig.hdr + " " + sig.req)}"><div class="l">${esc(label)}</div><div class="v" id="v_${id}" style="color:var(--p)">--</div></div>`);
+    `<div class="tile" id="t_${id}" title="${esc(sig.hdr + " " + sig.req)}"><div class="l">${esc(sig.label)}</div><div class="v" id="v_${id}" style="color:var(--p)">--</div></div>`);
+  sec.querySelector(".cnt").textContent = `(${sec.lastElementChild.children.length})`;
   sig.tile = id; oemFound++;
   return id;
 }
 async function readOem(cmd) {
   await setAddr(cmd.hdr, cmd.rax);
-  const raw = await sendCmd(cmd.req, 500);
-  if (isErr(raw)) return null;
+  const msgs = messages(await sendCmd(cmd.req, 500));
+  if (msgs.some((m) => m.startsWith("7F"))) return { bytes: null, replied: true };   // module there, request refused
   const pre = respCode(cmd.req.slice(0, 2)) + cmd.req.slice(2);
-  for (const m of messages(raw)) if (m.startsWith(pre)) return bytesOf(m.slice(pre.length));
-  return null;
+  for (const m of msgs) if (m.startsWith(pre)) return { bytes: bytesOf(m.slice(pre.length)), replied: true };
+  return { bytes: null, replied: msgs.length > 0 };
 }
 async function pollEnhanced() {
   const fresh = oemCmds.filter((c) => c.state === "new").slice(0, 6);      // discovery: probe a few new requests
   const live = oemCmds.filter((c) => c.state === "live");
-  const due = [];
-  for (let i = 0; i < Math.min(4, live.length); i++) due.push(live[(oemRR + i) % live.length]);
+  const graphed = live.filter((c) => c.sigs.some((g) => g.tile && graphSel.includes(g.tile)));   // graphed = every pass
+  const rest = live.filter((c) => !graphed.includes(c));
+  const due = [...graphed];
+  for (let i = 0; i < Math.min(4, rest.length); i++) due.push(rest[(oemRR + i) % rest.length]);
   oemRR += 4;
   const jobs = [...fresh, ...due].sort((a, b) => (a.hdr + a.rax).localeCompare(b.hdr + b.rax));   // fewer module switches
   for (const c of jobs) {
-    const bytes = await readOem(c);
+    if (c.state === "dead") continue;
+    const mod = oemModules[c.hdr] || (oemModules[c.hdr] = { alive: false, silent: 0 });
+    const { bytes, replied } = await readOem(c);
+    if (replied || bytes) mod.alive = true; else mod.silent++;
     let any = false;
     if (bytes) for (const g of c.sigs) {
       const v = extractBits(bytes, g.bix, g.len, g.lsb, g.sign);
@@ -1616,14 +1729,16 @@ async function pollEnhanced() {
       any = true;
       setTile(oemTile(g), text);
     }
-    if (c.state === "new") { c.state = any ? "live" : "dead"; c.miss = 0; }
+    if (c.state === "new") c.state = any ? "live" : "dead";
     else if (any) c.miss = 0;
     else if (++c.miss >= 3) c.state = "dead";
+    // A module that never answers (not fitted on this car): skip the rest of its requests
+    if (!mod.alive && mod.silent >= 2) oemCmds.forEach((o) => { if (o.hdr === c.hdr && o.state === "new") o.state = "dead"; });
   }
   await setAddr(baseHeader, "");
   updateEnhNote();
   if (oemCmds.length && !oemFound && oemCmds.every((c) => c.state !== "new"))
-    $("enhBox").innerHTML = '<div class="box">This vehicle did not answer any of the stored factory requests for this make.</div>';
+    $("enhBox").innerHTML = '<div class="box">This vehicle did not answer any of the factory requests on file for it.</div>';
 }
 
 // ===================== DTCs, VIN, Readiness, Mode $06 =====================
@@ -1770,7 +1885,7 @@ async function liveLoop(token) {
       if (m) setTile("volt", parseFloat(m[1]).toFixed(1) + " V", parseFloat(m[1]));
     }
     const discovering = oemCmds.some((c) => c.state === "new");
-    if (oemCmds.length && cycle % (discovering ? 2 : 5) === 0) await txn(pollEnhanced);
+    if (oemCmds.length && cycle % (discovering ? 2 : 3) === 0) await txn(pollEnhanced);
     if (cycle % 10 === 0) {
       const secs = (performance.now() - t0) / 1000;
       $("rate").textContent = `· ${(cycle / secs).toFixed(1)} refresh/s${batchOK ? " · multi-PID" : ""}`;
@@ -2060,8 +2175,10 @@ with tab2:
   context_bar()
   st.caption("Works in Chrome (Android, Windows, macOS, ChromeOS). Connecting reads the VIN and codes and fills them"
              " into the other tabs automatically. The Bluetooth link stays up while you use the rest of the app.")
-  event = _ble_dashboard(vehicle=ss.vehicle_info, make=make_profile(),
-                         year=ss.vehicle_details.get("Model Year", ""), ai=ss.ble_ai, key="ble", default=None)
+  _vd = ss.vehicle_details or {}
+  oem_repo, oem_sigs = obdb_signals(_vd.get("Make", ""), _vd.get("Model", ""), str(_vd.get("Model Year", "")))
+  event = _ble_dashboard(vehicle=ss.vehicle_info, make=make_profile(), year=_vd.get("Model Year", ""),
+                         oem=oem_sigs, oem_src=oem_repo, ai=ss.ble_ai, key="ble", default=None)
   if isinstance(event, dict) and event.get("id") and event["id"] != ss.ble_last_event:
     ss.ble_last_event = event["id"]
     handle_ble_event(event)
