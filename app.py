@@ -3929,10 +3929,7 @@ FORMAT STRICTLY AS:
     with st.chat_message("user"):
       st.markdown(user_question)
     history = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in ss.chat_history[-6:])
-    plan = re.sub(r"^#+\s*", "", (ss.dtc_result or {}).get("text", ""), flags=re.M).replace("**", "")
-  eng = str(vd.get("Displacement (L)") or vd.get("Engine") or "")
-  if re.fullmatch(r"\d+(\.\d+)?", eng):
-    eng += " L"[:3000]
+    plan = (ss.dtc_result or {}).get("text", "")[:3000]
     chat_prompt = f"""
 You are an expert automotive diagnostic technician assisting a mechanic in the field.
 Vehicle: {ss.vehicle_info or 'General'}
