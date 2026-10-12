@@ -37,7 +37,10 @@ st.markdown(
 LOG_FILE = "scan_history.csv"
 LOG_COLUMNS = ["Timestamp", "Customer", "Phone", "VIN", "Vehicle", "Fault Code (DTC)"]
 VIN_RE = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+# Model can be changed without editing code: add GEMINI_MODEL = "..." to Streamlit Secrets.
+GEMINI_DEFAULT_MODEL = "gemini-3.8-flash"
+GEMINI_FALLBACK_MODEL = "gemini-2.5-flash"   # used automatically if the newer model isn't available on your key
 
 # NHTSA "Make" -> enhanced-PID profile used by the Bluetooth dashboard
 MAKE_PROFILES = {
@@ -125,23 +128,44 @@ def img_part(img: Image.Image) -> dict:
   return {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(b.getvalue()).decode()}}
 
 
-def gemini(parts: list, *, json_mode: bool = False, timeout: int = 45) -> str:
+def gemini_model() -> str:
+  return ss.get("_gemini_model_ok") or secret("GEMINI_MODEL") or GEMINI_DEFAULT_MODEL
+
+
+def gemini_label() -> str:
+  m = gemini_model().replace("gemini-", "Gemini ").replace("-flash", " Flash").replace("-pro", " Pro").replace("-lite", " Lite")
+  return m
+
+
+def gemini(parts: list, *, json_mode: bool = False, timeout: int = 60) -> str:
   key = secret("GEMINI_API_KEY")
   if not key:
     raise AIError("GEMINI_API_KEY is missing from Streamlit Secrets.")
   payload = {"contents": [{"parts": parts}]}
   if json_mode:
     payload["generationConfig"] = {"response_mime_type": "application/json"}
-  try:
-    res = http().post(GEMINI_URL, headers={"x-goog-api-key": key}, json=payload, timeout=timeout)
-  except requests.RequestException as e:
-    raise AIError(f"Gemini connection error: {e}") from e
+  model = gemini_model()
+  for attempt in range(2):
+    try:
+      res = http().post(GEMINI_URL.format(model=model), headers={"x-goog-api-key": key}, json=payload, timeout=timeout)
+    except requests.RequestException as e:
+      raise AIError(f"Gemini connection error: {e}") from e
+    # Model not available on this key/region -> fall back once to the older model
+    if res.status_code in (400, 404) and model != GEMINI_FALLBACK_MODEL and "model" in res.text.lower() and attempt == 0:
+      model = GEMINI_FALLBACK_MODEL
+      ss["_gemini_model_ok"] = model
+      continue
+    break
   if res.status_code != 200:
-    raise AIError(f"Gemini API error ({res.status_code}): {res.text[:300]}")
+    raise AIError(f"Gemini API error ({res.status_code}, {model}): {res.text[:300]}")
   try:
-    return res.json()["candidates"][0]["content"]["parts"][0]["text"]
+    parts_out = res.json()["candidates"][0]["content"]["parts"]
+    text = "".join(p.get("text", "") for p in parts_out if not p.get("thought"))
   except (KeyError, IndexError, ValueError) as e:
     raise AIError("Gemini returned no text (the request may have been blocked).") from e
+  if not text.strip():
+    raise AIError("Gemini returned an empty answer. Try again.")
+  return text
 
 
 def ask_gemini(prompt: str) -> str:
@@ -177,6 +201,52 @@ def ask_perplexity(prompt: str, preset: str = "low") -> str:
       for c in item.get("content", [])
   )
   return text or "No response text received."
+
+
+# --- AI TEAM: Perplexity researches the web, Gemini reasons over everything ---
+def web_research(vehicle: str, codes: str, symptoms: str, question: str = "") -> str:
+  """Perplexity looks up live sources. Returns '' if not configured or it fails."""
+  if not secret("PERPLEXITY_API_KEY"):
+    return ""
+  focus = question or f"fault code(s) {codes or 'none'}; symptoms: {symptoms or 'none given'}"
+  prompt = f"""Research for a professional auto technician. Vehicle: {vehicle}. Problem: {focus}.
+Find from current, reputable sources (manufacturer TSBs and recalls, NHTSA, technician forums like iATN, repair databases):
+1. TSBs / recalls / service campaigns that match (give bulletin numbers and what they fix).
+2. Known pattern failures for this exact platform and how often they're the cause.
+3. Published factory specs relevant to testing (resistance, voltage, pressure, duty cycle, pinouts) if available.
+4. Common misdiagnoses or parts that get replaced for nothing.
+Be specific to this vehicle, list sources, and say clearly when something could not be confirmed."""
+  out = ask_perplexity(prompt)
+  return "" if out.startswith("⚠️") or out == "No response text received." else out
+
+
+TEAM_RULES = """
+WEB RESEARCH FROM PERPLEXITY (live sources; may contain errors):
+{research}
+
+TEAM RULES:
+- Use the web research to sharpen your answer: name the TSBs, recalls and pattern failures it found.
+- Cross-check it against sound diagnostic logic. If the research conflicts with good practice or the scan data, say so.
+- Never invent TSB numbers or specs that aren't in the research or that you aren't sure of.
+- Finish with a short "### Team Notes" section: where the web research and your analysis agree or disagree.
+"""
+
+
+def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: bool, status=None) -> tuple[str, str]:
+  """Perplexity researches first, then Gemini builds the answer with that research. Returns (answer, research)."""
+  research = ""
+  if use_web:
+    if status:
+      status.update(label="🌐 Perplexity is researching TSBs, recalls and known fixes...")
+    research = web_research(vehicle, codes, symptoms)
+  if status:
+    status.update(label=f"✨ {gemini_label()} is building the plan" + (" with the web research..." if research else "..."))
+  full = prompt + (TEAM_RULES.format(research=research[:6000]) if research else "")
+  try:
+    answer = gemini([{"text": full}])
+  except AIError as e:
+    answer = (f"⚠️ Gemini failed ({e}). Showing Perplexity's research instead:\n\n{research}" if research else f"⚠️ {e}")
+  return answer, research
 
 
 # --- VIN ---
@@ -628,7 +698,7 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
     </div>
   </div>
   <div id="status">Status: Ready. Key ON (or engine running), then tap Connect.</div>
-  <div id="driveBanner">🚗 <strong>Test Drive Audio ON:</strong> screen stays awake; spoken alerts for fuel trim, coolant temp and charging voltage; AI check every 60 s.</div>
+  <div id="driveBanner">🚗 <strong>Test Drive ON:</strong> screen stays awake; guided tests run automatically (see 🎯 Guided Tests); spoken alerts for fuel trim, coolant temp and charging; AI check every 60 s.</div>
 
   <h3 style="color:var(--r)">🚨 FAULT CODES</h3>
   <div id="dtcBox" class="box">Codes are read automatically on connect.</div>
@@ -645,6 +715,7 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
 
   <h3 style="color:var(--y)">🎯 GUIDED TESTS <span class="note">fuel trim, VE, catalyst, charging, power &amp; braking</span></h3>
   <div id="tests" class="box" style="color:var(--w)">
+    <div id="driveTests"></div>
     <div class="bar" id="testTabs" style="margin-bottom:8px"></div>
     <div id="testBody"></div>
   </div>
@@ -2110,7 +2181,7 @@ function requestAi(mode) {
   if (aiPendingId) return;
   aiPendingId = "ai-" + Date.now();
   if (mode === "full") $("aiBox").innerHTML = `<span style="color:var(--o)">🤖 Analyzing live data, codes, monitors and Mode $06…</span>`;
-  sendValue({ type: "ai", id: aiPendingId, mode, at: new Date().toLocaleTimeString(), pids: snapshot(), dtcs, readiness: readinessSummary, mode6: mode6Summary });
+  sendValue({ type: "ai", id: aiPendingId, mode, at: new Date().toLocaleTimeString(), pids: snapshot(), dtcs, readiness: readinessSummary, mode6: mode6Summary, tests: T.results || {} });
   const id = aiPendingId;
   setTimeout(() => { if (aiPendingId === id) { aiPendingId = null; if (mode === "full") $("aiBox").textContent = "AI request timed out. Try again."; } }, 90000);
 }
@@ -2233,9 +2304,12 @@ $("driveBtn").addEventListener("click", () => {
   $("driveBanner").style.display = driveOn ? "block" : "none";
   $("driveBtn").textContent = driveOn ? "⏹️ Stop Test Drive" : "🚗 Test Drive Audio";
   wake(driveOn);
-  lastSpeak = 0; speak(driveOn ? "Test drive monitoring on." : "Test drive monitoring off.");
   lastDriveAi = Date.now();
   if (driveOn && !streaming) startStream();
+  if (driveOn) {
+    startDriveTests();
+    lastSpeak = 0; speak("Test drive started. Tests are running. When it's safe, include steady cruising, one full throttle pull, and one firm stop from 30 miles per hour.");
+  } else stopDriveTests();
 });
 $("modBtn").addEventListener("click", async () => { await scanModules(); sendSync(false); });
 $("readBtn").addEventListener("click", async () => {
@@ -2269,6 +2343,7 @@ $("oemSel").addEventListener("change", () => { if (connected) buildEnhanced(); }
 // ===================== Guided tests (eSCAN-style) =====================
 const TESTS = [["ft", "⛽ Fuel Trim"], ["ve", "🌬️ VE / MAF"], ["cat", "♨️ Catalyst"], ["chg", "🔋 Charging"], ["perf", "🏁 Power & Braking"]];
 let testTab = "ft";
+// Test drive: runs the tests automatically while you drive (started/stopped by the Test Drive button)
 const T = {
   ft: { on: false, bins: null, lastT: 0 },
   ve: { phase: "idle", pts: [], peak: null, result: null },
@@ -2277,18 +2352,100 @@ const T = {
   perf: { mode: null, phase: "idle", pts: [], result: null, cal: null, motion: null },
 };
 const nowS = () => performance.now() / 1000;
+T.drive = { on: false, done: {}, perfBest: {} };
+function startDriveTests() {
+  T.drive = { on: true, t0: nowS(), done: {}, perfBest: {}, veBest: null, idleSince: null, idleV: [], dV: [], report: null };
+  T.ft = { on: true, bins: newFtBins(), lastT: 0 };
+  T.ve = { phase: "armed", pts: [], peak: null, result: null };
+  T.cat = { phase: "idle", up: [], dn: [], up2: [], dn2: [], result: null };
+  T.chg = { koeo: T.chg.koeo, idle: null, loaded: null, drive: null };
+  Object.assign(T.perf, { mode: null, phase: "idle", pts: [], acc: [], result: null, auto: true });
+  renderTests();
+}
+function driveTestsTick() {
+  const D = T.drive; if (!D.on) return;
+  const t = nowS(), rpm = num.rpm ?? 0, v = num.spd ?? 0, load = num.load ?? num.absload ?? 0, volt = num.volt ?? num.cmv;
+  // Catalyst: start automatically during steady warm cruise, abort if it stops being steady
+  const steady = (num.ect ?? 0) >= 175 && rpm >= 1500 && rpm <= 3200 && v >= 25 && load >= 10 && load <= 60;
+  if (!T.cat.result && T.cat.phase !== "run" && steady) T.cat = { phase: "run", t0: t, up: [], dn: [], up2: [], dn2: [], result: null, auto: true };
+  if (T.cat.phase === "run" && T.cat.auto && !steady) T.cat.phase = "idle";
+  // Charging: idle voltage after 5 s of idling; lowest/average voltage while driving
+  if (volt != null) {
+    if (v < 1 && rpm > 450 && rpm < 1100) {
+      D.idleSince = D.idleSince || t; D.idleV.push(volt);
+      if (t - D.idleSince >= 5) { T.chg.idle = { v: avg(D.idleV.slice(-30)), rpm }; }
+    } else { D.idleSince = null; D.idleV = []; }
+    if (rpm > 1500 && v > 10) { D.dV.push(volt); if (D.dV.length > 2000) D.dV.shift(); T.chg.drive = { min: Math.min(...D.dV), avg: avg(D.dV) }; }
+  }
+  // Power & braking: arm automatically from a stop, or when above 32 mph
+  const P = T.perf;
+  if (fresh("spd", 2) && (P.phase === "idle" || P.phase === "done")) {
+    if (v <= 0.5) Object.assign(P, { mode: "060", phase: "ready", pts: [], acc: [], auto: true });
+    else if (v >= 32) Object.assign(P, { mode: "brake", phase: "ready", pts: [], acc: [], auto: true });
+  }
+}
+function stopDriveTests() {
+  const D = T.drive; if (!D.on) return;
+  D.on = false;
+  if (T.ft.on) { T.ft.on = false; const r = ftAnalyze(); if (r.enough) reportTest("Fuel trim", r.summary, true); }
+  if (T.ve.phase !== "done") T.ve.phase = T.ve.result ? "done" : "idle";
+  if (T.cat.phase === "run") T.cat.phase = "idle";
+  if (T.chg.idle) reportTest("Charging", { idle: T.chg.idle.v, driving_min: T.chg.drive && T.chg.drive.min, verdict: chgVerdict().replace(/<[^>]+>/g, "") }, true);
+  Object.assign(T.perf, { phase: "idle", mode: null, auto: false });
+  D.report = driveReportHtml();
+  D.minutes = (nowS() - D.t0) / 60;
+  renderTests();
+  const n = Object.keys(D.done).length;
+  lastSpeak = 0; speak(`Test drive done. ${n} test${n === 1 ? "" : "s"} completed. Results are on screen.`);
+  aiPendingId = null;  // don't let a pending mid-drive check block the final review
+  requestAi("full");   // full AI review including the test results
+}
+function driveReportHtml() {
+  const D = T.drive, rows = [];
+  const add = (name, val, grade, note) => rows.push(`<tr><td style="text-align:left">${name}</td><td class="${gradeCls(grade)}">${val}</td><td class="${gradeCls(grade)}">${grade ? gradeTxt(grade) : ""}</td><td style="text-align:left" class="note">${note || ""}</td></tr>`);
+  const ft = ftAnalyze();
+  if (ft.enough) { const w = ["idle", "cruise", "load"].map((k) => ft.a[k].b1).filter((x) => x != null); add("⛽ Fuel trim", w.map((x) => fmtF(x) + "%").join(" / "), ft.grade, "idle / cruise / load, bank 1"); }
+  else add("⛽ Fuel trim", "not enough data", null, "drive longer at idle, cruise and under load");
+  if (T.ve.result) add("🌬️ VE / MAF", T.ve.result.ve.toFixed(0) + "%", T.ve.result.grade, `best WOT pull, ${Math.round(T.ve.result.rpm)} RPM`);
+  else add("🌬️ VE / MAF", "no WOT pull", null, "floor it once from ~2,000 RPM when safe");
+  const c = T.cat.result && T.cat.result.b1;
+  if (c) add("♨️ Catalyst", c.ratio == null ? "n/a" : "ratio " + c.ratio.toFixed(2), c.g, "45 s of steady cruise");
+  else add("♨️ Catalyst", "not run", null, "needs 45 s of steady cruise, 25+ mph, warm engine");
+  if (T.chg.idle || T.chg.drive) {
+    const i = T.chg.idle && T.chg.idle.v, m = T.chg.drive && T.chg.drive.min;
+    add("🔋 Charging", `${i != null ? i.toFixed(1) + " V idle" : ""}${i != null && m != null ? " · " : ""}${m != null ? m.toFixed(1) + " V min driving" : ""}`, worstGrade([chgGrade("idle", i), chgGrade("loaded", m)]));
+  }
+  for (const [k, l] of [["030", "🏁 0–30 mph"], ["060", "🏁 0–60 mph"], ["brake", "🛑 30–0 braking"]]) {
+    const r = D.perfBest[k];
+    if (r) add(l, `${r.time.toFixed(1)} s · ${Math.round(r.distFt)} ft${r.avgG != null ? " · " + r.avgG.toFixed(2) + " g" : ""}`, k === "brake" ? r.grade : null, r.pullSide ? (r.pullSide === "straight" ? "tracks straight" : "pulls " + r.pullSide) : "");
+  }
+  return `<div class="verdict" style="border-color:var(--b)"><b>🚗 Test drive report</b> <span class="note">${new Date().toLocaleTimeString()}</span>
+    <table class="ttab">${rows.join("")}</table><span class="note">Tap a test tab for details. The AI review is running below.</span></div>`;
+}
+function worstGrade(gs) { return gs.includes("r") ? "r" : gs.includes("y") ? "y" : gs.includes("g") ? "g" : null; }
+function driveStatusHtml() {
+  const D = T.drive; if (!D.on) return D.report || "";
+  const B = T.ft.bins || newFtBins(), mins = ((nowS() - D.t0) / 60).toFixed(1);
+  const chip = (ok, txt) => `<span style="margin-right:10px" class="${ok ? "grade-g" : "grade-y"}">${ok ? "✓" : "…"} ${txt}</span>`;
+  return `<div class="verdict" style="border-color:var(--b)"><b>🚗 Test drive running</b> · ${mins} min — drive normally. When safe, include: idle, steady cruise, one full-throttle pull and one firm stop from 30+ mph.<br>
+    ${chip(B.idle.b1.length >= 15, `Idle trims (${B.idle.b1.length})`)}${chip(B.cruise.b1.length >= 15, `Cruise trims (${B.cruise.b1.length})`)}${chip(B.load.b1.length >= 15, `Load trims (${B.load.b1.length})`)}
+    ${chip(!!T.ve.result, "WOT pull / VE")}${chip(!!T.cat.result, T.cat.phase === "run" ? `Catalyst (${Math.max(0, CAT_SECS - (nowS() - T.cat.t0)).toFixed(0)} s)` : "Catalyst (steady cruise)")}
+    ${chip(!!T.chg.idle, "Charging idle")}${chip(!!D.perfBest["030"], "Launch")}${chip(!!D.perfBest.brake, "Firm stop")}</div>`;
+}
 const fresh = (id, maxAge = 3) => numT[id] && nowS() - numT[id] < maxAge;
 const gradeCls = (g) => ({ g: "grade-g", y: "grade-y", r: "grade-r" }[g] || "grade-n");
 const gradeTxt = (g) => ({ g: "GOOD", y: "MARGINAL", r: "BAD" }[g] || "—");
 function fmtF(v, d = 1) { return v == null || !isFinite(v) ? "—" : (v > 0 ? "+" : "") + v.toFixed(d); }
-function reportTest(name, summary) {
+function reportTest(name, summary, quiet) {
   T.results = T.results || {};
   T.results[name] = summary;
   sendValue({ type: "tests", id: "tests-" + Date.now(), results: T.results });
-  speak(`${name} test: ${summary.verdict || summary.grade || "done"}`.slice(0, 160));
+  if (!quiet) speak(`${name} test: ${summary.verdict || summary.grade || "done"}`.slice(0, 160));
+  if (T.drive && T.drive.on) T.drive.done[name] = summary;
 }
 
 function renderTests() {
+  $("driveTests").innerHTML = driveStatusHtml();
   $("testTabs").innerHTML = TESTS.map(([k, l]) => `<button data-ttab="${k}" class="${k === testTab ? "on" : ""}">${l}</button>`).join("");
   const body = $("testBody");
   if (testTab === "ft") body.innerHTML = ftHtml();
@@ -2324,7 +2481,7 @@ function testAction(act) {
 }
 let lastTestRender = 0;
 function testsTick() {
-  ftTick(); veTick(); catTick(); perfTick();
+  driveTestsTick(); ftTick(); veTick(); catTick(); perfTick();
   const typing = document.activeElement && document.activeElement.id === "veDisp";
   if (!typing && nowS() - lastTestRender > 0.7) { lastTestRender = nowS(); renderTests(); }
 }
@@ -2440,8 +2597,15 @@ function veTick() {
         : "Engine breathing and MAF reading look normal.";
       else verdict = lean ? "Low VE <b>and</b> lean fuel trims → the <b>MAF is under-reading</b> airflow (dirty or failing MAF, or air leak after the MAF). Clean/test the MAF."
         : "Low VE with normal fuel trims → the engine really isn't moving air: check for <b>restricted exhaust/catalyst</b>, intake restriction, or cam timing. (Turbo engines read above 100% — this grading is for non-turbo engines.)";
-      V.result = { ve: peak[3], rpm: peak[4], grade: g, verdict };
-      reportTest("Volumetric efficiency", { peakVE: Math.round(peak[3]), rpm: Math.round(peak[4]), grade: gradeTxt(g), verdict: verdict.replace(/<[^>]+>/g, "") });
+      const res = { ve: peak[3], rpm: peak[4], grade: g, verdict };
+      const best = T.drive.on && T.drive.veBest;
+      if (best && best.ve >= res.ve) V.result = best;     // keep the strongest WOT pull of the drive
+      else {
+        V.result = res;
+        if (T.drive.on) T.drive.veBest = res;
+        reportTest("Volumetric efficiency", { peakVE: Math.round(peak[3]), rpm: Math.round(peak[4]), grade: gradeTxt(g), verdict: verdict.replace(/<[^>]+>/g, "") }, T.drive.on);
+      }
+      if (T.drive.on) { V.phase = "armed"; V.pts = []; }
     }
   }
 }
@@ -2514,7 +2678,8 @@ function chgGrade(step, v) {
   return v >= 13.2 && v <= 14.9 ? "g" : v >= 12.8 ? "y" : "r";
 }
 function chgVerdict() {
-  const k = T.chg.koeo && T.chg.koeo.v, i = T.chg.idle && T.chg.idle.v, l = T.chg.loaded && T.chg.loaded.v, out = [];
+  const k = T.chg.koeo && T.chg.koeo.v, i = T.chg.idle && T.chg.idle.v, out = [];
+  const l = T.chg.loaded ? T.chg.loaded.v : (T.chg.drive ? T.chg.drive.min : null);
   if (k != null && k < 12.4) out.push(`Battery resting at ${k.toFixed(2)} V is below a full charge (12.6 V) — charge and load-test the battery.`);
   if (i != null && i > 15.0) out.push("Over-charging at idle — check the regulator / alternator and the voltage-sense circuit.");
   if (i != null && i < 13.2) out.push("Not charging properly at idle — check belt, alternator output, and the B+ and ground cables (voltage drop test).");
@@ -2530,7 +2695,8 @@ function chgHtml() {
   return `<div class="tsteps">Live voltage: <b>${chgVolts() != null ? chgVolts().toFixed(2) + " V" : "—"}</b> · ${Math.round(num.rpm ?? 0)} RPM. Do each step in order and tap Record.</div>
     <table class="ttab">${step("koeo", "1 · Key on, engine off", "Resting battery (after sitting a while is best). Good ≥ 12.4 V.")}
     ${step("idle", "2 · Engine idling, everything off", "Good 13.5–14.9 V.")}
-    ${step("loaded", "3 · 2,000 RPM, loads on", "Headlights high, blower high, rear defrost on. Should stay ≥ 13.2 V.")}</table>
+    ${step("loaded", "3 · 2,000 RPM, loads on", "Headlights high, blower high, rear defrost on. Should stay ≥ 13.2 V.")}
+    ${T.chg.drive ? `<tr><td style="text-align:left"><b>Test drive (automatic)</b><div class="note">Lowest / average while driving</div></td><td class="${gradeCls(chgGrade("loaded", T.chg.drive.min))}" style="font-size:1.1rem">${T.chg.drive.min.toFixed(2)} V</td><td>${T.chg.drive.avg.toFixed(2)} V avg</td><td></td></tr>` : ""}</table>
     <button class="tbtn sec" data-tact="chg-reset">Reset</button>
     ${(T.chg.idle || T.chg.koeo) ? `<div class="verdict">${chgVerdict() || "Finish the remaining steps."}</div>` : ""}`;
 }
@@ -2583,16 +2749,58 @@ function perfTick() {
   if (P.mode === "brake") {
     if (P.phase === "armed" && v >= 32) P.phase = "ready";
     if (P.phase === "ready" && v <= 30) { P.phase = "run"; P.pts = [[t, v]]; P.acc = []; }
-    else if (P.phase === "run") { P.pts.push([t, v]); if (v <= 0.5) perfFinish(); }
+    else if (P.phase === "run") {
+      if (P.auto && v > P.pts[0][1] + 2) { P.phase = "idle"; return; }   // sped back up: not a stop
+      P.pts.push([t, v]); if (v <= 0.5) perfFinish();
+    }
   } else {
     const target = P.mode === "060" ? 60 : 30;
     if (P.phase === "armed" && v <= 0.5) P.phase = "ready";
-    if (P.phase === "ready" && v > 0.5) { P.phase = "run"; P.pts = [[t, 0]]; P.acc = []; }
-    else if (P.phase === "run") { P.pts.push([t, v]); if (v >= target) perfFinish(); }
+    if (P.phase === "ready" && v > 0.5) { P.phase = "run"; P.pts = [[t, 0]]; P.acc = []; P.vmax = 0; P.split = 0; }
+    else if (P.phase === "run") {
+      P.pts.push([t, v]); P.vmax = Math.max(P.vmax, v);
+      if (!P.split && v >= 30) P.split = P.pts.length;
+      if (v >= target) perfFinish();
+      else if (P.auto && (v < P.vmax - 3 || t - P.pts[0][0] > 30)) perfFinish(true);   // lifted before 60
+    }
   }
 }
-function perfFinish() {
-  const P = T.perf, pts = P.pts; P.phase = "done";
+function perfFinish(partial) {
+  const P = T.perf;
+  if (P.auto) return perfAutoFinish(partial);
+  P.phase = "done";
+  const res = perfCompute(P.mode, P.pts);
+  P.result = res;
+  const label = { "060": "0-60 mph", "030": "0-30 mph", brake: "30-0 mph braking" }[P.mode];
+  reportTest(label, perfSummary(res, label));
+}
+function perfSummary(res, label) {
+  return { time_s: +res.time.toFixed(2), distance_ft: Math.round(res.distFt), avg_g: res.avgG && +res.avgG.toFixed(2), peak_g: res.peakG && +res.peakG.toFixed(2),
+    pull: res.pullSide ? `${res.pullSide} (${Math.abs(res.pullG).toFixed(2)} g)` : undefined, verdict: `${label} in ${res.time.toFixed(1)} seconds` };
+}
+// Test-drive mode: keep the best launch (0-30, 0-60) and the hardest stop; ignore gentle driving
+function perfAutoFinish(partial) {
+  const P = T.perf, results = [];
+  if (P.mode === "brake") {
+    const r = perfCompute("brake", P.pts);
+    if ((r.avgG ?? 0) >= 0.3) results.push(["brake", r]);
+  } else {
+    if (P.split) results.push(["030", perfCompute("030", P.pts.slice(0, P.split))]);
+    if (!partial) results.push(["060", perfCompute("060", P.pts)]);
+  }
+  for (const [mode, r] of results) {
+    const best = T.drive.perfBest[mode];
+    const better = !best || (mode === "brake" ? r.avgG > best.avgG : r.time < best.time);
+    if (better) {
+      T.drive.perfBest[mode] = r; P.result = r;
+      const label = { "060": "0-60 mph", "030": "0-30 mph", brake: "30-0 mph braking" }[mode];
+      reportTest(label, perfSummary(r, label), true);
+    }
+  }
+  P.phase = "idle";
+}
+function perfCompute(mode, pts) {
+  const P = T.perf;
   const t = pts[pts.length - 1][0] - pts[0][0];
   let distFt = 0; for (let i = 1; i < pts.length; i++) distFt += ((pts[i][1] + pts[i - 1][1]) / 2) * 1.46667 * (pts[i][0] - pts[i - 1][0]);
   const dv = Math.abs(pts[pts.length - 1][1] - pts[0][1]) * 0.44704;   // m/s
@@ -2604,21 +2812,18 @@ function perfFinish() {
     // forward axis = dominant horizontal direction of the event
     const sum = horiz.reduce((s, h) => [s[0] + h[0], s[1] + h[1], s[2] + h[2]], [0, 0, 0]);
     const n = Math.hypot(...sum) || 1, ev = sum.map((c) => c / n);
-    const fwd = P.fwd || (P.mode === "brake" ? null : ev);   // learned forward axis (from a straight launch)
+    const fwd = P.fwd || (mode === "brake" ? null : ev);   // learned forward axis (from a straight launch)
     peakG = Math.max(...horiz.map((h) => Math.abs(dot(h, fwd || ev))));
-    if (P.mode === "brake" && fwd) pullG = avg(horiz.map((h) => dot(h, cross(fwd, up))));   // + = toward the car's right
+    if (mode === "brake" && fwd) pullG = avg(horiz.map((h) => dot(h, cross(fwd, up))));   // + = toward the car's right
   }
-  const res = { mode: P.mode, time: t, distFt, avgG, peakG, pullG };
-  if (P.mode === "brake") {
+  const res = { mode, time: t, distFt, avgG, peakG, pullG };
+  if (mode === "brake") {
     res.grade = avgG == null ? "n" : avgG >= 0.7 ? "g" : avgG >= 0.5 ? "y" : "r";
     if (pullG != null) res.pullSide = Math.abs(pullG) < 0.04 ? "straight" : (pullG > 0 ? "right" : "left");
   } else {
     res.grade = "n";
   }
-  P.result = res;
-  const label = { "060": "0-60 mph", "030": "0-30 mph", brake: "30-0 mph braking" }[P.mode];
-  reportTest(label, { time_s: +t.toFixed(2), distance_ft: Math.round(distFt), avg_g: avgG && +avgG.toFixed(2), peak_g: peakG && +peakG.toFixed(2),
-    pull: res.pullSide ? `${res.pullSide} (${Math.abs(pullG).toFixed(2)} g)` : undefined, verdict: `${label} in ${t.toFixed(1)} seconds` });
+  return res;
 }
 function perfHtml() {
   const P = T.perf, r = P.result;
@@ -2763,6 +2968,9 @@ I/M READINESS: {ev.get('readiness') or 'Not read'}
 MODE $06 RESULTS (value [min..max]):
 {ev.get('mode6') or 'Not read'}
 
+GUIDED TEST RESULTS (fuel trim / VE / catalyst / charging / power & braking, if run):
+{json.dumps(ev.get('tests') or ss.test_results or {}) or 'none'}
+
 DIAGNOSTIC TASK:
 1. Fuel control: total trim (STFT + LTFT) Bank 1 vs Bank 2; single- vs dual-bank pattern.
 2. Powertrain/drivetrain health from whatever enhanced data is present.
@@ -2836,14 +3044,15 @@ with tab3:
 
   codes = current_codes()
   code_str = ", ".join(codes)
+  has_pplx = bool(secret("PERPLEXITY_API_KEY"))
   col_engine, col_btn = st.columns([3, 1.4])
   with col_engine:
-    ai_engine = st.selectbox(
-        "AI engine",
-        options=["gemini", "perplexity"],
-        format_func={"gemini": "✨ Google Gemini 2.5 Flash (deep circuit logic)",
-                     "perplexity": "🌐 Perplexity (live web, TSBs)"}.get,
-    )
+    use_web = st.toggle("🌐 Perplexity web research + ✨ Gemini analysis (work together)", value=has_pplx,
+                        disabled=not has_pplx, key="use_web",
+                        help="Perplexity finds TSBs, recalls and known fixes online; Gemini combines that with your scan "
+                             "data and tests to build the plan. Turn off for a faster Gemini-only answer.")
+    if not has_pplx:
+      st.caption("Add PERPLEXITY_API_KEY to Streamlit Secrets to turn on web research.")
   with col_btn:
     st.write("")
     symptoms = ss.symptoms.strip()
@@ -2882,9 +3091,10 @@ Format strictly using these Markdown sections:
 ### 5. Known Platform Pattern Failures & TSBs
 - Real-world failure patterns and TSBs for {vehicle} matching these symptoms.
 """
-    with st.spinner(f"Building a symptom-based test plan via {ai_engine.title()}..."):
-      text = ask_gemini(sym_prompt) if ai_engine == "gemini" else ask_perplexity(sym_prompt)
-    ss.dtc_result = {"title": f"Symptoms · {vehicle} · {ai_engine.title()}", "text": text}
+    with st.status("Working on it...", expanded=False) as status:
+      text, research = team_answer(sym_prompt, vehicle, "", symptoms, use_web, status)
+      status.update(label="Done", state="complete")
+    ss.dtc_result = {"title": f"Symptoms · {vehicle}", "text": text, "research": research}
 
   if lookup_clicked and codes:
     vehicle = ss.vehicle_info or "General OBD-II Vehicle"
@@ -2924,13 +3134,18 @@ Format strictly using these Markdown sections:
 ### 6. Known Platform Pattern Failures & TSBs
 - Real-world failure patterns for {vehicle} on this system.
 """
-    with st.spinner(f"Building the {code_str} test plan via {ai_engine.title()}..."):
-      text = ask_gemini(dtc_prompt) if ai_engine == "gemini" else ask_perplexity(dtc_prompt)
-    ss.dtc_result = {"title": f"{code_str} · {vehicle} · {ai_engine.title()}", "text": text}
+    with st.status("Working on it...", expanded=False) as status:
+      text, research = team_answer(dtc_prompt, vehicle, code_str, symptoms, use_web, status)
+      status.update(label="Done", state="complete")
+    ss.dtc_result = {"title": f"{code_str} · {vehicle}", "text": text, "research": research}
 
   if ss.dtc_result:  # stays on screen while you use other tabs
-    with st.expander(f"📋 Test plan: {ss.dtc_result['title']}", expanded=True):
+    team = "🌐 Perplexity + ✨ " + gemini_label() if ss.dtc_result.get("research") else "✨ " + gemini_label()
+    with st.expander(f"📋 Test plan: {ss.dtc_result['title']} · {team}", expanded=True):
       st.markdown(ss.dtc_result["text"])
+    if ss.dtc_result.get("research"):
+      with st.expander("🌐 Web research Perplexity found (TSBs, recalls, known fixes, sources)"):
+        st.markdown(ss.dtc_result["research"])
 
   # ---------- 2. Scope lab ----------
   st.write("---")
@@ -2970,6 +3185,9 @@ Compression/Leakdown: {comp_data or 'Not tested'}
 Fuel Pressure & Bleed-down: {fuel_data or 'Not tested'}
 Voltage Drop / Electrical: {volt_data or 'Not tested'}
 Scope Observations: {scope_notes or 'None reported'}
+
+Web research already found for this job (TSBs / known fixes, if any):
+{(ss.dtc_result or {}).get("research", "")[:2500] or 'none'}
 
 TASK:
 - Identify the signal type (secondary/primary ignition, injector voltage/current, CKP/CMP correlation, relative compression, PWM, sensor drop).
@@ -3024,12 +3242,26 @@ Latest scope/readings evaluation (if any): {(ss.scope_result or 'none')[:1500]}
 Recent conversation:
 {history}
 
+Earlier web research for this job (if any): {(ss.dtc_result or {}).get("research", "")[:2500] or 'none'}
+
 Respond directly, practically, and concisely to the latest question. Focus on physical shop tests, circuit checks, and logical isolation.
 """
     with st.chat_message("assistant"):
-      with st.spinner("Gemini thinking..."):
-        reply = ask_gemini(chat_prompt)
+      with st.status("Working on it...", expanded=False) as status:
+        research = ""
+        if ss.get("use_web", False) and secret("PERPLEXITY_API_KEY"):
+          status.update(label="🌐 Perplexity is searching for this question...")
+          research = web_research(ss.vehicle_info or "General vehicle", code_str, ss.symptoms.strip(), question=user_question)
+        status.update(label=f"✨ {gemini_label()} is answering...")
+        try:
+          reply = gemini([{"text": chat_prompt + (TEAM_RULES.format(research=research[:4000]) if research else "")}])
+        except AIError as e:
+          reply = f"⚠️ {e}" + (f"\n\n**Web research:**\n{research}" if research else "")
+        status.update(label="Done", state="complete")
       st.markdown(reply)
+      if research:
+        with st.expander("🌐 Sources Perplexity found"):
+          st.markdown(research)
     ss.chat_history.append({"role": "assistant", "content": reply})
 
 # ========================================================
