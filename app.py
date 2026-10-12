@@ -2,6 +2,7 @@ import base64
 import csv
 from datetime import datetime
 import hashlib
+import html as html_lib
 import io
 import json
 import os
@@ -703,6 +704,7 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
   <h3 style="color:var(--r)">🚨 FAULT CODES</h3>
   <div id="dtcBox" class="box">Codes are read automatically on connect.</div>
   <div id="clearWarn" class="box" style="display:none;border-color:var(--o);color:var(--o);font-weight:700"></div>
+  <div id="ffBox" class="box" style="display:none"></div>
   <h3 style="color:var(--b)">🧭 ALL MODULES <span id="modNote" class="note">ABS, airbag, body, HVAC, cluster… scanned automatically after connect</span></h3>
   <div id="modBox" class="box">Not scanned yet.</div>
 
@@ -2091,6 +2093,7 @@ async function loadMode6() {
   if (!isCan) { box.textContent = "Mode $06 decoding needs a CAN vehicle (most 2008+)."; mode6Summary = "Not available (non-CAN)"; return; }
   box.innerHTML = `<span style="color:var(--o)">Reading supported monitors…</span>`;
   const sup = await supported("06", ["00", "20", "40", "60", "80", "A0"]);
+  misMids = [...(sup || new Set(DEFAULT_MIDS))].filter((m) => m >= "A2" && m <= "AD").sort();
   const mids = sup ? [...sup].filter((m) => MID_NAMES[m]) : DEFAULT_MIDS;
   let html = "", lines = [];
   for (const mid of mids) {
@@ -2134,6 +2137,7 @@ async function liveLoop(token) {
     }
     const discovering = oemCmds.some((c) => c.state === "new");
     if (oemCmds.length && cycle % (discovering ? 2 : 3) === 0) await txn(pollEnhanced);
+    await extraPolls(cycle);
     if (cycle % 10 === 0) {
       const secs = (performance.now() - t0) / 1000;
       $("rate").textContent = `· ${(cycle / secs).toFixed(1)} refresh/s${batchOK ? " · multi-PID" : ""}`;
@@ -2245,6 +2249,7 @@ async function initVehicle() {
 
   log("Reading supported PIDs…");
   const sup = await supported("01", ["00", "20", "40", "60", "80", "A0"]);
+  sup01 = sup;
   choosePids(sup);
 
   if (isCan && active.length >= 2) {   // can this ECU answer several PIDs in one request?
@@ -2277,7 +2282,7 @@ $("bleBtn").addEventListener("click", async () => {
     $("bleBtn").textContent = "✅ Connected";
 
     log("Reading VIN & codes…");
-    await readVin(); await readDtcs();
+    await readVin(); await readDtcs(); await readFreezeFrame();
     log("Reading I/M readiness…"); await loadReadiness();
     log("Reading Mode $06…"); await loadMode6();
     startStream();
@@ -2293,7 +2298,7 @@ $("bleBtn").addEventListener("click", async () => {
 
 function sendSync(auto) {
   const modules = modResults.filter((m) => m.codes.length).map((m) => ({ name: m.name, addr: m.hdr, codes: m.codes }));
-  sendValue({ type: "sync", id: "sync-" + Date.now(), vin: vinRead, dtcs: Object.assign({}, dtcs, { modules }), auto: !!auto,
+  sendValue({ type: "sync", id: "sync-" + Date.now(), vin: vinRead, dtcs: Object.assign({}, dtcs, { modules, freeze: freezeFrame }), auto: !!auto,
     pids: snapshot(), readiness: readinessSummary, mode6: mode6Summary, at: new Date().toLocaleTimeString() });
   log(`Sent to app → VIN ${vinRead || "not reported"} · ${dtcs.stored.length} stored / ${dtcs.pending.length} pending code(s)`);
 }
@@ -2341,7 +2346,9 @@ $("syncBtn").addEventListener("click", async () => { if (!vinRead) await txn(rea
 $("oemSel").addEventListener("change", () => { if (connected) buildEnhanced(); });
 
 // ===================== Guided tests (eSCAN-style) =====================
-const TESTS = [["ft", "⛽ Fuel Trim"], ["ve", "🌬️ VE / MAF"], ["cat", "♨️ Catalyst"], ["chg", "🔋 Charging"], ["perf", "🏁 Power & Braking"]];
+const TESTS = [["ft", "⛽ Fuel Trim"], ["ve", "🌬️ VE / MAF"], ["cat", "♨️ Catalyst"], ["chg", "🔋 Charging"], ["perf", "🏁 Power & Braking"],
+  ["mis", "🔥 Misfires"], ["rdy", "📋 Readiness Coach"], ["vac", "🧭 Vacuum"], ["warm", "🌡️ Warm-up"], ["crank", "🔑 Cranking"],
+  ["trans", "⚙️ Trans"], ["nvh", "〰️ Vibration"], ["tail", "👂 Tailpipe"], ["rec", "💾 Record & Compare"]];
 let testTab = "ft";
 // Test drive: runs the tests automatically while you drive (started/stopped by the Test Drive button)
 const T = {
@@ -2360,6 +2367,7 @@ function startDriveTests() {
   T.cat = { phase: "idle", up: [], dn: [], up2: [], dn2: [], result: null };
   T.chg = { koeo: T.chg.koeo, idle: null, loaded: null, drive: null };
   Object.assign(T.perf, { mode: null, phase: "idle", pts: [], acc: [], result: null, auto: true });
+  extraDriveStart();
   renderTests();
 }
 function driveTestsTick() {
@@ -2392,6 +2400,7 @@ function stopDriveTests() {
   if (T.cat.phase === "run") T.cat.phase = "idle";
   if (T.chg.idle) reportTest("Charging", { idle: T.chg.idle.v, driving_min: T.chg.drive && T.chg.drive.min, verdict: chgVerdict().replace(/<[^>]+>/g, "") }, true);
   Object.assign(T.perf, { phase: "idle", mode: null, auto: false });
+  extraDriveStop();
   D.report = driveReportHtml();
   D.minutes = (nowS() - D.t0) / 60;
   renderTests();
@@ -2419,6 +2428,7 @@ function driveReportHtml() {
     const r = D.perfBest[k];
     if (r) add(l, `${r.time.toFixed(1)} s · ${Math.round(r.distFt)} ft${r.avgG != null ? " · " + r.avgG.toFixed(2) + " g" : ""}`, k === "brake" ? r.grade : null, r.pullSide ? (r.pullSide === "straight" ? "tracks straight" : "pulls " + r.pullSide) : "");
   }
+  extraReportRows(add);
   return `<div class="verdict" style="border-color:var(--b)"><b>🚗 Test drive report</b> <span class="note">${new Date().toLocaleTimeString()}</span>
     <table class="ttab">${rows.join("")}</table><span class="note">Tap a test tab for details. The AI review is running below.</span></div>`;
 }
@@ -2430,7 +2440,8 @@ function driveStatusHtml() {
   return `<div class="verdict" style="border-color:var(--b)"><b>🚗 Test drive running</b> · ${mins} min — drive normally. When safe, include: idle, steady cruise, one full-throttle pull and one firm stop from 30+ mph.<br>
     ${chip(B.idle.b1.length >= 15, `Idle trims (${B.idle.b1.length})`)}${chip(B.cruise.b1.length >= 15, `Cruise trims (${B.cruise.b1.length})`)}${chip(B.load.b1.length >= 15, `Load trims (${B.load.b1.length})`)}
     ${chip(!!T.ve.result, "WOT pull / VE")}${chip(!!T.cat.result, T.cat.phase === "run" ? `Catalyst (${Math.max(0, CAT_SECS - (nowS() - T.cat.t0)).toFixed(0)} s)` : "Catalyst (steady cruise)")}
-    ${chip(!!T.chg.idle, "Charging idle")}${chip(!!D.perfBest["030"], "Launch")}${chip(!!D.perfBest.brake, "Firm stop")}</div>`;
+    ${chip(!!T.chg.idle, "Charging idle")}${chip(!!D.perfBest["030"], "Launch")}${chip(!!D.perfBest.brake, "Firm stop")}
+    ${extraDriveChips(chip)}</div>`;
 }
 const fresh = (id, maxAge = 3) => numT[id] && nowS() - numT[id] < maxAge;
 const gradeCls = (g) => ({ g: "grade-g", y: "grade-y", r: "grade-r" }[g] || "grade-n");
@@ -2453,7 +2464,8 @@ function renderTests() {
   if (testTab === "cat") body.innerHTML = catHtml();
   if (testTab === "chg") body.innerHTML = chgHtml();
   if (testTab === "perf") body.innerHTML = perfHtml();
-  drawTestPlots();
+  if (EXTRA_HTML[testTab]) body.innerHTML = EXTRA_HTML[testTab]();
+  drawTestPlots(); drawExtraPlots();
 }
 document.addEventListener("click", (e) => {
   const t = e.target.closest("[data-ttab]");
@@ -2462,7 +2474,8 @@ document.addEventListener("click", (e) => {
   if (a) testAction(a.dataset.tact);
 });
 function testAction(act) {
-  if (!connected && !/^perf-(motion|level)$/.test(act)) { alert("Connect to the vehicle first."); return; }
+  if (!connected && !/^(perf-(motion|level)|nvh-|tail-|rec-)/.test(act)) { alert("Connect to the vehicle first."); return; }
+  if (EXTRA_ACTIONS[act]) { EXTRA_ACTIONS[act](); renderTests(); return; }
   ({
     "ft-start": () => { T.ft.on = true; T.ft.bins = newFtBins(); },
     "ft-stop": () => { T.ft.on = false; const r = ftAnalyze(); if (r.enough) reportTest("Fuel trim", r.summary); },
@@ -2481,8 +2494,9 @@ function testAction(act) {
 }
 let lastTestRender = 0;
 function testsTick() {
-  driveTestsTick(); ftTick(); veTick(); catTick(); perfTick();
-  const typing = document.activeElement && document.activeElement.id === "veDisp";
+  driveTestsTick(); ftTick(); veTick(); catTick(); perfTick(); extraTicks();
+  const ae = document.activeElement;
+  const typing = ae && /INPUT|TEXTAREA|SELECT/.test(ae.tagName) && ae.closest("#tests");
   if (!typing && nowS() - lastTestRender > 0.7) { lastTestRender = nowS(); renderTests(); }
 }
 
@@ -2883,6 +2897,614 @@ function drawTestPlots() {
     g.fillStyle = c("--muted"); g.textAlign = "left"; g.fillText("g/s", 4, 12);
   }
 }
+
+// ===================== More tests: freeze frame, misfire monitor, readiness coach, vacuum, warm-up,
+// cranking, transmission, vibration (NVH), tailpipe listener, record / compare / export =====================
+let sup01 = null, freezeFrame = null, misMids = [];
+T.inp = T.inp || {};
+document.addEventListener("input", (e) => { const k = e.target.dataset && e.target.dataset.tin; if (k) T.inp[k] = e.target.value; });
+const inp = (k, ph, w = 90) => `<input data-tin="${k}" value="${esc(T.inp[k] || "")}" placeholder="${ph}" style="width:${w}px;background:var(--card);color:var(--w);border:1px solid var(--line);padding:4px 6px;border-radius:4px">`;
+const btn = (act, label, sec) => `<button class="tbtn${sec ? " sec" : ""}" data-tact="${act}">${label}</button>`;
+const sd = (a) => { if (a.length < 2) return 0; const m = avg(a); return Math.sqrt(avg(a.map((x) => (x - m) ** 2))); };
+function cylCount() { const v = parseInt(T.inp.cyl || ARGS.cyl, 10); return v >= 2 && v <= 12 ? v : null; }
+
+// ---------- Freeze frame (Mode $02) ----------
+async function readFreezeFrame() {
+  try {
+    const r = messages(await sendCmd("020200", 1500)).find((m) => m.startsWith("420200"));
+    const code = r && r.length >= 10 && r.substr(6, 4) !== "0000" ? decodeDtc(r.substr(6, 4)) : null;
+    if (!code) { freezeFrame = null; renderFreeze(); return; }
+    const want = ["03", "04", "05", "06", "07", "08", "09", "0A", "0B", "0C", "0D", "0E", "0F", "10", "11", "23", "2F", "33", "42", "43", "44", "1F", "31", "21", "46"];
+    const vals = {};
+    for (const p of want) {
+      if (sup01 && !sup01.has(p)) continue;
+      const m = messages(await sendCmd("02" + p + "00", 700)).find((x) => x.startsWith("42" + p + "00"));
+      const d = PIDS[p];
+      if (!m || !d) continue;
+      const b = bytesOf(m.slice(6));
+      if (b.length < d.len) continue;
+      const t = d.fn(b); if (t != null) vals[LABEL[d.tile] || d.tile] = t;
+    }
+    freezeFrame = { dtc: code, vals };
+  } catch (_) { freezeFrame = null; }
+  renderFreeze();
+}
+function renderFreeze() {
+  const box = $("ffBox");
+  if (!freezeFrame) { box.style.display = "none"; return; }
+  box.style.display = "block";
+  box.innerHTML = `<div style="color:var(--w);font-weight:700;margin-bottom:6px">❄️ Freeze frame — conditions when <span style="color:var(--r)">${esc(freezeFrame.dtc)}</span> set</div>
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(120px,1fr));margin:0">${Object.entries(freezeFrame.vals).map(([k, v]) =>
+      `<div class="tile" style="cursor:default"><div class="l">${esc(k)}</div><div class="v" style="color:var(--b);font-size:1rem">${esc(v)}</div></div>`).join("")}</div>`;
+}
+
+// ---------- background polls (misfire counters, this-drive monitors) ----------
+let misRR = 0, misLive = {}, misEvents = [], r41 = null;
+async function extraPolls(cycle) {
+  if (!isCan) return;
+  const focus = T.drive.on || ["mis", "rdy"].includes(testTab);
+  if (misMids.length && cycle % (focus ? 3 : 15) === 0) await txn(pollMisfires);
+  if (cycle % (focus ? 10 : 40) === 0) await txn(pollMonitors41);
+}
+async function pollMisfires() {
+  const ids = [...new Set([misMids[misRR % misMids.length], misMids[(misRR + 1) % misMids.length]])];
+  misRR += 2;
+  for (const mid of ids) {
+    const cur = parse06(await sendCmd("06" + mid, 800), mid).find((r) => r.tid === 0x0C);
+    if (!cur) continue;
+    const cyl = parseInt(mid, 16) - 0xA1;
+    const L = misLive[cyl] || (misLive[cyl] = { cur: cur.v, tot: 0 });
+    if (cur.v > L.cur) {
+      const n = cur.v - L.cur; L.tot += n;
+      misEvents.push({ cyl, n, rpm: num.rpm, load: num.load, ect: num.ect, spd: num.spd, at: new Date().toLocaleTimeString() });
+      if (misEvents.length > 300) misEvents.shift();
+      speak(`Misfire, cylinder ${cyl}`);
+    }
+    L.cur = cur.v;
+  }
+}
+async function pollMonitors41() {
+  const m = messages(await sendCmd("0141", 800)).find((x) => x.startsWith("4141") && x.length >= 12);
+  if (m) { const [, B, C, D] = bytesOf(m.slice(4, 12)); r41 = { B, C, D, at: new Date().toLocaleTimeString() }; }
+}
+
+// ---------- 🔥 Misfire monitor ----------
+function misAnalyze() {
+  const tot = Object.entries(misLive).map(([c, L]) => [+c, L.tot]).filter(([, n]) => n > 0).sort((a, b) => b[1] - a[1]);
+  const all = tot.reduce((s, [, n]) => s + n, 0);
+  if (!all) return { all, text: "No new misfires counted since monitoring started." };
+  const lines = [];
+  if (tot.length === 1 || tot[0][1] >= all * 0.75)
+    lines.push(`<b>Cylinder ${tot[0][0]}</b> has ${Math.round(tot[0][1] / all * 100)}% of the misfires → swap that coil (and plug) with a neighbor and retest. Misfire follows the part = coil/plug; stays on cylinder ${tot[0][0]} = injector, compression or valve (run a compression/leak-down or relative compression on the scope).`);
+  else if (tot.length >= 3)
+    lines.push("Misfires spread across several cylinders → look for a shared cause: vacuum leak, low fuel pressure/volume, EGR stuck open, contaminated fuel, cam/crank timing, or a weak ignition supply.");
+  else lines.push(`Misfires on cylinders ${tot.map(([c]) => c).join(" & ")} → if they share a coil pack, injector circuit or bank, check that first.`);
+  const ev = misEvents.slice(-80);
+  if (ev.length >= 3) {
+    const idle = ev.filter((e) => (e.spd ?? 0) < 3).length, load = ev.filter((e) => (e.load ?? 0) >= 60).length, cold = ev.filter((e) => (e.ect ?? 200) < 150).length;
+    if (load >= ev.length * 0.6) lines.push("Mostly <b>under load</b> → ignition breakdown (coil, plug gap, boots) or lean under load (fuel delivery).");
+    if (idle >= ev.length * 0.6) lines.push("Mostly <b>at idle</b> → vacuum leak, injector, valve sealing or carbon; compare fuel trims at idle.");
+    if (cold >= ev.length * 0.6) lines.push("Mostly <b>cold</b> → injector leakdown, carbon on intake valves (direct injection), or sticking valve.");
+  }
+  return { all, text: lines.join("<br>"), worst: tot[0] };
+}
+function misHtml() {
+  if (!misMids.length) return `<div class="tsteps">This vehicle doesn't report per-cylinder misfire counters (Mode $06 MIDs A2+). The OEM section may still show misfire counts if the factory list has them.</div>`;
+  const cyls = misMids.map((m) => parseInt(m, 16) - 0xA1);
+  const max = Math.max(1, ...cyls.map((c) => (misLive[c] ? misLive[c].tot : 0)));
+  const bars = cyls.map((c) => {
+    const L = misLive[c] || { cur: "—", tot: 0 };
+    return `<div style="display:flex;align-items:center;gap:8px;margin:3px 0"><span style="width:60px">Cyl ${c}</span>
+      <div style="flex:1;background:var(--bg);border-radius:3px;height:14px"><div style="width:${L.tot / max * 100}%;min-width:${L.tot ? 4 : 0}px;height:14px;border-radius:3px;background:var(--r)"></div></div>
+      <span style="width:150px" class="note"><b style="color:var(--w)">${L.tot}</b> new · ${L.cur} this cycle</span></div>`;
+  }).join("");
+  const a = misAnalyze();
+  const ev = misEvents.slice(-8).reverse().map((e) => `<tr><td>${e.at}</td><td>Cyl ${e.cyl}</td><td>${e.n}</td><td>${Math.round(e.rpm ?? 0)}</td><td>${Math.round(e.load ?? 0)}%</td><td>${Math.round(e.spd ?? 0)} mph</td><td>${Math.round(e.ect ?? 0)}°F</td></tr>`).join("");
+  return `<div class="tsteps">Live per-cylinder misfire counters from the ECM (updates every few seconds; spoken alert on each new misfire). Drive or idle the way the customer describes.</div>
+    ${btn("mis-reset", "Reset counts", 1)}
+    <div style="margin:8px 0">${bars}</div>
+    ${ev ? `<table class="ttab"><tr><th>Time</th><th>Cyl</th><th>Count</th><th>RPM</th><th>Load</th><th>Speed</th><th>Coolant</th></tr>${ev}</table>` : ""}
+    <div class="verdict">${a.text}</div>`;
+}
+
+// ---------- 📋 Readiness coach (PID $41: monitors this drive cycle) ----------
+const MON_TIPS = {
+  "Catalyst": "Warm engine, then steady 45–60 mph with light throttle for 3–5 minutes.",
+  "Heated Catalyst": "Same as catalyst: warm, steady cruise for several minutes.",
+  "EVAP": "Fuel 15–85%. Usually needs an overnight cold soak (6–8 h), cold start, a 10+ min drive with steady cruise, then idle/key-off. Some makes run it after key-off.",
+  "Secondary Air": "Cold start (coolant below ~100°F) and idle 1–2 minutes.",
+  "A/C Refrigerant": "Rarely used.",
+  "O2 Sensor": "Warm engine, steady 40–55 mph for 3 minutes, then a few long coast-downs without braking (fuel cut).",
+  "O2 Heater": "Cold start and idle 2 minutes; some cars finish it after key-off.",
+  "EGR / VVT": "Several coast-downs from 50+ mph off the throttle, plus steady 35–55 mph cruising.",
+  "Misfire": "Runs continuously during normal driving.", "Fuel System": "Runs continuously once in closed loop.",
+  "Comprehensive": "Runs continuously.",
+};
+function readinessRows(B, C, D, thisDrive) {
+  const names = ["Catalyst", "Heated Catalyst", "EVAP", "Secondary Air", "A/C Refrigerant", "O2 Sensor", "O2 Heater", "EGR / VVT"];
+  const rows = [["Misfire", 0, 4], ["Fuel System", 1, 5], ["Comprehensive", 2, 6]].map(([n, sb, rb]) => ({ n, sup: (B >> sb) & 1, done: !((B >> rb) & 1) }));
+  names.forEach((n, bit) => rows.push({ n, sup: (C >> bit) & 1, done: !((D >> bit) & 1) }));
+  return rows.filter((r) => r.sup || !thisDrive);
+}
+let r01raw = null;
+function rdyHtml() {
+  let since = null;
+  const m = (readinessSummary || "");
+  const rows = r41 ? readinessRows(r41.B, r41.C, r41.D, true) : [];
+  const left = rows.filter((r) => !r.done);
+  return `<div class="tsteps">Shows which emissions monitors have finished <b>on this drive</b> (updates every ~20 s) and what driving each remaining one needs. Overall status since codes were cleared: ${esc(m || "not read")}</div>
+    ${btn("rdy-refresh", "Refresh now", 1)} <span class="note">${r41 ? "updated " + r41.at : "waiting for first reading…"}</span>
+    ${rows.length ? `<table class="ttab"><tr><th style="text-align:left">Monitor</th><th>This drive</th><th style="text-align:left">How to finish it</th></tr>${rows.map((r) =>
+      `<tr><td style="text-align:left">${r.n}</td><td class="${r.done ? "grade-g" : "grade-y"}">${r.done ? "✓ complete" : "… running"}</td><td style="text-align:left" class="note">${r.done ? "" : MON_TIPS[r.n] || ""}</td></tr>`).join("")}</table>` : ""}
+    ${r41 ? `<div class="verdict">${left.length ? `${left.length} monitor(s) still running: <b>${left.map((r) => r.n).join(", ")}</b>. Exact drive cycles vary by make — check service info for the factory procedure.` : "All supported monitors have completed on this drive. ✓"}</div>` : ""}`;
+}
+
+// ---------- 🧭 Electronic vacuum gauge (from MAP) ----------
+T.vac = { trace: [], idle: null, snap: null, hold: null, step: null, buf: [], t0: 0 };
+function vacNow() {
+  if (num.map == null || !fresh("map", 3)) return null;
+  const baro = num.baro ?? 29.92;            // inHg
+  return baro - num.map * 2.03602;           // psi -> inHg
+}
+function vacTick() {
+  const v = vacNow(); if (v == null) return;
+  const t = nowS(), V = T.vac;
+  if (!V.trace.length || t - V.trace[V.trace.length - 1][0] >= 0.15) { V.trace.push([t, v]); V.trace = V.trace.filter((p) => t - p[0] < 40); }
+  if (!V.step) return;
+  V.buf.push([t, v, num.rpm ?? 0, num.tps ?? 0]);
+  const el = t - V.t0;
+  if (V.step === "idle" && el >= 10) { const a = V.buf.map((p) => p[1]); V.idle = { avg: avg(a), sd: sd(a), min: Math.min(...a), max: Math.max(...a) }; V.step = null; vacReport(); }
+  if (V.step === "hold" && el >= 30) {
+    const ok = V.buf.filter((p) => p[2] >= 2000 && p[2] <= 3000);
+    if (ok.length < 20) { V.hold = { error: "RPM wasn't held near 2,500 — try again." }; }
+    else { const first = avg(ok.slice(0, 15).map((p) => p[1])), last = avg(ok.slice(-15).map((p) => p[1])); V.hold = { first, last, drop: first - last }; }
+    V.step = null; vacReport();
+  }
+  if (V.step === "snap") {
+    const snapped = V.buf.some((p) => p[3] >= 60);
+    if (snapped && el > 1 && V.buf[V.buf.length - 1][3] < 20 && !V.relT) V.relT = t;
+    if ((V.relT && t - V.relT > 2.5) || el > 12) {
+      const a = V.buf.map((p) => p[1]), i = V.idle ? V.idle.avg : null;
+      const after = V.relT ? V.buf.filter((p) => p[0] >= V.relT).map((p) => p[1]) : [];
+      V.snap = snapped ? { min: Math.min(...a), peak: after.length ? Math.max(...after) : null, idle: i } : { error: "No throttle snap detected — snap it quickly to wide open and release." };
+      V.step = null; V.relT = null; vacReport();
+    }
+  }
+}
+function vacVerdict() {
+  const V = T.vac, out = []; let g = "g";
+  if (V.idle) {
+    const a = V.idle.avg;
+    if (V.idle.sd > 1.5) { out.push(`Idle needle <b>flutters</b> (±${V.idle.sd.toFixed(1)} inHg) → burnt/sticking valve, misfire, or leaking intake runner. Check misfire counters.`); g = "r"; }
+    else if (a < 15) { out.push(`Idle vacuum low (${a.toFixed(1)} inHg) → <b>vacuum leak</b>, late cam/ignition timing, or low compression. Smoke test and check timing.`); g = "r"; }
+    else if (a < 17) { out.push(`Idle vacuum a bit low (${a.toFixed(1)} inHg) → small leak, retarded timing, or worn engine. (Lower is normal at high altitude; aggressive cams also idle lower.)`); g = "y"; }
+    else out.push(`Idle vacuum ${a.toFixed(1)} inHg and steady → normal.`);
+  }
+  if (V.snap && !V.snap.error) {
+    const i = V.snap.idle ?? (V.idle && V.idle.avg);
+    if (V.snap.peak != null && i != null && V.snap.peak < i + 1.5) { out.push("On snap release the vacuum didn't overshoot idle → worn rings, poor valve sealing, or <b>exhaust restriction</b>."); g = g === "r" ? "r" : "y"; }
+    else out.push("Snap test: vacuum dropped and rebounded above idle → rings and valves sealing OK.");
+  }
+  if (V.hold && !V.hold.error) {
+    if (V.hold.drop >= 3) { out.push(`At 2,500 RPM vacuum fell ${V.hold.drop.toFixed(1)} inHg over 30 s → <b>exhaust restriction</b> (clogged cat/muffler). Confirm with back-pressure test or the VE test.`); g = "r"; }
+    else out.push(`2,500 RPM hold steady (${V.hold.last.toFixed(1)} inHg) → no exhaust restriction.`);
+  }
+  return { g, text: out.join("<br>") };
+}
+function vacReport() { const r = vacVerdict(); if (r.text) reportTest("Vacuum (MAP)", { idle: T.vac.idle && +T.vac.idle.avg.toFixed(1), hold_drop: T.vac.hold && T.vac.hold.drop != null ? +T.vac.hold.drop.toFixed(1) : undefined, grade: gradeTxt(r.g), verdict: r.text.replace(/<[^>]+>/g, "") }, true); }
+function vacHtml() {
+  const V = T.vac, v = vacNow(), r = vacVerdict();
+  if (!active.includes("0B")) return `<div class="tsteps">This vehicle doesn't report a MAP sensor, so the electronic vacuum gauge can't run. Use a mechanical gauge or a pressure transducer on the scope.</div>`;
+  const left = V.step ? Math.max(0, (V.step === "hold" ? 30 : V.step === "idle" ? 10 : 12) - (nowS() - V.t0)).toFixed(0) : "";
+  return `<div class="tsteps">Uses the MAP sensor as a vacuum gauge (corrected for altitude with the baro reading). Engine warm, in Park/Neutral. Run the three steps in order.</div>
+    <div><span class="tnum" style="color:var(--b)">${v != null ? v.toFixed(1) : "—"}</span> inHg vacuum · ${Math.round(num.rpm ?? 0)} RPM ${V.step ? `<span class="grade-y"> · recording ${V.step} (${left}s)</span>` : ""}</div>
+    ${btn("vac-idle", "1 · Idle (10 s)")}${btn("vac-snap", "2 · Snap throttle")}${btn("vac-hold", "3 · Hold 2,500 RPM (30 s)")}${btn("vac-reset", "Reset", 1)}
+    <canvas class="tplot" id="vacPlot"></canvas>
+    <table class="ttab"><tr><th>Idle</th><th>Snap low / rebound</th><th>2,500 hold start → end</th></tr>
+    <tr><td>${V.idle ? `${V.idle.avg.toFixed(1)} (±${V.idle.sd.toFixed(1)})` : "—"}</td><td>${V.snap ? (V.snap.error || `${V.snap.min.toFixed(1)} / ${V.snap.peak != null ? V.snap.peak.toFixed(1) : "—"}`) : "—"}</td>
+    <td>${V.hold ? (V.hold.error || `${V.hold.first.toFixed(1)} → ${V.hold.last.toFixed(1)}`) : "—"}</td></tr></table>
+    ${r.text ? `<div class="verdict"><b class="${gradeCls(r.g)}">${gradeTxt(r.g)}</b><br>${r.text}</div>` : ""}`;
+}
+
+// ---------- 🌡️ Warm-up / thermostat ----------
+T.warm = { on: false, pts: [], t0: 0, result: null };
+function warmTick() {
+  const W = T.warm; if (!W.on || !fresh("ect", 8)) return;
+  const t = nowS();
+  if (!W.pts.length || t - W.pts[W.pts.length - 1][0] >= 2) W.pts.push([t, num.ect, num.spd ?? 0, num.iat ?? null]);
+  const mins = (t - W.t0) / 60, maxT = Math.max(...W.pts.map((p) => p[1]));
+  const driveMin = W.pts.filter((p) => p[2] > 20).length * 2 / 60;
+  if (maxT >= 235) W.result = { g: "r", text: `Coolant reached ${Math.round(maxT)}°F → <b>overheating</b>: check coolant level, fan operation, thermostat stuck closed, water pump, radiator flow, head gasket (combustion gas in coolant).` };
+  else if (W.pts.some((p) => p[1] >= 185)) {
+    const t180 = W.pts.find((p) => p[1] >= 180); const m = (t180[0] - W.t0) / 60;
+    W.result = { g: m <= 15 ? "g" : "y", text: `Reached 180°F in ${m.toFixed(1)} min${W.pts[0][1] > 120 ? " (engine wasn't fully cold at start)" : ""} → thermostat opening ${m <= 15 ? "normally" : "late/slow — check thermostat & fan clutch"}.` };
+  } else if (driveMin >= 8 && maxT < 172) W.result = { g: "r", text: `After ${driveMin.toFixed(0)} min of driving coolant is only ${Math.round(maxT)}°F → <b>thermostat stuck open</b> (classic P0128). Verify the ECT sensor reading with an IR gun first.` };
+  else W.result = null;
+  if (W.result && !W.reported && (W.result.g !== "g" || mins > 1)) { W.reported = true; reportTest("Warm-up / thermostat", { minutes: +mins.toFixed(1), max_F: Math.round(maxT), grade: gradeTxt(W.result.g), verdict: W.result.text.replace(/<[^>]+>/g, "") }, T.drive.on); }
+}
+function warmHtml() {
+  const W = T.warm;
+  return `<div class="tsteps">Start with a <b>cold engine</b> (sat 4+ hours). Tap Start, then idle or drive normally. Watches how fast coolant warms up: thermostat stuck open, slow warm-up, or overheating. Runs automatically on a test drive when the engine starts cold.</div>
+    ${W.on ? btn("warm-stop", "■ Stop") : btn("warm-start", "● Start (cold engine)")} <span class="note">Coolant now: ${num.ect != null ? Math.round(num.ect) + "°F" : "—"}${W.on ? ` · ${((nowS() - W.t0) / 60).toFixed(1)} min` : ""}</span>
+    <canvas class="tplot" id="warmPlot"></canvas>
+    ${W.result ? `<div class="verdict"><b class="${gradeCls(W.result.g)}">${gradeTxt(W.result.g)}</b><br>${W.result.text}</div>` : ""}`;
+}
+
+// ---------- 🔑 Cranking / starting ----------
+T.crank = { phase: "idle", result: null, pts: [] };
+async function crankTest() {
+  if (fresh("rpm", 3) && (num.rpm ?? 0) > 400) { T.crank = { phase: "done", pts: [], result: { error: "Engine is running. Shut it off, turn the key to ON (engine off), then arm the test and crank." } }; renderTests(); return; }
+  const wasStreaming = streaming; stopStream();
+  T.crank = { phase: "wait", result: null, pts: [] }; renderTests();
+  lastSpeak = 0; speak("Cranking test armed. Crank the engine now.");
+  await txn(async () => {
+    const t0 = nowS(); let base = null, crankT = null, startT = null, rpmOk = 0;
+    while (nowS() - t0 < 25) {
+      const vr = (await sendCmd("ATRV", 400)).match(/(\d+\.\d+)/);
+      const v = vr ? parseFloat(vr[1]) : null;
+      const got = parse01(await sendCmd("010C" + (isCan && fastOK ? "1" : ""), 400), ["0C"]);
+      const rpm = got["0C"] ? (got["0C"][0] * 256 + got["0C"][1]) / 4 : null;
+      const t = nowS() - t0;
+      T.crank.pts.push([t, v, rpm]);
+      if (v != null && base == null && T.crank.pts.length >= 3) base = avg(T.crank.pts.slice(0, 3).map((p) => p[1]).filter((x) => x != null));
+      if (base != null && v != null && !crankT && v < base - 1.0) { crankT = t; T.crank.phase = "crank"; }
+      if (crankT && rpm != null && rpm > 450) { if (++rpmOk >= 2) { startT = t; break; } } else rpmOk = 0;
+      if (crankT && !startT && v != null && v > base - 0.3 && t - crankT > 1) break;   // stopped cranking without starting
+      if (!crankT && t > 20) break;
+    }
+    // capture ~3 s after start for charging
+    if (startT) { const t1 = nowS(); while (nowS() - t1 < 3) { const vr = (await sendCmd("ATRV", 400)).match(/(\d+\.\d+)/); T.crank.pts.push([nowS() - t0, vr ? parseFloat(vr[1]) : null, null]); } }
+    const during = T.crank.pts.filter((p) => crankT && p[0] >= crankT && (!startT || p[0] <= startT));
+    const minV = Math.min(...during.map((p) => p[1]).filter((x) => x != null));
+    const crRpm = during.map((p) => p[2]).filter((x) => x != null && x > 30 && x < 450);
+    const after = startT ? T.crank.pts.filter((p) => p[0] > startT + 1).map((p) => p[1]).filter((x) => x != null) : [];
+    T.crank.result = !crankT ? { error: "No cranking detected (voltage never dipped). Arm the test, then crank within 20 s." } : {
+      base, minV: isFinite(minV) ? minV : null, crankTime: startT ? startT - crankT : null, started: !!startT,
+      crankRpm: crRpm.length ? avg(crRpm) : null, afterV: after.length ? avg(after) : null,
+    };
+    T.crank.phase = "done";
+  });
+  const R = T.crank.result;
+  if (R && !R.error) reportTest("Cranking / starting", { resting_V: R.base && +R.base.toFixed(2), min_crank_V: R.minV && +R.minV.toFixed(2), crank_s: R.crankTime && +R.crankTime.toFixed(1),
+    crank_rpm: R.crankRpm && Math.round(R.crankRpm), started: R.started, verdict: crankVerdict(R).text.replace(/<[^>]+>/g, "") });
+  if (wasStreaming && connected) startStream();
+  renderTests();
+}
+function crankVerdict(R) {
+  const out = []; let g = "g";
+  if (R.minV != null) {
+    if (R.minV < 9.6) { out.push(`Cranking voltage dropped to ${R.minV.toFixed(1)} V (below 9.6 V) → <b>weak battery</b>, high-resistance cables/grounds, or a dragging starter. Load-test the battery and voltage-drop the cables.`); g = "r"; }
+    else if (R.minV < 10) { out.push(`Cranking voltage ${R.minV.toFixed(1)} V is marginal.`); g = "y"; }
+    else out.push(`Cranking voltage ${R.minV.toFixed(1)} V → battery and cables OK.`);
+  }
+  if (R.crankRpm != null) {
+    if (R.crankRpm < 120) { out.push(`Slow cranking (~${Math.round(R.crankRpm)} RPM) → starter, battery, cables, or engine drag.`); g = "r"; }
+    else out.push(`Cranking speed ~${Math.round(R.crankRpm)} RPM.`);
+  }
+  if (!R.started) { out.push("Engine did <b>not start</b>: if cranking is healthy, check fuel pressure/prime, spark, crank/cam sensor signal (RPM reading while cranking), and immobilizer."); g = "r"; }
+  else if (R.crankTime != null) {
+    if (R.crankTime > 4) { out.push(`Long crank (${R.crankTime.toFixed(1)} s) → <b>hard start</b>: fuel pressure bleed-down (check valve, leaking injector), weak prime, or cam/crank sync.`); g = "r"; }
+    else if (R.crankTime > 2) { out.push(`Crank time ${R.crankTime.toFixed(1)} s is a little long.`); if (g === "g") g = "y"; }
+    else out.push(`Started in ${R.crankTime.toFixed(1)} s.`);
+  }
+  if (R.afterV != null && R.afterV < 13.2) out.push(`Charging voltage right after start only ${R.afterV.toFixed(1)} V.`);
+  return { g, text: out.join("<br>") };
+}
+function crankHtml() {
+  const C = T.crank, R = C.result;
+  return `<div class="tsteps">Key on, engine off, adapter connected. Tap <b>Arm</b>, then crank and let it start. Records resting voltage, lowest cranking voltage, cranking RPM and time to start. (Live data pauses during the test.)</div>
+    ${C.phase === "wait" || C.phase === "crank" ? `<span class="grade-y">${C.phase === "wait" ? "Armed — crank the engine now…" : "Cranking…"}</span>` : btn("crank-arm", "Arm cranking test")}
+    <canvas class="tplot" id="crankPlot"></canvas>
+    ${R ? (R.error ? `<div class="verdict grade-y">${R.error}</div>` : (() => { const v = crankVerdict(R); return `<table class="ttab"><tr><th>Resting</th><th>Lowest while cranking</th><th>Crank RPM</th><th>Time to start</th></tr>
+      <tr><td>${R.base ? R.base.toFixed(2) + " V" : "—"}</td><td>${R.minV ? R.minV.toFixed(2) + " V" : "—"}</td><td>${R.crankRpm ? Math.round(R.crankRpm) : "—"}</td><td>${R.started ? R.crankTime.toFixed(1) + " s" : "no start"}</td></tr></table>
+      <div class="verdict"><b class="${gradeCls(v.g)}">${gradeTxt(v.g)}</b><br>${v.text}</div>`; })()) : ""}`;
+}
+
+// ---------- ⚙️ Transmission (gear ratio from RPM vs speed) ----------
+T.trans = { on: false, pts: [] };
+function transTick() {
+  const X = T.trans; if (!(X.on || T.drive.on) || !fresh("spd", 2) || !fresh("rpm", 2)) return;
+  const v = num.spd, r = num.rpm; if (v < 8 || r < 600) return;
+  const t = nowS();
+  if (X.pts.length && t - X.pts[X.pts.length - 1][0] < 0.2) return;
+  X.pts.push([t, r / v, num.tps ?? 0, v, r]);
+  if (X.pts.length > 6000) X.pts.shift();
+}
+function transAnalyze() {
+  const P = T.trans.pts; if (P.length < 40) return null;
+  // stable samples: ratio within 2% of the one before and after
+  const st = P.filter((p, i) => i > 0 && i < P.length - 1 && Math.abs(P[i - 1][1] - p[1]) / p[1] < 0.02 && Math.abs(P[i + 1][1] - p[1]) / p[1] < 0.02);
+  const bins = {}; st.forEach((p) => { const b = Math.round(Math.log(p[1]) / Math.log(1.03)); bins[b] = (bins[b] || 0) + 1; });
+  const peaks = Object.entries(bins).map(([b, n]) => [+b, n]).filter(([b, n]) => n >= 8 && n >= (bins[b - 1] || 0) && n >= (bins[b + 1] || 0))
+    .sort((a, b) => b[0] - a[0]);
+  const gears = []; peaks.forEach(([b, n]) => { const ratio = 1.03 ** b; if (!gears.some((g) => Math.abs(g.ratio - ratio) / ratio < 0.07)) gears.push({ ratio, n }); });
+  gears.sort((a, b) => b.ratio - a.ratio);
+  const near = (x) => gears.reduce((m, g) => (Math.abs(g.ratio - x) < Math.abs(m.ratio - x) ? g : m), gears[0]);
+  const flags = [];
+  if (gears.length >= 2) {
+    // in-gear slip: under throttle, ratio sits 5-15% above its gear for 1 s+
+    let run = 0, slips = 0;
+    for (const p of P) { const g = near(p[1]); const over = (p[1] - g.ratio) / g.ratio; if (p[2] >= 25 && over > 0.05 && over < 0.15) { if (++run === 5) slips++; } else run = 0; }
+    if (slips >= 2) flags.push(`${slips} spots where RPM rose 5–15% above the gear's normal ratio under throttle → <b>clutch/band slip</b> or a flare. Check fluid level/condition first.`);
+    // TCC: top gear at steady cruise should hold ratio within ~2%
+    const top = gears[gears.length - 1], cruise = P.filter((p) => p[3] > 40 && p[2] < 30 && Math.abs(p[1] - top.ratio) / top.ratio < 0.1);
+    if (cruise.length > 30) { const dev = sd(cruise.map((p) => p[1])) / top.ratio; if (dev > 0.025) flags.push(`Top-gear ratio wanders ±${(dev * 100).toFixed(1)}% at steady cruise → <b>torque converter clutch slip/shudder</b> or not locking. Compare with the OEM TCC slip reading if available.`); }
+  }
+  return { gears, flags, n: P.length };
+}
+function transHtml() {
+  const X = T.trans, a = transAnalyze();
+  return `<div class="tsteps">Calculates the overall gear ratio (RPM ÷ speed) while you drive, finds each gear, and looks for slipping, flares and torque-converter slip. Accelerate through all gears a few times and cruise at highway speed. Records automatically on a test drive. <b>Beta.</b></div>
+    ${X.on ? btn("trans-stop", "■ Stop") : btn("trans-start", "● Start recording")}${btn("trans-reset", "Reset", 1)} <span class="note">${X.pts.length} samples</span>
+    <canvas class="tplot" id="transPlot"></canvas>
+    <div class="note">RPM per mph over time. Flat steps = gears.</div>
+    ${a ? `<div class="verdict">Gears found: ${a.gears.length ? a.gears.map((g, i) => `<b>${i + 1}</b>: ${g.ratio.toFixed(1)} rpm/mph`).join(" · ") : "not enough steady driving yet"}<br>
+      ${a.flags.length ? a.flags.join("<br>") : a.gears.length >= 3 ? "<span class='grade-g'>No slip or converter problems detected.</span>" : ""}</div>` : ""}`;
+}
+
+// ---------- signal tools: FFT + microphone ----------
+function fftMag(sig) {
+  let n = 1; while (n < sig.length) n <<= 1;
+  const re = new Float64Array(n), im = new Float64Array(n), m = avg(sig);
+  for (let i = 0; i < sig.length; i++) re[i] = (sig[i] - m) * (0.5 - 0.5 * Math.cos(2 * Math.PI * i / (sig.length - 1)));   // Hann window
+  for (let i = 1, j = 0; i < n; i++) { let bit = n >> 1; for (; j & bit; bit >>= 1) j ^= bit; j ^= bit; if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; } }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = -2 * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) { let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++) { const ar = re[i + k + len / 2] * cr - im[i + k + len / 2] * ci, ai = re[i + k + len / 2] * ci + im[i + k + len / 2] * cr;
+        re[i + k + len / 2] = re[i + k] - ar; im[i + k + len / 2] = im[i + k] - ai; re[i + k] += ar; im[i + k] += ai; const t = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = t; } }
+  }
+  const mag = new Float64Array(n / 2); for (let i = 0; i < n / 2; i++) mag[i] = Math.hypot(re[i], im[i]);
+  return { mag, n };
+}
+function topPeaks(mag, fs, n, fmin, fmax, k = 4) {
+  const df = fs / n, out = [];
+  for (let i = Math.max(2, Math.ceil(fmin / df)); i < Math.min(mag.length - 1, fmax / df); i++)
+    if (mag[i] > mag[i - 1] && mag[i] >= mag[i + 1]) out.push([i * df, mag[i]]);
+  out.sort((a, b) => b[1] - a[1]);
+  const res = []; for (const p of out) { if (res.some((q) => Math.abs(q[0] - p[0]) < 3 * df)) continue; res.push(p); if (res.length >= k) break; }
+  return res;
+}
+async function recordMic(secs) {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === "suspended") await ctx.resume();
+  const src = ctx.createMediaStreamSource(stream), proc = ctx.createScriptProcessor(4096, 1, 1), chunks = [];
+  proc.onaudioprocess = (e) => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  src.connect(proc); proc.connect(ctx.destination);
+  await sleep(secs * 1000);
+  proc.disconnect(); src.disconnect(); stream.getTracks().forEach((t) => t.stop());
+  const fs = ctx.sampleRate; await ctx.close();
+  const raw = new Float32Array(chunks.reduce((s, c) => s + c.length, 0)); let o = 0; chunks.forEach((c) => { raw.set(c, o); o += c.length; });
+  return { raw, fs };
+}
+function downsample(raw, fs, target) {
+  const f = Math.max(1, Math.floor(fs / target)), out = new Float64Array(Math.floor(raw.length / f));
+  for (let i = 0; i < out.length; i++) { let s = 0; for (let j = 0; j < f; j++) s += raw[i * f + j]; out[i] = s / f; }
+  return { sig: out, fs: fs / f };
+}
+
+// ---------- 〰️ Vibration / noise finder (NVH) ----------
+T.nvh = { phase: "idle", res: null, acc: [] };
+function tireCirc() {   // e.g. 225/45R17 -> meters
+  const m = (T.inp.tire || "").toUpperCase().match(/(\d{3})\s*\/\s*(\d{2})\s*Z?R?\s*(\d{2})/);
+  if (!m) return null;
+  const dIn = +m[3] + 2 * (+m[1] * +m[2] / 100) / 25.4;
+  return Math.PI * dIn * 0.0254;
+}
+function nvhOrders(spdMph, rpm) {
+  const o = [], circ = tireCirc(), cyl = cylCount() || 4;
+  if (circ && spdMph > 3) { const fw = spdMph * 0.44704 / circ; o.push(["1× wheel/tire", fw, "tire/wheel imbalance, bent rim, tire belt shift, hub/rotor runout"], ["2× wheel/tire", 2 * fw, "out-of-round tire, tire uniformity (road-force balance)"]);
+    o.push(["driveshaft range (≈3–4.5× wheel)", 3.7 * fw, "driveshaft balance, U-joints, CV joints, carrier bearing", 0.25]); }
+  if (rpm > 300) { const fe = rpm / 60; o.push(["½× engine", fe / 2, "camshaft-speed part, misfire on one cylinder", 0.08], ["1× engine", fe, "crank pulley/balancer, flexplate/flywheel, torque converter, accessory imbalance"],
+    [`firing (${cyl / 2}× engine)`, fe * cyl / 2, "engine/trans mounts, exhaust grounding, misfire, firing pulses"], ["2× firing", fe * cyl, "mounts/exhaust, intake/valvetrain noise"]); }
+  return o;
+}
+function matchOrder(f, orders) {
+  let best = null;
+  for (const [name, fo, why, tol = 0.1] of orders) { const e = Math.abs(f - fo) / fo; if (e <= tol && (!best || e < best.e)) best = { name, why, e, fo }; }
+  return best;
+}
+async function nvhRecord(kind) {
+  const N = T.nvh; N.phase = "rec"; N.kind = kind; N.res = null; renderTests();
+  const spd0 = [], rpm0 = [], t0 = nowS();
+  const stamp = setInterval(() => { if (num.spd != null) spd0.push(num.spd); if (num.rpm != null) rpm0.push(num.rpm); }, 200);
+  try {
+    let peaks, fs, spec;
+    if (kind === "acc") {
+      if (!T.perf.motionOn) { perfMotion(); await sleep(500); }
+      N.acc = [];
+      const h = (e) => { const a = e.accelerationIncludingGravity; if (a && a.x != null) N.acc.push([nowS(), a.x, a.y, a.z]); };
+      window.addEventListener("devicemotion", h); await sleep(8000); window.removeEventListener("devicemotion", h);
+      if (N.acc.length < 100) throw new Error("Not enough motion samples — use a phone/tablet and allow motion access.");
+      fs = (N.acc.length - 1) / (N.acc[N.acc.length - 1][0] - N.acc[0][0]);
+      const mags = [0, 1, 2].map((ax) => fftMag(N.acc.map((p) => p[1 + ax])));
+      const n = mags[0].n, sum = new Float64Array(n / 2); mags.forEach((m) => m.mag.forEach((v, i) => (sum[i] += v * v)));
+      spec = Array.from(sum, Math.sqrt);
+      peaks = topPeaks(spec, fs, n, 2.5, fs / 2 - 1); N.spec = { spec, fs, n, fmax: fs / 2 };
+    } else {
+      const { raw, fs: f0 } = await recordMic(8);
+      const d = downsample(raw, f0, 2000); fs = d.fs;
+      const { mag, n } = fftMag(Array.from(d.sig));
+      spec = Array.from(mag); peaks = topPeaks(spec, fs, n, 15, 800); N.spec = { spec, fs, n, fmax: 800 };
+    }
+    const spd = avg(spd0) ?? 0, rpm = avg(rpm0) ?? 0, orders = nvhOrders(spd, rpm);
+    N.res = { kind, spd, rpm, peaks: peaks.map(([f, m]) => ({ f, m, match: matchOrder(f, orders) })), orders, secs: nowS() - t0 };
+    const top = N.res.peaks[0];
+    reportTest(kind === "acc" ? "Vibration (NVH)" : "Noise (NVH)", { speed_mph: Math.round(spd), rpm: Math.round(rpm), top_hz: top && +top.f.toFixed(1),
+      match: top && top.match ? top.match.name : "no order match", verdict: top && top.match ? `${top.f.toFixed(1)} Hz matches ${top.match.name}: ${top.match.why}` : "Strongest frequency doesn't match a rotating order" });
+  } catch (e) { N.res = { error: e.message || String(e) }; }
+  clearInterval(stamp); N.phase = "idle"; renderTests();
+}
+function nvhHtml() {
+  const N = T.nvh, R = N.res, circ = tireCirc();
+  return `<div class="tsteps">Finds what's spinning at the same speed as the vibration or noise. <b>Vibration:</b> phone solidly on the seat rail/floor or dash mount. <b>Noise:</b> phone in the cabin near the noise (or under the hood at idle). Drive at the speed where it's worst, hold steady, and record 8 s. Tip: repeat while coasting in Neutral — if it's still there it's wheels/tires/driveline, if it's gone it's engine/trans.</div>
+    Tire size: ${inp("tire", "225/45R17", 110)} ${circ ? `<span class="note">${(circ / 0.0254 / Math.PI).toFixed(1)}" tall</span>` : '<span class="grade-y">needed for wheel/driveshaft orders</span>'}
+    &nbsp; Cylinders: ${inp("cyl", ARGS.cyl || "4", 40)}<br>
+    ${N.phase === "rec" ? `<span class="grade-y">Recording 8 s… hold steady (${Math.round(num.spd ?? 0)} mph, ${Math.round(num.rpm ?? 0)} RPM)</span>`
+      : btn("nvh-acc", "〰️ Record vibration (motion sensor)") + btn("nvh-mic", "🎤 Record noise (microphone)")}
+    <canvas class="tplot" id="nvhPlot"></canvas>
+    ${R ? (R.error ? `<div class="verdict grade-y">${esc(R.error)}</div>` : `<table class="ttab"><tr><th>Frequency</th><th>Strength</th><th style="text-align:left">Matches</th><th style="text-align:left">Likely causes</th></tr>
+      ${R.peaks.map((p, i) => `<tr><td>${p.f.toFixed(1)} Hz</td><td>${i === 0 ? "strongest" : (p.m / R.peaks[0].m * 100).toFixed(0) + "%"}</td><td style="text-align:left">${p.match ? "<b>" + p.match.name + "</b>" : "—"}</td><td style="text-align:left" class="note">${p.match ? p.match.why : "not tied to wheel or engine speed (could be a resonance, accessory, or road surface)"}</td></tr>`).join("")}</table>
+      <div class="note">At ${Math.round(R.spd)} mph / ${Math.round(R.rpm)} RPM: ${R.orders.map((o) => `${o[0]} ${o[1].toFixed(1)} Hz`).join(" · ")}</div>`) : ""}`;
+}
+
+// ---------- 👂 Tailpipe listener (exhaust pulse evenness) ----------
+T.tail = { phase: "idle", res: null };
+async function tailRecord() {
+  const L = T.tail; L.phase = "rec"; L.res = null; renderTests();
+  const rpms = [], stamp = setInterval(() => { if (num.rpm) rpms.push(num.rpm); }, 200);
+  try {
+    const cyl = cylCount(); if (!cyl) throw new Error("Enter the number of cylinders.");
+    const { raw, fs: f0 } = await recordMic(8);
+    const rpm = rpms.length ? avg(rpms) : parseFloat(T.inp.trpm);
+    if (!rpm) throw new Error("No RPM — connect the scanner or type the idle RPM.");
+    if (rpms.length && sd(rpms) > 60) throw new Error("RPM wasn't steady — let it idle smoothly and try again.");
+    const d = downsample(raw, f0, 1000), { mag, n } = fftMag(Array.from(d.sig)), df = d.fs / n, fc = rpm / 120;
+    const amp = (f) => { const i = Math.round(f / df), w = Math.max(1, Math.round(f * 0.03 / df)); let m = 0; for (let k = i - w; k <= i + w; k++) if (mag[k] > m) m = mag[k]; return m; };
+    const orders = []; for (let k = 1; k <= 2 * cyl; k++) orders.push({ k, f: k * fc, a: amp(k * fc), firing: k % cyl === 0 });
+    const firing = orders.filter((o) => o.firing).reduce((s, o) => s + o.a, 0) || 1e-9, sub = orders.filter((o) => !o.firing && o.k <= cyl).reduce((s, o) => s + o.a, 0);
+    const score = sub / firing / (cyl - 1);
+    const g = score < 0.25 ? "g" : score < 0.45 ? "y" : "r";
+    L.res = { rpm, cyl, orders, score, g };
+    reportTest("Tailpipe pulse listener", { rpm: Math.round(rpm), unevenness: +score.toFixed(2), grade: gradeTxt(g), verdict: g === "g" ? "Exhaust pulses even" : "Exhaust pulses uneven — possible misfire/weak cylinder" });
+  } catch (e) { L.res = { error: e.message || String(e) }; }
+  clearInterval(stamp); L.phase = "idle"; renderTests();
+}
+function tailHtml() {
+  const L = T.tail, R = L.res;
+  return `<div class="tsteps">Screening test inspired by tailpipe pulse sensors. Engine warm at a <b>steady idle</b>. Hold the phone's microphone about 6–12 inches from the tailpipe (out of the direct blast, wind off), tap Record and hold still for 8 s. An even engine puts its sound at the firing frequency; a weak or misfiring cylinder adds a once-per-cycle "thump".</div>
+    Cylinders: ${inp("cyl", ARGS.cyl || "4", 40)} &nbsp; Idle RPM (if not connected): ${inp("trpm", "750", 60)}<br>
+    ${L.phase === "rec" ? '<span class="grade-y">Listening 8 s… hold still</span>' : btn("tail-rec", "👂 Record at tailpipe")}
+    <canvas class="tplot" id="tailPlot"></canvas>
+    <div class="note">Bars = sound at each multiple of engine-cycle speed. Green = firing pulses (should dominate); red = uneven-cylinder orders.</div>
+    ${R ? (R.error ? `<div class="verdict grade-y">${esc(R.error)}</div>` : `<div class="verdict"><b class="${gradeCls(R.g)}">${R.g === "g" ? "EVEN" : R.g === "y" ? "SLIGHTLY UNEVEN" : "UNEVEN"}</b> (unevenness ${R.score.toFixed(2)} at ${Math.round(R.rpm)} RPM)<br>
+      ${R.g === "g" ? "Exhaust pulses are even — all cylinders contributing about equally." : "One or more cylinders aren't contributing evenly → check the misfire counters, then compression/leak-down or a relative compression on the scope. Exhaust leaks and background noise can also affect this screening test."}</div>`) : ""}`;
+}
+
+// ---------- 💾 Record, compare (before/after) and export ----------
+const KEY_STATS = ["rpm", "load", "stft1", "ltft1", "stft2", "ltft2", "maf", "map", "ect", "iat", "volt", "o2b1s1", "o2b1s2", "timing", "frp"];
+function statsNow(secs = 60) {
+  const t = nowS(), out = {};
+  for (const id of KEY_STATS) { const h = (HIST[id] || []).filter((p) => t - p[0] <= secs).map((p) => p[1]); if (h.length) out[id] = { avg: avg(h), min: Math.min(...h), max: Math.max(...h) }; }
+  return out;
+}
+function storeKey() { return "tdg_before_" + (ARGS.vehicle || "vehicle").replace(/\W+/g, "_"); }
+function saveBefore() {
+  const snap = { when: new Date().toLocaleString(), vehicle: ARGS.vehicle, stats: statsNow(), tests: JSON.parse(JSON.stringify(T.results || {})), codes: dtcs };
+  T.before = snap; try { localStorage.setItem(storeKey(), JSON.stringify(snap)); } catch (_) {}
+}
+function loadBefore() { if (T.before) return T.before; try { const s = localStorage.getItem(storeKey()); if (s) T.before = JSON.parse(s); } catch (_) {} return T.before; }
+function exportCsv() {
+  const ids = Object.keys(HIST).filter((id) => HIST[id].length);
+  if (!ids.length) { alert("No data recorded yet."); return; }
+  const times = [...new Set(ids.flatMap((id) => HIST[id].map((p) => Math.round(p[0] * 4) / 4)))].sort((a, b) => a - b);
+  const idx = Object.fromEntries(ids.map((id) => [id, 0])), last = {}, t0 = times[0], wall = Date.now() / 1000 - nowS();
+  const rows = ["time,elapsed_s," + ids.map((id) => `"${(LABEL[id] || id).replace(/"/g, "'")}"`).join(",")];
+  for (const t of times) {
+    for (const id of ids) { const h = HIST[id]; while (idx[id] < h.length && h[idx[id]][0] <= t + 0.125) last[id] = h[idx[id]++][1]; }
+    rows.push(new Date((wall + t) * 1000).toLocaleTimeString() + "," + (t - t0).toFixed(2) + "," + ids.map((id) => (last[id] ?? "")).join(","));
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([rows.join("\n")], { type: "text/csv" }));
+  a.download = `scan_${(ARGS.vehicle || "vehicle").replace(/\W+/g, "_")}_${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+function recHtml() {
+  const B = loadBefore(), now = statsNow();
+  const recMins = Math.max(0, ...Object.values(HIST).map((h) => (h.length ? (h[h.length - 1][0] - h[0][0]) / 60 : 0)));
+  const rows = B ? KEY_STATS.filter((id) => B.stats[id] || now[id]).map((id) => {
+    const b = B.stats[id], a = now[id], d = b && a ? a.avg - b.avg : null;
+    return `<tr><td style="text-align:left">${esc(LABEL[id] || id)}</td><td>${b ? fmtNum(b.avg) : "—"}</td><td>${a ? fmtNum(a.avg) : "—"}</td><td>${d == null ? "" : (d > 0 ? "+" : "") + fmtNum(d)}</td></tr>`;
+  }).join("") : "";
+  const tests = B ? [...new Set([...Object.keys(B.tests || {}), ...Object.keys(T.results || {})])].map((k) =>
+    `<tr><td style="text-align:left">${esc(k)}</td><td>${esc(((B.tests || {})[k] || {}).grade || "—")}</td><td>${esc(((T.results || {})[k] || {}).grade || "—")}</td><td></td></tr>`).join("") : "";
+  return `<div class="tsteps">Everything you stream is recorded (last ~10 min per reading). <b>Export</b> it as a spreadsheet (CSV). Before a repair, tap <b>Save BEFORE</b> with the engine in the condition you care about (e.g. warm idle); after the repair, run the same way and the table compares the last minute against BEFORE. The BEFORE snapshot is saved on this device for this vehicle.</div>
+    ${btn("rec-csv", "⬇️ Export data (CSV)")}${btn("rec-before", "📌 Save BEFORE snapshot", 1)}${B ? btn("rec-clear", "Clear BEFORE", 1) : ""}
+    <span class="note">${recMins.toFixed(1)} min recorded</span>
+    ${B ? `<div class="note" style="margin-top:6px">BEFORE saved ${esc(B.when)}. AFTER = last 60 s of live data.</div>
+      <table class="ttab"><tr><th style="text-align:left">Reading (avg)</th><th>Before</th><th>After</th><th>Change</th></tr>${rows}
+      ${tests ? `<tr><th style="text-align:left">Test</th><th>Before</th><th>After</th><th></th></tr>${tests}` : ""}</table>` : ""}`;
+}
+
+// ---------- plots for the new tabs ----------
+function linePlot(id, pts, color, yLabel, opts = {}) {
+  const P = plotSetup(id); if (!P) return; const { g, c } = P;
+  if (!pts.length) { g.fillStyle = c("--muted"); g.font = "12px sans-serif"; g.fillText(opts.empty || "Waiting for data…", 44, 90); return; }
+  const t0 = pts[0][0], t1 = Math.max(pts[pts.length - 1][0], t0 + 1);
+  let lo = opts.lo ?? Math.min(...pts.map((p) => p[1])), hi = opts.hi ?? Math.max(...pts.map((p) => p[1]));
+  if (hi - lo < 1) { lo -= 1; hi += 1; }
+  const A = axes(P, t0, t1, lo, hi);
+  for (let k = 0; k <= 2; k++) { const v = lo + (hi - lo) * k / 2; g.beginPath(); g.moveTo(A.L, A.Y(v)); g.lineTo(A.L + A.pw, A.Y(v)); g.stroke(); g.textAlign = "right"; g.fillText(fmtNum(v), A.L - 4, A.Y(v) + 3); }
+  (opts.refs || []).forEach(([v, col]) => { g.strokeStyle = col; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(A.L, A.Y(v)); g.lineTo(A.L + A.pw, A.Y(v)); g.stroke(); g.setLineDash([]); });
+  g.strokeStyle = c(color); g.lineWidth = 2; g.beginPath(); pts.forEach((p, j) => (j ? g.lineTo(A.X(p[0]), A.Y(p[1])) : g.moveTo(A.X(p[0]), A.Y(p[1])))); g.stroke();
+  g.fillStyle = c("--muted"); g.textAlign = "left"; g.fillText(yLabel, 4, 12);
+  g.textAlign = "right"; g.fillText(opts.xLabel || `${((t1 - t0) / 60).toFixed(1)} min`, A.L + A.pw, P.H - 4);
+}
+function specPlot(id, spec, fs, n, fmax, marks) {
+  const P = plotSetup(id); if (!P) return; const { g, c } = P;
+  if (!spec) { g.fillStyle = c("--muted"); g.font = "12px sans-serif"; g.fillText("No recording yet.", 44, 90); return; }
+  const df = fs / n, imax = Math.min(spec.length, Math.floor(fmax / df)), hi = Math.max(...spec.slice(2, imax)) * 1.1 || 1;
+  const A = axes(P, 0, fmax, 0, hi);
+  g.textAlign = "center"; for (let k = 0; k <= 4; k++) { const f = fmax * k / 4; g.fillText(f.toFixed(0) + " Hz", A.X(f), P.H - 4); }
+  (marks || []).forEach(([f, label]) => { if (f > fmax) return; g.strokeStyle = c("--s"); g.setLineDash([3, 3]); g.beginPath(); g.moveTo(A.X(f), A.Y(0)); g.lineTo(A.X(f), A.Y(hi)); g.stroke(); g.setLineDash([]); g.fillStyle = c("--muted"); g.textAlign = "left"; g.fillText(label, A.X(f) + 2, 20); });
+  g.strokeStyle = c("--b"); g.lineWidth = 2; g.beginPath(); for (let i = 1; i < imax; i++) { const x = A.X(i * df), y = A.Y(spec[i]); i === 1 ? g.moveTo(x, y) : g.lineTo(x, y); } g.stroke();
+}
+function drawExtraPlots() {
+  if (testTab === "vac") linePlot("vacPlot", T.vac.trace, "--b", "inHg", { lo: 0, hi: 25, refs: [[17, "rgba(0,255,102,.5)"], [21, "rgba(0,255,102,.5)"]], xLabel: "last 40 s" });
+  if (testTab === "warm") linePlot("warmPlot", T.warm.pts.map((p) => [p[0], p[1]]), "--o", "°F", { refs: [[195, "rgba(0,255,102,.5)"], [230, "rgba(239,68,68,.6)"]], empty: "Tap Start with a cold engine." });
+  if (testTab === "crank") linePlot("crankPlot", T.crank.pts.filter((p) => p[1] != null).map((p) => [p[0], p[1]]), "--y", "Volts", { refs: [[9.6, "rgba(239,68,68,.6)"]], xLabel: "seconds", empty: "Arm the test and crank." });
+  if (testTab === "trans") linePlot("transPlot", T.trans.pts.map((p) => [p[0], p[1]]), "--p", "rpm/mph", { empty: "Drive to record." });
+  if (testTab === "nvh") { const S = T.nvh.spec, R = T.nvh.res; specPlot("nvhPlot", S && S.spec, S && S.fs, S && S.n, S ? S.fmax : 30, R && R.orders ? R.orders.map((o) => [o[1], o[0].split(" ")[0]]) : []); }
+  if (testTab === "tail") {
+    const P = plotSetup("tailPlot"), R = T.tail.res; if (!P) return; const { g, c } = P;
+    if (!R || R.error) { g.fillStyle = c("--muted"); g.font = "12px sans-serif"; g.fillText("No recording yet.", 44, 90); return; }
+    const hi = Math.max(...R.orders.map((o) => o.a)) || 1, A = axes(P, 0, R.orders.length + 1, 0, hi), w = A.pw / (R.orders.length + 1) * 0.6;
+    R.orders.forEach((o) => { g.fillStyle = o.firing ? c("--g") : c("--r"); const x = A.X(o.k) - w / 2, y = A.Y(o.a); g.fillRect(x, y, w, A.Y(0) - y); g.fillStyle = c("--muted"); g.textAlign = "center"; g.fillText(o.k + "×", A.X(o.k), P.H - 4); });
+  }
+}
+
+// ---------- wiring ----------
+const EXTRA_HTML = { mis: misHtml, rdy: rdyHtml, vac: vacHtml, warm: warmHtml, crank: crankHtml, trans: transHtml, nvh: nvhHtml, tail: tailHtml, rec: recHtml };
+const EXTRA_ACTIONS = {
+  "mis-reset": () => { Object.values(misLive).forEach((L) => (L.tot = 0)); misEvents = []; },
+  "rdy-refresh": () => txn(pollMonitors41).then(renderTests),
+  "vac-idle": () => Object.assign(T.vac, { step: "idle", buf: [], t0: nowS() }),
+  "vac-snap": () => Object.assign(T.vac, { step: "snap", buf: [], t0: nowS(), relT: null }),
+  "vac-hold": () => Object.assign(T.vac, { step: "hold", buf: [], t0: nowS() }),
+  "vac-reset": () => Object.assign(T.vac, { idle: null, snap: null, hold: null, step: null }),
+  "warm-start": () => { T.warm = { on: true, pts: [], t0: nowS(), result: null }; },
+  "warm-stop": () => { T.warm.on = false; },
+  "crank-arm": () => { crankTest(); },
+  "trans-start": () => { T.trans.on = true; }, "trans-stop": () => { T.trans.on = false; }, "trans-reset": () => { T.trans.pts = []; },
+  "nvh-acc": () => { nvhRecord("acc"); }, "nvh-mic": () => { nvhRecord("mic"); },
+  "tail-rec": () => { tailRecord(); },
+  "rec-csv": () => exportCsv(), "rec-before": () => saveBefore(),
+  "rec-clear": () => { T.before = null; try { localStorage.removeItem(storeKey()); } catch (_) {} },
+};
+function extraTicks() { vacTick(); warmTick(); transTick(); }
+function extraDriveStart() {
+  Object.values(misLive).forEach((L) => (L.tot = 0)); misEvents = [];
+  T.trans.pts = [];
+  if ((num.ect ?? 999) < 150) T.warm = { on: true, pts: [], t0: nowS(), result: null };
+}
+function extraDriveStop() { if (T.warm.on) T.warm.on = false; }
+function extraDriveChips(chip) {
+  const m = misAnalyze(), a = transAnalyze();
+  return chip(true, m.all ? `${m.all} misfire(s)` : "No misfires") + chip(a && a.gears.length >= 3, `Gears found (${a ? a.gears.length : 0})`) +
+    (T.warm.on ? chip(!!T.warm.result, "Warm-up") : "") + (r41 ? chip(readinessRows(r41.B, r41.C, r41.D, true).every((r) => r.done), "Monitors this drive") : "");
+}
+function extraReportRows(add) {
+  const m = misAnalyze();
+  add("🔥 Misfires", m.all ? `${m.all} new${m.worst ? " · mostly cyl " + m.worst[0] : ""}` : "none", m.all ? (m.all > 20 ? "r" : "y") : "g", m.all ? m.text.replace(/<[^>]+>/g, "").slice(0, 140) + "…" : "");
+  const a = transAnalyze();
+  if (a) add("⚙️ Transmission", `${a.gears.length} gears found`, a.flags.length ? "y" : a.gears.length >= 3 ? "g" : null, a.flags.length ? a.flags.map((f) => f.replace(/<[^>]+>/g, "")).join(" ").slice(0, 160) : "");
+  if (T.warm.result) add("🌡️ Warm-up", T.warm.result.g === "g" ? "normal" : "check", T.warm.result.g, T.warm.result.text.replace(/<[^>]+>/g, "").slice(0, 160));
+  if (r41) { const rows = readinessRows(r41.B, r41.C, r41.D, true), left = rows.filter((r) => !r.done); add("📋 Monitors (this drive)", `${rows.length - left.length}/${rows.length} complete`, left.length ? "y" : "g", left.length ? "still running: " + left.map((r) => r.n).join(", ") : ""); }
+  if (misAnalyze().all) reportTest("Misfire monitor", { total_new: m.all, worst_cylinder: m.worst && m.worst[0], verdict: m.text.replace(/<[^>]+>/g, "") }, true);
+  if (a && a.gears.length) reportTest("Transmission ratio analysis", { gears: a.gears.map((g) => +g.ratio.toFixed(1)), flags: a.flags.map((f) => f.replace(/<[^>]+>/g, "")), grade: a.flags.length ? "MARGINAL" : "GOOD" }, true);
+}
+
 renderTests();
 </script>
 </body>
@@ -2908,7 +3530,9 @@ def _fmt_dtcs(d: dict) -> str:
          f"{', '.join(d.get('pending') or []) or 'none'} | permanent: {', '.join(d.get('permanent') or []) or 'none'}")
   mods = [f"{m.get('name')} [{m.get('addr')}]: " + ", ".join(f"{c.get('code')} ({c.get('status')})" for c in m.get("codes", []))
           for m in d.get("modules") or [] if m.get("codes")]
-  return out + (" | Other modules -> " + "; ".join(mods) if mods else "")
+  ff = d.get("freeze") or {}
+  ffs = (f" | Freeze frame for {ff.get('dtc')}: " + ", ".join(f"{k} {v}" for k, v in (ff.get("vals") or {}).items())) if ff.get("dtc") else ""
+  return out + (" | Other modules -> " + "; ".join(mods) if mods else "") + ffs
 
 
 def module_codes(d: dict) -> dict:
@@ -2997,6 +3621,8 @@ with tab2:
   _disp = re.search(r"\d+(\.\d+)?", str(_vd.get("Displacement (L)") or _vd.get("Engine") or ""))
   event = _ble_dashboard(vehicle=ss.vehicle_info, make=make_profile(), year=_vd.get("Model Year", ""),
                          disp=_disp.group(0) if _disp else "",
+                         cyl=str(_vd.get("Engine Number of Cylinders") or
+                                 (re.search(r"[VIL](\d{1,2})\b|(\d{1,2})\s*cyl", str(_vd.get("Engine", "")), re.I) or [None, ""])[1] or ""),
                          oem=oem_sigs, oem_src=oem_repo, ai=ss.ble_ai, key="ble", default=None)
   if isinstance(event, dict) and event.get("id") and event["id"] != ss.ble_last_event:
     ss.ble_last_event = event["id"]
@@ -3229,7 +3855,10 @@ FORMAT STRICTLY AS:
     with st.chat_message("user"):
       st.markdown(user_question)
     history = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in ss.chat_history[-6:])
-    plan = (ss.dtc_result or {}).get("text", "")[:3000]
+    plan = re.sub(r"^#+\s*", "", (ss.dtc_result or {}).get("text", ""), flags=re.M).replace("**", "")
+  eng = str(vd.get("Displacement (L)") or vd.get("Engine") or "")
+  if re.fullmatch(r"\d+(\.\d+)?", eng):
+    eng += " L"[:3000]
     chat_prompt = f"""
 You are an expert automotive diagnostic technician assisting a mechanic in the field.
 Vehicle: {ss.vehicle_info or 'General'}
@@ -3263,6 +3892,71 @@ Respond directly, practically, and concisely to the latest question. Focus on ph
         with st.expander("🌐 Sources Perplexity found"):
           st.markdown(research)
     ss.chat_history.append({"role": "assistant", "content": reply})
+
+# ========================================================
+# --- CUSTOMER / SHOP REPORT (shown at the bottom of the Diagnose tab) ---
+# ========================================================
+def build_report_html(notes: str) -> str:
+  e = html_lib.escape
+  d, vd = ss.ble_dtcs or {}, ss.vehicle_details or {}
+  grade_color = {"GOOD": "#0a7d32", "MARGINAL": "#a66b00", "BAD": "#c62828"}
+  code_rows = []
+  for kind in ("stored", "pending", "permanent"):
+    for c in d.get(kind) or []:
+      code_rows.append(("Engine / emissions", c, kind))
+  for m in d.get("modules") or []:
+    for c in m.get("codes", []):
+      code_rows.append((m.get("name", "Module"), c.get("code"), c.get("status")))
+  for c in ss.sel_codes or []:
+    if not any(c == r[1] for r in code_rows):
+      code_rows.append(("Entered", c, ""))
+  ff = d.get("freeze") or {}
+  tests = ss.test_results or {}
+  def grade_of(v):
+    g = str(v.get("grade", "")).upper() if isinstance(v, dict) else ""
+    return f'<b style="color:{grade_color.get(g, "#333")}">{e(g)}</b>' if g else ""
+  plan = re.sub(r"^#+\s*", "", (ss.dtc_result or {}).get("text", ""), flags=re.M).replace("**", "")
+  eng = str(vd.get("Displacement (L)") or vd.get("Engine") or "")
+  if re.fullmatch(r"\d+(\.\d+)?", eng):
+    eng += " L"
+  rows_codes = "".join(f"<tr><td>{e(str(a))}</td><td><b>{e(str(b))}</b></td><td>{e(str(c))}</td></tr>" for a, b, c in code_rows) or \
+      "<tr><td colspan=3>No trouble codes found</td></tr>"
+  rows_tests = "".join(
+      f"<tr><td>{e(k)}</td><td>{grade_of(v)}</td><td>{e(str(v.get('verdict', '')) if isinstance(v, dict) else str(v))}</td></tr>"
+      for k, v in tests.items()) or "<tr><td colspan=3>No guided tests run</td></tr>"
+  ff_html = ("<h2>Freeze frame (" + e(ff.get("dtc", "")) + ")</h2><p>" +
+             " · ".join(f"{e(k)}: <b>{e(str(v))}</b>" for k, v in (ff.get("vals") or {}).items()) + "</p>") if ff.get("dtc") else ""
+  return f"""<!doctype html><html><head><meta charset="utf-8"><title>Diagnostic report - {e(ss.vehicle_info or 'Vehicle')}</title>
+<style>body{{font-family:Arial,sans-serif;color:#222;max-width:820px;margin:24px auto;padding:0 16px}}h1{{margin:0;font-size:24px}}
+h2{{font-size:16px;border-bottom:2px solid #222;padding-bottom:3px;margin-top:22px}}table{{width:100%;border-collapse:collapse;font-size:13px}}
+td,th{{border:1px solid #ccc;padding:5px 7px;text-align:left;vertical-align:top}}th{{background:#f2f2f2}}.muted{{color:#666;font-size:12px}}
+pre{{white-space:pre-wrap;font-family:inherit;font-size:13px;background:#fafafa;border:1px solid #ddd;padding:10px}}
+@media print{{button{{display:none}}}}</style></head><body>
+<button onclick="window.print()" style="float:right;padding:8px 14px">Print / Save as PDF</button>
+<h1>⚡ Test Don't Guess — Diagnostic Report</h1><div class="muted">{e(datetime.now().strftime("%B %d, %Y %I:%M %p"))}</div>
+<h2>Customer & vehicle</h2><table>
+<tr><th>Customer</th><td>{e(ss.customer_name or '')}</td><th>Phone</th><td>{e(ss.customer_phone or '')}</td></tr>
+<tr><th>Vehicle</th><td>{e(ss.vehicle_info or '')}</td><th>VIN</th><td>{e(ss.active_vin or 'not provided')}</td></tr>
+<tr><th>Engine</th><td>{e(eng)}</td><th>Complaint</th><td>{e(ss.symptoms or '')}</td></tr></table>
+<h2>Trouble codes</h2><table><tr><th>Module</th><th>Code</th><th>Status</th></tr>{rows_codes}</table>
+{ff_html}
+<h2>Test results</h2><table><tr><th>Test</th><th>Result</th><th>Details</th></tr>{rows_tests}</table>
+{"<h2>Technician notes & recommendation</h2><pre>" + e(notes) + "</pre>" if notes.strip() else ""}
+{"<h2>Diagnostic plan</h2><pre>" + e(plan) + "</pre>" if plan else ""}
+<p class="muted">Results from on-board diagnostic data and road/bay tests. Further pinpoint testing may be required before parts replacement.</p>
+</body></html>"""
+
+
+with tab3:
+  st.write("---")
+  st.markdown("#### 4 · Customer / shop report")
+  st.caption("One page with the vehicle, all codes, freeze frame, every test result (green / yellow / red) and the plan. "
+             "Open it on your phone and use Print → Save as PDF, or text it to the customer.")
+  notes = st.text_area("Technician notes / recommendation (goes on the report):", key="tech_notes", height=80,
+                       placeholder="e.g. Recommend replacing cylinder 3 ignition coil and spark plugs. Fuel trims normal after repair.")
+  _rep_name = re.sub(r"\W+", "_", ss.vehicle_info or "vehicle")
+  st.download_button("🧾 Download report", data=build_report_html(notes).encode("utf-8"), mime="text/html",
+                     file_name=f"report_{_rep_name}_{datetime.now():%Y%m%d}.html")
 
 # ========================================================
 # --- TAB 5: VEHICLE & DTC LOG ---
