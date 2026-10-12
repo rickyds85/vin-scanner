@@ -233,21 +233,90 @@ TEAM RULES:
 """
 
 
-def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: bool, status=None) -> tuple[str, str]:
-  """Perplexity researches first, then Gemini builds the answer with that research. Returns (answer, research)."""
-  research = ""
+# --- Claude (Anthropic) ---
+CLAUDE_URL = "https://api.anthropic.com/v1/messages"
+CLAUDE_DEFAULT_MODEL = "claude-sonnet-5-5"   # change with CLAUDE_MODEL in Secrets (e.g. claude-opus-5-5)
+
+
+def has_claude() -> bool:
+  return bool(secret("ANTHROPIC_API_KEY"))
+
+
+def claude_label() -> str:
+  m = secret("CLAUDE_MODEL") or CLAUDE_DEFAULT_MODEL
+  return m.replace("claude-", "Claude ").replace("-", " ").title().replace(" 5 5", " 5.5").replace("Claude Claude", "Claude")
+
+
+def claude(prompt: str, *, max_tokens: int = 4000, timeout: int = 120) -> str:
+  key = secret("ANTHROPIC_API_KEY")
+  if not key:
+    raise AIError("ANTHROPIC_API_KEY is missing from Streamlit Secrets.")
+  try:
+    res = http().post(CLAUDE_URL, timeout=timeout, json={
+        "model": secret("CLAUDE_MODEL") or CLAUDE_DEFAULT_MODEL, "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}]},
+        headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
+  except requests.RequestException as e:
+    raise AIError(f"Claude connection error: {e}") from e
+  if res.status_code != 200:
+    raise AIError(f"Claude API error ({res.status_code}): {res.text[:300]}")
+  try:
+    text = "".join(b.get("text", "") for b in res.json().get("content", []) if b.get("type") == "text")
+  except ValueError as e:
+    raise AIError("Claude returned an unreadable answer.") from e
+  if not text.strip():
+    raise AIError("Claude returned an empty answer.")
+  return text
+
+
+REVIEW_PROMPT = """You are the senior master technician on a three-member diagnostic team. Perplexity searched the web, and Gemini wrote a first-draft plan.
+Your job: produce the FINAL plan the technician will follow.
+
+ORIGINAL TASK (vehicle, codes, symptoms, scan data and test results, plus required format):
+{task}
+
+WEB RESEARCH (Perplexity; may contain errors):
+{research}
+
+GEMINI'S DRAFT:
+{draft}
+
+INSTRUCTIONS:
+- Keep the exact section format the original task requires.
+- Check the draft against the scan data, test results and research. Fix anything wrong, remove generic or irrelevant steps, add important tests or pattern failures it missed.
+- Order the tests from fastest/cheapest and most likely to least, so the tech doesn't throw parts at it.
+- Never invent TSB numbers or specs; only use ones from the research or that you are sure of.
+- End with "### Team Notes": 2-5 bullets on what you changed from the draft and anything the research and draft disagreed on."""
+
+
+def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: bool, status=None) -> tuple[str, str, str]:
+  """Perplexity researches -> Gemini drafts -> Claude reviews and writes the final plan.
+  Steps are skipped if their key isn't set. Returns (final answer, research, draft)."""
+  research, draft = "", ""
   if use_web:
     if status:
       status.update(label="🌐 Perplexity is researching TSBs, recalls and known fixes...")
     research = web_research(vehicle, codes, symptoms)
   if status:
-    status.update(label=f"✨ {gemini_label()} is building the plan" + (" with the web research..." if research else "..."))
+    status.update(label=f"✨ {gemini_label()} is drafting the plan" + (" with the web research..." if research else "..."))
   full = prompt + (TEAM_RULES.format(research=research[:6000]) if research else "")
   try:
-    answer = gemini([{"text": full}])
+    draft = gemini([{"text": full}])
   except AIError as e:
-    answer = (f"⚠️ Gemini failed ({e}). Showing Perplexity's research instead:\n\n{research}" if research else f"⚠️ {e}")
-  return answer, research
+    draft = ""
+    gem_err = str(e)
+  if has_claude():
+    if status:
+      status.update(label=f"🧠 {claude_label()} is reviewing and finalizing the plan...")
+    try:
+      final = claude(REVIEW_PROMPT.format(task=prompt, research=research[:6000] or "none", draft=draft or "(Gemini draft unavailable — write the plan yourself)"))
+      return final, research, draft
+    except AIError as e:
+      if draft:
+        return draft + f"\n\n_⚠️ Claude review unavailable: {e}_", research, ""
+  if draft:
+    return draft, research, ""
+  return (f"⚠️ Gemini failed ({gem_err}). Showing Perplexity's research instead:\n\n{research}" if research else f"⚠️ {gem_err}"), research, ""
 
 
 # --- VIN ---
@@ -3673,12 +3742,13 @@ with tab3:
   has_pplx = bool(secret("PERPLEXITY_API_KEY"))
   col_engine, col_btn = st.columns([3, 1.4])
   with col_engine:
-    use_web = st.toggle("🌐 Perplexity web research + ✨ Gemini analysis (work together)", value=has_pplx,
-                        disabled=not has_pplx, key="use_web",
-                        help="Perplexity finds TSBs, recalls and known fixes online; Gemini combines that with your scan "
-                             "data and tests to build the plan. Turn off for a faster Gemini-only answer.")
-    if not has_pplx:
-      st.caption("Add PERPLEXITY_API_KEY to Streamlit Secrets to turn on web research.")
+    use_web = st.toggle("🌐 Include Perplexity web research", value=has_pplx, disabled=not has_pplx, key="use_web",
+                        help="Perplexity finds TSBs, recalls and known fixes online. Turn off for a faster answer.")
+    st.caption("Team: " + " → ".join(x for x in [
+        "🌐 Perplexity researches" if has_pplx else "", f"✨ {gemini_label()} drafts",
+        f"🧠 {claude_label()} reviews & finalizes" if has_claude() else ""] if x) +
+        ("" if has_pplx else " · add PERPLEXITY_API_KEY for web research") +
+        ("" if has_claude() else " · add ANTHROPIC_API_KEY for Claude's review"))
   with col_btn:
     st.write("")
     symptoms = ss.symptoms.strip()
@@ -3718,9 +3788,9 @@ Format strictly using these Markdown sections:
 - Real-world failure patterns and TSBs for {vehicle} matching these symptoms.
 """
     with st.status("Working on it...", expanded=False) as status:
-      text, research = team_answer(sym_prompt, vehicle, "", symptoms, use_web, status)
+      text, research, draft = team_answer(sym_prompt, vehicle, "", symptoms, use_web, status)
       status.update(label="Done", state="complete")
-    ss.dtc_result = {"title": f"Symptoms · {vehicle}", "text": text, "research": research}
+    ss.dtc_result = {"title": f"Symptoms · {vehicle}", "text": text, "research": research, "draft": draft}
 
   if lookup_clicked and codes:
     vehicle = ss.vehicle_info or "General OBD-II Vehicle"
@@ -3761,14 +3831,18 @@ Format strictly using these Markdown sections:
 - Real-world failure patterns for {vehicle} on this system.
 """
     with st.status("Working on it...", expanded=False) as status:
-      text, research = team_answer(dtc_prompt, vehicle, code_str, symptoms, use_web, status)
+      text, research, draft = team_answer(dtc_prompt, vehicle, code_str, symptoms, use_web, status)
       status.update(label="Done", state="complete")
-    ss.dtc_result = {"title": f"{code_str} · {vehicle}", "text": text, "research": research}
+    ss.dtc_result = {"title": f"{code_str} · {vehicle}", "text": text, "research": research, "draft": draft}
 
   if ss.dtc_result:  # stays on screen while you use other tabs
-    team = "🌐 Perplexity + ✨ " + gemini_label() if ss.dtc_result.get("research") else "✨ " + gemini_label()
+    team = " + ".join(x for x in ["🌐 Perplexity" if ss.dtc_result.get("research") else "", "✨ " + gemini_label(),
+                                   "🧠 " + claude_label() if ss.dtc_result.get("draft") else ""] if x)
     with st.expander(f"📋 Test plan: {ss.dtc_result['title']} · {team}", expanded=True):
       st.markdown(ss.dtc_result["text"])
+    if ss.dtc_result.get("draft"):
+      with st.expander(f"✨ {gemini_label()}'s first draft (before {claude_label()}'s review)"):
+        st.markdown(ss.dtc_result["draft"])
     if ss.dtc_result.get("research"):
       with st.expander("🌐 Web research Perplexity found (TSBs, recalls, known fixes, sources)"):
         st.markdown(ss.dtc_result["research"])
@@ -3881,11 +3955,20 @@ Respond directly, practically, and concisely to the latest question. Focus on ph
         if ss.get("use_web", False) and secret("PERPLEXITY_API_KEY"):
           status.update(label="🌐 Perplexity is searching for this question...")
           research = web_research(ss.vehicle_info or "General vehicle", code_str, ss.symptoms.strip(), question=user_question)
-        status.update(label=f"✨ {gemini_label()} is answering...")
-        try:
-          reply = gemini([{"text": chat_prompt + (TEAM_RULES.format(research=research[:4000]) if research else "")}])
-        except AIError as e:
-          reply = f"⚠️ {e}" + (f"\n\n**Web research:**\n{research}" if research else "")
+        q = chat_prompt + (TEAM_RULES.format(research=research[:4000]) if research else "")
+        reply = None
+        if has_claude():   # Claude answers chat when available (Gemini is the backup)
+          status.update(label=f"🧠 {claude_label()} is answering...")
+          try:
+            reply = claude(q, max_tokens=2000)
+          except AIError:
+            reply = None
+        if reply is None:
+          status.update(label=f"✨ {gemini_label()} is answering...")
+          try:
+            reply = gemini([{"text": q}])
+          except AIError as e:
+            reply = f"⚠️ {e}" + (f"\n\n**Web research:**\n{research}" if research else "")
         status.update(label="Done", state="complete")
       st.markdown(reply)
       if research:
