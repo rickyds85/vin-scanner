@@ -61,7 +61,7 @@ DEFAULTS = {
     "vehicle_details": {}, "vin_error": "", "active_dtc": "", "sel_codes": [], "manual_dtc": "", "scan_data": {},
     "chat_history": [], "dtc_result": None, "scope_result": None, "symptoms": "",
     "man_make": "", "man_make_other": "", "man_model": "", "man_trim": "", "man_engine": "",
-    "ble_ai": None, "ble_last_event": None, "ble_dtcs": {},
+    "ble_ai": None, "ble_last_event": None, "ble_dtcs": {}, "test_results": {},
 }
 for _k, _v in DEFAULTS.items():
     ss.setdefault(_k, _v)
@@ -581,6 +581,18 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
   .tile { cursor:pointer; user-select:none; }
   .tile:hover { border-color:var(--muted); }
   .tile.sel { outline:2px solid var(--w); outline-offset:-2px; }
+  #testTabs button { padding:6px 10px; font-size:.8rem; background:var(--card); color:var(--w); border:1px solid var(--line); }
+  #testTabs button.on { border-color:var(--y); color:var(--y); }
+  .tbtn { padding:7px 12px; font-size:.82rem; background:var(--y); color:#0E1117; border:none; margin:4px 6px 4px 0; }
+  .tbtn.sec { background:var(--card); color:var(--w); border:1px solid var(--line); }
+  .ttab { width:100%; border-collapse:collapse; font-size:.85rem; margin:6px 0; }
+  .ttab td, .ttab th { border-bottom:1px solid var(--line); padding:5px 6px; text-align:center; }
+  .ttab th { color:var(--muted); font-weight:600; font-size:.75rem; text-transform:uppercase; }
+  .grade-g { color:var(--g); font-weight:700; } .grade-y { color:var(--y); font-weight:700; } .grade-r { color:var(--r); font-weight:700; } .grade-n { color:var(--s); }
+  .verdict { background:var(--bg); border-left:4px solid var(--y); padding:8px 10px; border-radius:4px; margin:8px 0; line-height:1.45; }
+  .tsteps { color:var(--muted); font-size:.85rem; line-height:1.5; margin:4px 0 8px; }
+  .tnum { font-size:1.6rem; font-weight:700; }
+  canvas.tplot { width:100%; height:180px; display:block; background:var(--card); border:1px solid var(--line); border-radius:6px; }
   #graphs { margin-bottom:12px; }
   .gbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px; font-size:.8rem; color:var(--muted); }
   .gbar button { padding:4px 10px; font-size:.78rem; background:var(--card); color:var(--w); border:1px solid var(--line); }
@@ -630,6 +642,12 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
     <div id="charts"></div>
   </div>
   <div id="liveGrid" class="grid"></div>
+
+  <h3 style="color:var(--y)">🎯 GUIDED TESTS <span class="note">fuel trim, VE, catalyst, charging, power &amp; braking</span></h3>
+  <div id="tests" class="box" style="color:var(--w)">
+    <div class="bar" id="testTabs" style="margin-bottom:8px"></div>
+    <div id="testBody"></div>
+  </div>
 
   <h3 style="color:var(--o)">🕓 HISTORY COUNTERS <span class="note">read every ~30 s; spot cars with freshly cleared codes</span></h3>
   <div id="histGrid" class="grid"></div>
@@ -709,11 +727,14 @@ makeTiles("liveGrid", LIVE_TILES);
 makeTiles("histGrid", HIST_TILES);
 
 const shown = {};   // tile id -> display text
-const num = {};     // tile id -> numeric value (for alerts)
+const num = {};     // tile id -> numeric value (for alerts & tests)
+const numT = {};    // tile id -> time of last update (s)
 function setTile(id, text, n) {
   shown[id] = text;
   recordHist(id, text);
   if (n !== undefined) num[id] = n;
+  else { const v = toNumber(text); if (v != null && isFinite(v)) num[id] = v; }
+  numT[id] = performance.now() / 1000;
   const v = $("v_" + id); if (!v) return;
   v.textContent = text;
   $("t_" + id).classList.toggle("na", text === "N/A");
@@ -2047,6 +2068,7 @@ async function liveLoop(token) {
       $("rate").textContent = `· ${(cycle / secs).toFixed(1)} refresh/s${batchOK ? " · multi-PID" : ""}`;
     }
     driveChecks();
+    testsTick();
   }
 }
 function startStream() { streaming = true; loopToken++; liveLoop(loopToken); $("pauseBtn").textContent = "⏸️ Pause"; log("Streaming live data…"); }
@@ -2243,6 +2265,420 @@ $("clearBtn").addEventListener("click", async () => {
 $("aiBtn").addEventListener("click", () => requestAi("full"));
 $("syncBtn").addEventListener("click", async () => { if (!vinRead) await txn(readVin); sendSync(false); });
 $("oemSel").addEventListener("change", () => { if (connected) buildEnhanced(); });
+
+// ===================== Guided tests (eSCAN-style) =====================
+const TESTS = [["ft", "⛽ Fuel Trim"], ["ve", "🌬️ VE / MAF"], ["cat", "♨️ Catalyst"], ["chg", "🔋 Charging"], ["perf", "🏁 Power & Braking"]];
+let testTab = "ft";
+const T = {
+  ft: { on: false, bins: null, lastT: 0 },
+  ve: { phase: "idle", pts: [], peak: null, result: null },
+  cat: { phase: "idle", t0: 0, up: [], dn: [], result: null },
+  chg: { koeo: null, idle: null, loaded: null },
+  perf: { mode: null, phase: "idle", pts: [], result: null, cal: null, motion: null },
+};
+const nowS = () => performance.now() / 1000;
+const fresh = (id, maxAge = 3) => numT[id] && nowS() - numT[id] < maxAge;
+const gradeCls = (g) => ({ g: "grade-g", y: "grade-y", r: "grade-r" }[g] || "grade-n");
+const gradeTxt = (g) => ({ g: "GOOD", y: "MARGINAL", r: "BAD" }[g] || "—");
+function fmtF(v, d = 1) { return v == null || !isFinite(v) ? "—" : (v > 0 ? "+" : "") + v.toFixed(d); }
+function reportTest(name, summary) {
+  T.results = T.results || {};
+  T.results[name] = summary;
+  sendValue({ type: "tests", id: "tests-" + Date.now(), results: T.results });
+  speak(`${name} test: ${summary.verdict || summary.grade || "done"}`.slice(0, 160));
+}
+
+function renderTests() {
+  $("testTabs").innerHTML = TESTS.map(([k, l]) => `<button data-ttab="${k}" class="${k === testTab ? "on" : ""}">${l}</button>`).join("");
+  const body = $("testBody");
+  if (testTab === "ft") body.innerHTML = ftHtml();
+  if (testTab === "ve") body.innerHTML = veHtml();
+  if (testTab === "cat") body.innerHTML = catHtml();
+  if (testTab === "chg") body.innerHTML = chgHtml();
+  if (testTab === "perf") body.innerHTML = perfHtml();
+  drawTestPlots();
+}
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("[data-ttab]");
+  if (t) { testTab = t.dataset.ttab; renderTests(); return; }
+  const a = e.target.closest("[data-tact]");
+  if (a) testAction(a.dataset.tact);
+});
+function testAction(act) {
+  if (!connected && !/^perf-(motion|level)$/.test(act)) { alert("Connect to the vehicle first."); return; }
+  ({
+    "ft-start": () => { T.ft.on = true; T.ft.bins = newFtBins(); },
+    "ft-stop": () => { T.ft.on = false; const r = ftAnalyze(); if (r.enough) reportTest("Fuel trim", r.summary); },
+    "ft-reset": () => { T.ft.bins = newFtBins(); },
+    "ve-start": () => { T.ve = { phase: "armed", pts: [], peak: null, result: null }; },
+    "ve-cancel": () => { T.ve.phase = "idle"; },
+    "cat-start": () => { T.cat = { phase: "run", t0: nowS(), up: [], dn: [], up2: [], dn2: [], result: null }; },
+    "cat-cancel": () => { T.cat.phase = "idle"; },
+    "chg-koeo": () => chgRecord("koeo"), "chg-idle": () => chgRecord("idle"), "chg-loaded": () => chgRecord("loaded"),
+    "chg-reset": () => { T.chg = { koeo: null, idle: null, loaded: null }; },
+    "perf-motion": () => perfMotion(), "perf-level": () => perfLevel(),
+    "perf-060": () => perfArm("060"), "perf-030": () => perfArm("030"), "perf-brake": () => perfArm("brake"),
+    "perf-cancel": () => { T.perf.phase = "idle"; T.perf.mode = null; },
+  }[act] || (() => {}))();
+  renderTests();
+}
+let lastTestRender = 0;
+function testsTick() {
+  ftTick(); veTick(); catTick(); perfTick();
+  const typing = document.activeElement && document.activeElement.id === "veDisp";
+  if (!typing && nowS() - lastTestRender > 0.7) { lastTestRender = nowS(); renderTests(); }
+}
+
+// ---------- 1. Fuel trim analyzer ----------
+const FT_BINS = [["idle", "Idle"], ["cruise", "Light cruise"], ["load", "Heavy load"]];
+function newFtBins() { const b = {}; FT_BINS.forEach(([k]) => (b[k] = { b1: [], b2: [] })); b.pts = []; return b; }
+function ftCondition() {
+  const rpm = num.rpm, spd = num.spd ?? 0, load = num.load ?? num.absload, tps = num.tps;
+  if (rpm == null || load == null) return null;
+  if (rpm < 1100 && spd < 3 && (tps == null || tps < 15)) return "idle";
+  if (load >= 60 || (tps != null && tps >= 45)) return "load";
+  if (rpm >= 1200 && rpm <= 3200 && load < 50) return "cruise";
+  return null;
+}
+function ftTick() {
+  if (!T.ft.on || !numT.stft1 || numT.stft1 <= T.ft.lastT) return;
+  T.ft.lastT = numT.stft1;
+  if ((num.ect ?? 200) < 160) return;   // wait for warm engine / closed loop
+  const c = ftCondition(); if (!c) return;
+  const t1 = (num.stft1 ?? 0) + (num.ltft1 ?? 0);
+  const has2 = fresh("stft2", 10) && num.stft2 != null;
+  const t2 = has2 ? (num.stft2 ?? 0) + (num.ltft2 ?? 0) : null;
+  T.ft.bins[c].b1.push(t1); if (t2 != null) T.ft.bins[c].b2.push(t2);
+  T.ft.bins.pts.push([num.load ?? num.absload, t1, t2, c]);
+  if (T.ft.bins.pts.length > 3000) T.ft.bins.pts.shift();
+}
+const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
+const ftGrade = (v) => (v == null ? "n" : Math.abs(v) <= 10 ? "g" : Math.abs(v) <= 20 ? "y" : "r");
+function ftAnalyze() {
+  const B = T.ft.bins || newFtBins(), MIN = 15;
+  const a = {}; FT_BINS.forEach(([k]) => (a[k] = { b1: B[k].b1.length >= MIN ? avg(B[k].b1) : null, b2: B[k].b2.length >= MIN ? avg(B[k].b2) : null, n: B[k].b1.length }));
+  const notes = [];
+  for (const bank of ["b1", "b2"]) {
+    const I = a.idle[bank], C = a.cruise[bank], L = a.load[bank], name = bank === "b1" ? "Bank 1" : "Bank 2";
+    const vals = [I, C, L].filter((v) => v != null);
+    if (!vals.length) continue;
+    const lo = Math.min(...vals), hi = Math.max(...vals);
+    if (I != null && I > 10 && ((C != null && I - C >= 7) || (L != null && I - L >= 7)))
+      notes.push(`${name}: lean at idle that improves as airflow rises → <b>unmetered air / vacuum leak</b> (intake gasket, PCV, brake booster, hoses). Smoke test it.`);
+    else if (L != null && L > 10 && (I == null || L - I >= 7))
+      notes.push(`${name}: lean that gets worse with load → <b>fuel delivery</b> (pump, filter, regulator, restricted injectors) <b>or MAF under-reading at high flow</b>. Run the VE test and check fuel pressure/volume under load.`);
+    else if (vals.length >= 2 && lo > 10)
+      notes.push(`${name}: lean everywhere → <b>MAF under-reading</b>, low fuel pressure, or an exhaust leak ahead of the upstream O2.`);
+    else if (vals.length >= 2 && hi < -10)
+      notes.push(`${name}: rich everywhere → leaking injector(s), high fuel pressure, purge stuck open, MAF over-reading, or fuel-diluted oil.`);
+    else if (vals.length === 1 && Math.abs(vals[0]) > 10)
+      notes.push(`${name}: ${vals[0] > 0 ? "lean" : "rich"} (${fmtF(vals[0])}%) in the only condition recorded. <b>Drive at cruise and under load</b> so the pattern can point to the cause.`);
+    else if (I != null && I < -10 && (C == null || C - I >= 7))
+      notes.push(`${name}: rich at idle only → <b>EVAP purge valve stuck open</b>, leaking injector, or fuel in the oil (pull the PCV / oil cap and retest).`);
+  }
+  for (const [k, l] of FT_BINS) {
+    const x = a[k].b1, y = a[k].b2;
+    if (x != null && y != null && Math.abs(x - y) >= 10)
+      notes.push(`${l}: banks differ by ${Math.abs(x - y).toFixed(0)}% → problem on <b>${x > y ? "Bank 1" : "Bank 2"}</b> only (that bank's intake leak, injectors, or exhaust leak before its O2). A shared part like the MAF or fuel pump would affect both banks.`);
+  }
+  const enough = FT_BINS.some(([k]) => a[k].b1 != null);
+  const worst = Math.max(...FT_BINS.flatMap(([k]) => [a[k].b1, a[k].b2]).filter((v) => v != null).map(Math.abs), 0);
+  const grade = !enough ? "n" : ftGrade(worst);
+  if (enough && !notes.length) notes.push("Total fuel trims are within ±10% in every condition recorded — fuel control looks healthy.");
+  const summary = {
+    grade: gradeTxt(grade),
+    idle: { b1: a.idle.b1, b2: a.idle.b2 }, cruise: { b1: a.cruise.b1, b2: a.cruise.b2 }, load: { b1: a.load.b1, b2: a.load.b2 },
+    verdict: notes.map((n) => n.replace(/<[^>]+>/g, "")).join(" "),
+  };
+  return { a, notes, grade, enough, summary };
+}
+function ftHtml() {
+  const r = ftAnalyze(), B = T.ft.bins;
+  const cell = (v) => `<td class="${gradeCls(ftGrade(v))}">${v == null ? "—" : fmtF(v) + "%"}</td>`;
+  const rows = FT_BINS.map(([k, l]) => `<tr><td style="text-align:left">${l}</td>${cell(r.a[k].b1)}${cell(r.a[k].b2)}<td class="grade-n">${B ? B[k].b1.length : 0}</td></tr>`).join("");
+  return `<div class="tsteps">Total fuel trim (short + long term) sorted by driving condition. Start recording with the engine warm, idle a minute, then drive: steady cruise and a few hard pulls. Needs ~15 samples per condition.</div>
+    <button class="tbtn" data-tact="${T.ft.on ? "ft-stop" : "ft-start"}">${T.ft.on ? "■ Stop & analyze" : "● Start recording"}</button>
+    <button class="tbtn sec" data-tact="ft-reset">Reset</button>
+    ${T.ft.on ? `<span class="grade-y">recording…</span>` : ""}
+    <table class="ttab"><tr><th style="text-align:left">Condition</th><th>Bank 1</th><th>Bank 2</th><th>Samples</th></tr>${rows}</table>
+    <canvas class="tplot" id="ftPlot"></canvas>
+    <div class="note">Plot: total trim (y) vs engine load (x). Green ±10% · yellow ±20% · red beyond.</div>
+    ${r.enough ? `<div class="verdict"><b class="${gradeCls(r.grade)}">${gradeTxt(r.grade)}</b><br>${r.notes.join("<br>")}</div>` : ""}`;
+}
+
+// ---------- 2. Volumetric efficiency ----------
+function engineLiters() { const v = parseFloat(T.veDisp || ARGS.disp); return v > 0.5 && v < 10 ? v : null; }
+document.addEventListener("input", (e) => { if (e.target.id === "veDisp") T.veDisp = e.target.value; });
+function veSample() {
+  // VE = actual airflow (MAF) / theoretical airflow of a 4-stroke engine at outside-air density
+  const L = engineLiters(), maf = num.maf, rpm = num.rpm;
+  if (!L || maf == null || !rpm || rpm < 1000) return null;
+  const iatF = num.iat ?? 77, T_K = (iatF - 32) / 1.8 + 273.15;
+  const baroKpa = num.baro != null ? num.baro / 0.2953 : (num.map != null ? num.map / 0.145038 : 101.3);
+  const rho = baroKpa / (0.28705 * T_K);                 // g per liter
+  const theo = (rpm / 2 / 60) * L * rho;                  // g/s at 100% VE
+  return { ve: (maf / theo) * 100, maf, theo, rpm };
+}
+function veTick() {
+  const V = T.ve; if (V.phase === "idle" || V.phase === "done") return;
+  const wot = (num.tps ?? 0) >= 75 || (num.app ?? 0) >= 75;
+  const s = veSample();
+  if (V.phase === "armed" && wot && s) V.phase = "run";
+  if (V.phase === "run") {
+    if (s && wot) { V.pts.push([nowS(), s.maf, s.theo * 0.85, s.ve, s.rpm]); }
+    if (!wot && V.pts.length) {
+      V.phase = "done";
+      const good = V.pts.filter((p) => p[4] >= 3000);
+      const use = good.length >= 3 ? good : V.pts;
+      const peak = use.reduce((m, p) => (p[3] > m[3] ? p : m), use[0]);
+      const g = peak[3] >= 75 ? "g" : peak[3] >= 65 ? "y" : "r";
+      const hiTrim = T.ft.bins ? avg(T.ft.bins.load.b1) : null;
+      const curTrim = (num.stft1 ?? 0) + (num.ltft1 ?? 0);
+      const lean = (hiTrim ?? curTrim) > 10;
+      let verdict;
+      if (g === "g") verdict = lean ? "Engine breathes normally, but fuel trims go lean under load → suspect <b>fuel delivery</b> (pump, filter, regulator, injectors) rather than the MAF."
+        : "Engine breathing and MAF reading look normal.";
+      else verdict = lean ? "Low VE <b>and</b> lean fuel trims → the <b>MAF is under-reading</b> airflow (dirty or failing MAF, or air leak after the MAF). Clean/test the MAF."
+        : "Low VE with normal fuel trims → the engine really isn't moving air: check for <b>restricted exhaust/catalyst</b>, intake restriction, or cam timing. (Turbo engines read above 100% — this grading is for non-turbo engines.)";
+      V.result = { ve: peak[3], rpm: peak[4], grade: g, verdict };
+      reportTest("Volumetric efficiency", { peakVE: Math.round(peak[3]), rpm: Math.round(peak[4]), grade: gradeTxt(g), verdict: verdict.replace(/<[^>]+>/g, "") });
+    }
+  }
+}
+function veHtml() {
+  const V = T.ve, L = engineLiters();
+  const live = veSample();
+  return `<div class="tsteps">Checks whether the MAF reading matches how much air the engine should pull. Engine warm. In a safe place, in 2nd or 3rd gear (or Low), go <b>wide-open throttle from ~2,000 to ~5,000 RPM</b>, then lift. Non-turbo engines should read about 75–90%.</div>
+    <div style="margin-bottom:6px">Engine size: <input id="veDisp" value="${L || ""}" placeholder="liters" style="width:70px;background:var(--card);color:var(--w);border:1px solid var(--line);padding:4px;border-radius:4px"> L
+      ${!L ? '<span class="grade-y"> enter engine size (or decode the VIN)</span>' : ""}${num.maf == null ? '<span class="grade-r"> · this vehicle has no MAF reading — VE test needs a MAF</span>' : ""}</div>
+    ${V.phase === "idle" || V.phase === "done" ? `<button class="tbtn" data-tact="ve-start">Arm VE test</button>` : `<button class="tbtn sec" data-tact="ve-cancel">Cancel</button>`}
+    <span class="${V.phase === "armed" ? "grade-y" : V.phase === "run" ? "grade-g" : "grade-n"}">${{ idle: "", armed: "Armed — floor it when ready…", run: "Recording WOT pull…", done: "" }[V.phase]}</span>
+    <span class="note"> Live VE: ${live ? live.ve.toFixed(0) + "%" : "—"}</span>
+    <canvas class="tplot" id="vePlot"></canvas>
+    <div class="note">Yellow = MAF actual (g/s) · Red = expected airflow at 85% VE. MAF well below red at WOT = under-reading MAF or restriction.</div>
+    ${V.result ? `<div class="verdict"><span class="tnum ${gradeCls(V.result.grade)}">${V.result.ve.toFixed(0)}% VE</span> at ${Math.round(V.result.rpm)} RPM · <b class="${gradeCls(V.result.grade)}">${gradeTxt(V.result.grade)}</b><br>${V.result.verdict}</div>` : ""}`;
+}
+
+// ---------- 3. Catalyst efficiency ----------
+const CAT_SECS = 45;
+function crossings(arr, mid) { let n = 0; for (let i = 1; i < arr.length; i++) if ((arr[i - 1] - mid) * (arr[i] - mid) < 0) n++; return n; }
+function catTick() {
+  const C = T.cat; if (C.phase !== "run") return;
+  const t = nowS();
+  const upWide = /λ/.test(shown.o2b1s1 || "");
+  if (fresh("o2b1s1", 1.5)) C.up.push(upWide ? num.stft1 : num.o2b1s1);   // wideband: use short-term trim oscillation
+  if (fresh("o2b1s2", 1.5)) C.dn.push(num.o2b1s2);
+  if (fresh("o2b2s2", 1.5) && num.o2b2s2 != null) { C.dn2.push(num.o2b2s2); if (fresh("stft2", 2)) C.up2.push(/λ/.test(shown.o2b2s1 || "") ? num.stft2 : num.o2b2s1); }
+  if (t - C.t0 >= CAT_SECS) {
+    C.phase = "done";
+    const upWideB = /λ/.test(shown.o2b1s1 || "");
+    const one = (up, dn, wide) => {
+      if (up.length < 20 || dn.length < 20) return null;
+      const upX = crossings(up, wide ? avg(up) : 0.45), dnX = crossings(dn, 0.45);
+      const ratio = upX ? dnX / upX : null;
+      const dAvg = avg(dn), dSpan = Math.max(...dn) - Math.min(...dn);
+      const g = ratio == null ? "n" : ratio <= 0.2 && dAvg >= 0.5 ? "g" : ratio <= 0.5 ? "y" : "r";
+      return { upX, dnX, ratio, dAvg, dSpan, g };
+    };
+    C.result = { b1: one(C.up, C.dn, upWideB), b2: one(C.up2, C.dn2, /λ/.test(shown.o2b2s1 || "")) };
+    const m6 = (mode6Summary || "").split("\n").filter((l) => /Catalyst/.test(l)).join("; ");
+    C.result.m6 = m6;
+    const parts = ["b1", "b2"].filter((b) => C.result[b]).map((b) => `${b === "b1" ? "Bank 1" : "Bank 2"} ratio ${C.result[b].ratio == null ? "n/a" : C.result[b].ratio.toFixed(2)} (${gradeTxt(C.result[b].g)})`);
+    reportTest("Catalyst", { result: parts.join("; ") || "not enough O2 data", mode6: m6, verdict: parts.join("; ") });
+  }
+}
+function catHtml() {
+  const C = T.cat, left = C.phase === "run" ? Math.max(0, CAT_SECS - (nowS() - C.t0)) : 0;
+  const warm = (num.ect ?? 0) >= 175;
+  const row = (b, r) => !r ? "" : `<tr><td style="text-align:left">${b}</td><td>${r.upX}</td><td>${r.dnX}</td><td class="${gradeCls(r.g)}">${r.ratio == null ? "—" : r.ratio.toFixed(2)}</td><td>${r.dAvg.toFixed(2)} V</td><td class="${gradeCls(r.g)}">${gradeTxt(r.g)}</td></tr>`;
+  return `<div class="tsteps">Compares how often the downstream O2 switches versus the upstream sensor. A good cat stores oxygen, so the rear sensor stays steady (~0.6–0.8 V). Engine fully warm (drive 10+ min), in Park, <b>hold ~2,500 RPM</b> for ${CAT_SECS} seconds.</div>
+    ${!warm ? `<div class="grade-y">Coolant is ${num.ect != null ? Math.round(num.ect) + "°F" : "unknown"} — warm the engine to at least 175°F first.</div>` : ""}
+    ${C.phase === "run" ? `<button class="tbtn sec" data-tact="cat-cancel">Cancel</button> <span class="grade-g">Hold 2,500 RPM… ${left.toFixed(0)} s left (now ${Math.round(num.rpm ?? 0)} RPM)</span>`
+      : `<button class="tbtn" data-tact="cat-start">Start catalyst test</button>`}
+    ${C.result ? `<table class="ttab"><tr><th style="text-align:left">Bank</th><th>Upstream switches</th><th>Downstream switches</th><th>Ratio</th><th>Rear O2 avg</th><th>Result</th></tr>${row("Bank 1", C.result.b1)}${row("Bank 2", C.result.b2)}</table>
+      ${["b1", "b2"].some((b) => C.result[b] && C.result[b].upX < 3) ? `<div class="verdict grade-y">Upstream sensor barely switched — fuel control isn't cycling (or the sensor is lazy). Fix that first; the cat can't be judged until it does.</div>` : ""}
+      <div class="verdict">Ratio near 0 = good cat; above ~0.5 = rear sensor copying the front = <b>catalyst not storing oxygen</b>. Before condemning: no exhaust leaks, no misfires, fuel trims normal.${C.result.m6 ? "<br>Mode $06: " + esc(C.result.m6) : ""}</div>` : ""}`;
+}
+
+// ---------- 4. Charging system ----------
+function chgVolts() { return num.volt ?? num.cmv ?? null; }
+function chgRecord(step) {
+  const v = chgVolts(); if (v == null) { alert("No voltage reading yet — wait a few seconds."); return; }
+  T.chg[step] = { v, rpm: num.rpm ?? 0 };
+  if (T.chg.idle && T.chg.loaded) reportTest("Charging", { koeo: T.chg.koeo && T.chg.koeo.v, idle: T.chg.idle.v, loaded: T.chg.loaded.v, verdict: chgVerdict().replace(/<[^>]+>/g, "") });
+}
+function chgGrade(step, v) {
+  if (v == null) return "n";
+  if (step === "koeo") return v >= 12.4 ? "g" : v >= 12.2 ? "y" : "r";
+  if (step === "idle") return v >= 13.5 && v <= 14.9 ? "g" : v >= 13.2 && v <= 15.2 ? "y" : "r";
+  return v >= 13.2 && v <= 14.9 ? "g" : v >= 12.8 ? "y" : "r";
+}
+function chgVerdict() {
+  const k = T.chg.koeo && T.chg.koeo.v, i = T.chg.idle && T.chg.idle.v, l = T.chg.loaded && T.chg.loaded.v, out = [];
+  if (k != null && k < 12.4) out.push(`Battery resting at ${k.toFixed(2)} V is below a full charge (12.6 V) — charge and load-test the battery.`);
+  if (i != null && i > 15.0) out.push("Over-charging at idle — check the regulator / alternator and the voltage-sense circuit.");
+  if (i != null && i < 13.2) out.push("Not charging properly at idle — check belt, alternator output, and the B+ and ground cables (voltage drop test).");
+  if (l != null && i != null && i - l > 0.7) out.push(`Voltage drops ${(i - l).toFixed(1)} V with loads on — alternator can't keep up: check output amperage, belt slip, and connections.`);
+  if (!out.length && i != null && l != null) out.push("Charging system looks healthy. (Many newer vehicles use 'smart charging' and may idle at 12.8–13.2 V on purpose — check the factory spec if borderline.)");
+  return out.join(" ");
+}
+function chgHtml() {
+  const step = (k, title, how) => {
+    const r = T.chg[k], g = chgGrade(k, r && r.v);
+    return `<tr><td style="text-align:left"><b>${title}</b><div class="note">${how}</div></td><td class="${gradeCls(g)}" style="font-size:1.1rem">${r ? r.v.toFixed(2) + " V" : "—"}</td><td class="${gradeCls(g)}">${r ? gradeTxt(g) : ""}</td><td><button class="tbtn" data-tact="chg-${k}">Record</button></td></tr>`;
+  };
+  return `<div class="tsteps">Live voltage: <b>${chgVolts() != null ? chgVolts().toFixed(2) + " V" : "—"}</b> · ${Math.round(num.rpm ?? 0)} RPM. Do each step in order and tap Record.</div>
+    <table class="ttab">${step("koeo", "1 · Key on, engine off", "Resting battery (after sitting a while is best). Good ≥ 12.4 V.")}
+    ${step("idle", "2 · Engine idling, everything off", "Good 13.5–14.9 V.")}
+    ${step("loaded", "3 · 2,000 RPM, loads on", "Headlights high, blower high, rear defrost on. Should stay ≥ 13.2 V.")}</table>
+    <button class="tbtn sec" data-tact="chg-reset">Reset</button>
+    ${(T.chg.idle || T.chg.koeo) ? `<div class="verdict">${chgVerdict() || "Finish the remaining steps."}</div>` : ""}`;
+}
+
+// ---------- 5. Power & braking (vehicle speed + phone motion sensor) ----------
+function perfMotion() {
+  const start = () => {
+    window.addEventListener("devicemotion", (e) => {
+      const a = e.accelerationIncludingGravity; if (!a || a.x == null) return;
+      T.perf.motion = { x: a.x, y: a.y, z: a.z, t: nowS() };
+      if (T.perf.phase === "run") T.perf.acc.push([nowS(), a.x, a.y, a.z]);
+      learnForward(a);
+    });
+    T.perf.motionOn = true; renderTests();
+  };
+  if (typeof DeviceMotionEvent !== "undefined" && typeof DeviceMotionEvent.requestPermission === "function")
+    DeviceMotionEvent.requestPermission().then((r) => (r === "granted" ? start() : alert("Motion sensor permission was denied."))).catch(() => alert("Motion sensor not available."));
+  else if (typeof DeviceMotionEvent !== "undefined") start();
+  else alert("This device/browser has no motion sensor access.");
+}
+function perfLevel() {
+  const m = T.perf.motion;
+  if (!m || nowS() - m.t > 1) { alert("No motion data yet. Tap 'Enable phone sensor' first (phones/tablets only)."); return; }
+  const g = Math.hypot(m.x, m.y, m.z);
+  T.perf.cal = { up: [m.x / g, m.y / g, m.z / g] };   // gravity direction with the car parked
+  T.perf.fwd = null; fwdSum = [0, 0, 0]; fwdN = 0;
+}
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+function horizOf(x, y, z) { const up = T.perf.cal.up, k = x * up[0] + y * up[1] + z * up[2]; return [x - k * up[0], y - k * up[1], z - k * up[2]].map((c) => c / 9.81); }
+// Learn which way is "forward" for the phone from straight-line acceleration (speed rising, low speed)
+let fwdSum = [0, 0, 0], fwdN = 0, spdHist = [];
+function learnForward(a) {
+  if (!T.perf.cal) return;
+  const t = nowS();
+  if (fresh("spd", 1)) { spdHist.push([t, num.spd]); spdHist = spdHist.filter((p) => t - p[0] < 1.2); }
+  if (spdHist.length < 2) return;
+  const dv = spdHist[spdHist.length - 1][1] - spdHist[0][1], v = num.spd;
+  if (dv < 1.5 || v < 2 || v > 45) return;          // only while clearly speeding up
+  const h = horizOf(a.x, a.y, a.z);
+  if (Math.hypot(...h) < 0.05) return;
+  fwdSum = fwdSum.map((c, i) => c + h[i]); fwdN++;
+  if (fwdN >= 15) { const n = Math.hypot(...fwdSum); T.perf.fwd = fwdSum.map((c) => c / n); }
+}
+const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+function perfArm(mode) { T.perf = Object.assign(T.perf, { mode, phase: "armed", pts: [], acc: [], result: null }); }
+function perfTick() {
+  const P = T.perf; if (!P.mode || P.phase === "idle" || P.phase === "done" || !fresh("spd", 2)) return;
+  const v = num.spd, t = numT.spd;
+  if (P.pts.length && P.pts[P.pts.length - 1][0] === t) return;
+  if (P.mode === "brake") {
+    if (P.phase === "armed" && v >= 32) P.phase = "ready";
+    if (P.phase === "ready" && v <= 30) { P.phase = "run"; P.pts = [[t, v]]; P.acc = []; }
+    else if (P.phase === "run") { P.pts.push([t, v]); if (v <= 0.5) perfFinish(); }
+  } else {
+    const target = P.mode === "060" ? 60 : 30;
+    if (P.phase === "armed" && v <= 0.5) P.phase = "ready";
+    if (P.phase === "ready" && v > 0.5) { P.phase = "run"; P.pts = [[t, 0]]; P.acc = []; }
+    else if (P.phase === "run") { P.pts.push([t, v]); if (v >= target) perfFinish(); }
+  }
+}
+function perfFinish() {
+  const P = T.perf, pts = P.pts; P.phase = "done";
+  const t = pts[pts.length - 1][0] - pts[0][0];
+  let distFt = 0; for (let i = 1; i < pts.length; i++) distFt += ((pts[i][1] + pts[i - 1][1]) / 2) * 1.46667 * (pts[i][0] - pts[i - 1][0]);
+  const dv = Math.abs(pts[pts.length - 1][1] - pts[0][1]) * 0.44704;   // m/s
+  const avgG = t > 0 ? dv / t / 9.81 : null;
+  let peakG = null, pullG = null;
+  if (P.cal && P.acc.length > 5) {
+    const up = P.cal.up;
+    const horiz = P.acc.map(([, x, y, z]) => horizOf(x, y, z));
+    // forward axis = dominant horizontal direction of the event
+    const sum = horiz.reduce((s, h) => [s[0] + h[0], s[1] + h[1], s[2] + h[2]], [0, 0, 0]);
+    const n = Math.hypot(...sum) || 1, ev = sum.map((c) => c / n);
+    const fwd = P.fwd || (P.mode === "brake" ? null : ev);   // learned forward axis (from a straight launch)
+    peakG = Math.max(...horiz.map((h) => Math.abs(dot(h, fwd || ev))));
+    if (P.mode === "brake" && fwd) pullG = avg(horiz.map((h) => dot(h, cross(fwd, up))));   // + = toward the car's right
+  }
+  const res = { mode: P.mode, time: t, distFt, avgG, peakG, pullG };
+  if (P.mode === "brake") {
+    res.grade = avgG == null ? "n" : avgG >= 0.7 ? "g" : avgG >= 0.5 ? "y" : "r";
+    if (pullG != null) res.pullSide = Math.abs(pullG) < 0.04 ? "straight" : (pullG > 0 ? "right" : "left");
+  } else {
+    res.grade = "n";
+  }
+  P.result = res;
+  const label = { "060": "0-60 mph", "030": "0-30 mph", brake: "30-0 mph braking" }[P.mode];
+  reportTest(label, { time_s: +t.toFixed(2), distance_ft: Math.round(distFt), avg_g: avgG && +avgG.toFixed(2), peak_g: peakG && +peakG.toFixed(2),
+    pull: res.pullSide ? `${res.pullSide} (${Math.abs(pullG).toFixed(2)} g)` : undefined, verdict: `${label} in ${t.toFixed(1)} seconds` });
+}
+function perfHtml() {
+  const P = T.perf, r = P.result;
+  const status = { armed: P.mode === "brake" ? "Armed — get above 32 mph, then brake firmly to a stop" : "Armed — come to a full stop, then accelerate hard",
+    ready: P.mode === "brake" ? "Ready — brake when you want; timing starts at 30 mph" : "Ready — go!", run: "Recording…" }[P.phase] || "";
+  return `<div class="tsteps">Time and distance come from the vehicle's speed. Add your phone's motion sensor for g-force and <b>brake pull</b>: mount the phone solidly, tap Enable, then <b>Level</b> while parked. Only test in a safe, legal place.</div>
+    <button class="tbtn sec" data-tact="perf-motion">${P.motionOn ? "✓ Phone sensor on" : "📱 Enable phone sensor"}</button>
+    <button class="tbtn sec" data-tact="perf-level">${P.cal ? "✓ Leveled (re-level)" : "Level (car parked)"}</button>
+    ${P.cal ? `<span class="${P.fwd ? "grade-g" : "grade-y"}">${P.fwd ? "✓ Forward direction learned" : "Then accelerate from a stop in a straight line once to learn 'forward'"}</span>` : ""}<br>
+    <button class="tbtn" data-tact="perf-060">0–60 mph</button><button class="tbtn" data-tact="perf-030">0–30 mph</button><button class="tbtn" data-tact="perf-brake">30–0 braking</button>
+    ${P.phase !== "idle" && P.phase !== "done" ? `<button class="tbtn sec" data-tact="perf-cancel">Cancel</button>` : ""}
+    <div class="grade-y">${status} ${P.phase !== "idle" && P.phase !== "done" ? `· ${Math.round(num.spd ?? 0)} mph` : ""}</div>
+    ${r ? `<div class="verdict"><span class="tnum">${r.time.toFixed(1)} s</span> · ${Math.round(r.distFt)} ft
+      ${r.avgG != null ? ` · avg ${r.avgG.toFixed(2)} g` : ""}${r.peakG != null ? ` · peak ${r.peakG.toFixed(2)} g` : ""}
+      ${r.mode === "brake" ? `<br>Braking: <b class="${gradeCls(r.grade)}">${gradeTxt(r.grade)}</b> (good ≥ 0.7 g average on dry pavement)` : ""}
+      ${r.pullSide ? `<br>Pull: <b>${r.pullSide === "straight" ? "tracks straight" : "pulls " + r.pullSide.toUpperCase()}</b> (${Math.abs(r.pullG).toFixed(2)} g sideways)`
+        : r.mode === "brake" ? `<br><span class='note'>${P.cal ? "Brake pull needs one straight-line launch first (accelerate from a stop in a straight line) so the app learns which way is forward — then rerun." : "Enable + level the phone sensor to measure brake pull."}</span>` : ""}
+      </div>` : ""}`;
+}
+
+// ---------- plots ----------
+function plotSetup(id) {
+  const cv = $(id); if (!cv) return null;
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
+  const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const css = getComputedStyle(document.documentElement);
+  return { g, W, H, c: (n) => css.getPropertyValue(n).trim() };
+}
+function axes(P, x0, x1, y0, y1, L = 40, B = 18) {
+  const { g, W, H, c } = P, pw = W - L - 8, ph = H - B - 8;
+  const X = (x) => L + (x - x0) / (x1 - x0) * pw, Y = (y) => 8 + (1 - (y - y0) / (y1 - y0)) * ph;
+  g.strokeStyle = c("--line"); g.fillStyle = c("--muted"); g.font = "10px sans-serif"; g.lineWidth = 1;
+  return { X, Y, pw, ph, L, B };
+}
+function drawTestPlots() {
+  if (testTab === "ft") {
+    const P = plotSetup("ftPlot"); if (!P) return;
+    const A = axes(P, 0, 100, -30, 30), { g, c } = P;
+    for (const y of [-20, -10, 0, 10, 20]) { g.beginPath(); g.moveTo(A.L, A.Y(y)); g.lineTo(A.L + A.pw, A.Y(y)); g.stroke(); g.textAlign = "right"; g.fillText((y > 0 ? "+" : "") + y + "%", A.L - 4, A.Y(y) + 3); }
+    g.textAlign = "center"; [0, 25, 50, 75, 100].forEach((x) => g.fillText(x + "%", A.X(x), P.H - 4));
+    const pts = T.ft.bins ? T.ft.bins.pts : [];
+    const dotAt = (x, y, col) => { g.fillStyle = col; g.beginPath(); g.arc(A.X(Math.min(100, x)), A.Y(Math.max(-30, Math.min(30, y))), 3, 0, 7); g.fill(); };
+    pts.forEach((p) => { dotAt(p[0], p[1], c("--y")); if (p[2] != null) dotAt(p[0], p[2], c("--b")); });
+    g.textAlign = "left";
+    [["Bank 1", c("--y"), 0], ["Bank 2", c("--b"), 62]].forEach(([l, col, dx]) => { g.fillStyle = col; g.beginPath(); g.arc(A.L + 10 + dx, 15, 4, 0, 7); g.fill(); g.fillStyle = c("--muted"); g.fillText(l, A.L + 17 + dx, 18); });
+  }
+  if (testTab === "ve") {
+    const P = plotSetup("vePlot"); if (!P) return;
+    const pts = T.ve.pts; const { g, c } = P;
+    if (!pts.length) { g.fillStyle = c("--muted"); g.font = "12px sans-serif"; g.fillText("Waiting for a wide-open-throttle pull…", 44, 90); return; }
+    const t0 = pts[0][0], t1 = Math.max(pts[pts.length - 1][0], t0 + 1), hi = Math.max(...pts.map((p) => Math.max(p[1], p[2]))) * 1.1;
+    const A = axes(P, t0, t1, 0, hi);
+    for (let k = 0; k <= 2; k++) { const v = hi * k / 2; g.beginPath(); g.moveTo(A.L, A.Y(v)); g.lineTo(A.L + A.pw, A.Y(v)); g.stroke(); g.textAlign = "right"; g.fillText(v.toFixed(0), A.L - 4, A.Y(v) + 3); }
+    const line = (i, col) => { g.strokeStyle = col; g.lineWidth = 2; g.beginPath(); pts.forEach((p, j) => (j ? g.lineTo(A.X(p[0]), A.Y(p[i])) : g.moveTo(A.X(p[0]), A.Y(p[i])))); g.stroke(); };
+    line(2, c("--r")); line(1, c("--y"));
+    g.fillStyle = c("--muted"); g.textAlign = "left"; g.fillText("g/s", 4, 12);
+  }
+}
+renderTests();
 </script>
 </body>
 </html>
@@ -2293,6 +2729,9 @@ def handle_ble_event(ev: dict):
     append_to_log(vin=vin or ss.active_vin, vehicle=ss.vehicle_info, dtc=", ".join(codes) or "No codes",
                   customer=ss.customer_name, phone=ss.customer_phone)
     queue_update(toast=f"Scanner synced: {vin or 'no VIN'} · {len(codes)} code(s) sent to the Diagnose tab", **upd)
+
+  elif ev.get("type") == "tests":
+    ss.test_results = ev.get("results") or {}
 
   elif ev.get("type") == "ai":
     vehicle = ss.vehicle_info or "General OBD-II Vehicle"
@@ -2347,7 +2786,9 @@ with tab2:
              " into the other tabs automatically. The Bluetooth link stays up while you use the rest of the app.")
   _vd = ss.vehicle_details or {}
   oem_repo, oem_sigs = obdb_signals(_vd.get("Make", ""), _vd.get("Model", ""), str(_vd.get("Model Year", "")))
+  _disp = re.search(r"\d+(\.\d+)?", str(_vd.get("Displacement (L)") or _vd.get("Engine") or ""))
   event = _ble_dashboard(vehicle=ss.vehicle_info, make=make_profile(), year=_vd.get("Model Year", ""),
+                         disp=_disp.group(0) if _disp else "",
                          oem=oem_sigs, oem_src=oem_repo, ai=ss.ble_ai, key="ble", default=None)
   if isinstance(event, dict) and event.get("id") and event["id"] != ss.ble_last_event:
     ss.ble_last_event = event["id"]
@@ -2358,14 +2799,15 @@ with tab2:
 # ========================================================
 def scan_context() -> str:
   """Everything the scanner captured, for the AI prompts."""
+  tests = ("\nGuided test results: " + json.dumps(ss.test_results)) if ss.test_results else ""
   if not ss.ble_dtcs and not ss.scan_data:
-    return "No scanner data (codes entered by hand)."
+    return "No scanner data (codes entered by hand)." + tests
   sd = ss.scan_data or {}
   pids = json.dumps(sd.get("pids") or {}, indent=0) if sd.get("pids") else "not captured"
   return (f"Scanner codes: {_fmt_dtcs(ss.ble_dtcs)}\n"
           f"I/M readiness: {sd.get('readiness') or 'not read'}\n"
           f"Mode $06 results: {sd.get('mode6') or 'not read'}\n"
-          f"Live data snapshot at sync ({sd.get('at') or '?'}): {pids}")
+          f"Live data snapshot at sync ({sd.get('at') or '?'}): {pids}" + tests)
 
 
 with tab3:
