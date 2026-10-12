@@ -36,6 +36,8 @@ st.markdown(
 # --- CONSTANTS ---
 # ========================================================
 LOG_FILE = "scan_history.csv"
+APP_VERSION = "2026-10-12"
+PROBLEM_LOG = "problem_log.jsonl"
 LOG_COLUMNS = ["Timestamp", "Customer", "Phone", "VIN", "Vehicle", "Fault Code (DTC)"]
 VIN_RE = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -102,8 +104,53 @@ def queue_update(toast: str | None = None, **values):
 # ========================================================
 # --- HELPERS ---
 # ========================================================
+# --- PROBLEM LOG: crashes, AI/API failures and scanner errors, so they can be sent to Claude to fix ---
+def log_problem(kind: str, where: str, message: str, details: str = "", extra: dict | None = None):
+  entry = {"time": datetime.now().strftime("%Y-%m-%d %I:%M:%S %p"), "version": APP_VERSION, "kind": kind, "where": where,
+           "message": str(message)[:500], "details": str(details)[-4000:], "vehicle": st.session_state.get("vehicle_info", ""),
+           **(extra or {})}
+  try:
+    with open(PROBLEM_LOG, "a", encoding="utf-8") as f:
+      f.write(json.dumps(entry) + "\n")
+  except OSError:
+    pass
+  return entry
+
+
+def load_problems(limit: int = 200) -> list[dict]:
+  try:
+    with open(PROBLEM_LOG, encoding="utf-8") as f:
+      rows = [json.loads(line) for line in f if line.strip()]
+  except (OSError, ValueError):
+    return []
+  return rows[-limit:][::-1]
+
+
+class guard:
+  """Wrap a section: if it crashes, log it and show a friendly message instead of killing the whole app."""
+  def __init__(self, where: str):
+    self.where = where
+
+  def __enter__(self):
+    return self
+
+  def __exit__(self, etype, exc, tb):
+    if exc is None:
+      return False
+    name = etype.__name__
+    if "Rerun" in name or "Stop" in name or isinstance(exc, (KeyboardInterrupt, SystemExit)):
+      return False   # Streamlit control flow, not a crash
+    import traceback
+    log_problem("crash", self.where, f"{name}: {exc}", "".join(traceback.format_exception(etype, exc, tb)))
+    st.error(f"⚠️ Something broke in **{self.where}** ({name}). It was saved to the problem log — "
+             "go to the 📋 Log tab → 🐞 Problem log and copy the report to Claude.")
+    return True
+
+
 class AIError(Exception):
-  pass
+  def __init__(self, msg: str):
+    super().__init__(msg)
+    log_problem("ai", "AI request", msg)
 
 
 def secret(name: str) -> str:
@@ -218,7 +265,10 @@ Find from current, reputable sources (manufacturer TSBs and recalls, NHTSA, tech
 4. Common misdiagnoses or parts that get replaced for nothing.
 Be specific to this vehicle, list sources, and say clearly when something could not be confirmed."""
   out = ask_perplexity(prompt)
-  return "" if out.startswith("⚠️") or out == "No response text received." else out
+  if out.startswith("⚠️") or out == "No response text received.":
+    log_problem("ai", "Perplexity web research", out)
+    return ""
+  return out
 
 
 TEAM_RULES = """
@@ -580,7 +630,7 @@ tab1, tab2, tab3, tab5 = st.tabs([
 # ========================================================
 # --- TAB 1: VIN & CUSTOMER INFO ---
 # ========================================================
-with tab1:
+with tab1, guard("VIN & Customer tab"):
   st.subheader("Customer & Vehicle Identification")
 
   st.markdown("#### 👤 Customer Information")
@@ -756,6 +806,7 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
     <button id="aiBtn" disabled>🤖 AI Check</button>
     <button id="modBtn" disabled>🧭 Scan All Modules</button>
     <button id="syncBtn" disabled>📋 Send VIN &amp; Codes to App</button>
+    <button id="dbgBtn" style="background:var(--card);color:var(--muted);border:1px solid var(--line)">🐞 Send debug info</button>
     <div class="oem">OEM Profile:
       <select id="oemSel">
         <option value="AUTO">Auto (this vehicle)</option><option value="HONDA">Honda / Acura</option>
@@ -999,11 +1050,39 @@ function onData(ev) {
   buf += decoder.decode(ev.target.value, { stream: true });
   if (pending && buf.includes(">")) { const out = buf; buf = ""; pending(out); }
 }
+// ---- debug trace + problem logging (sent to the app's 🐞 Problem log) ----
+const TRACE = [], LOGQ = [];
+let lastLogFlush = 0;
+function traceAdd(cmd, out) {
+  const r = (out || "(timeout)").replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").replace(">", "").trim();
+  TRACE.push(`${new Date().toLocaleTimeString()} [${curHeader || "-"}] ${cmd} → ${r.slice(0, 80)}`);
+  if (TRACE.length > 200) TRACE.shift();
+}
+function logEvent(kind, where, message, details) {
+  LOGQ.push({ kind, where, message: String(message).slice(0, 400), details: (details ? String(details) : "") + "\n--- last adapter exchanges ---\n" + TRACE.slice(-25).join("\n") });
+  flushLog();
+}
+function flushLog(force) {
+  if (!LOGQ.length && !force) return;
+  const now = Date.now();
+  if (!force && now - lastLogFlush < 15000) { setTimeout(() => flushLog(), 15500 - (now - lastLogFlush)); return; }
+  lastLogFlush = now;
+  sendValue({ type: "log", id: "log-" + now, entries: LOGQ.splice(0) });
+}
+function debugSnapshot() {
+  return { connected, isCan, protocol: baseProto, baseHeader, batchOK, fastOK, adapter: device && device.name,
+    pidsPolled: active.length, oemSource: typeof oemSourceName === "function" ? oemSourceName() : "", oemChecked: oemCmds.filter((c) => c.state !== "new").length,
+    oemTotal: oemCmds.length, oemFound, modulesAnswered: modResults.length, vin: vinRead, codes: dtcs.stored, profile: profile(),
+    userAgent: navigator.userAgent, trace: TRACE.slice(-80) };
+}
+window.addEventListener("error", (e) => logEvent("scanner-crash", "Scanner page", e.message, (e.error && e.error.stack) || `${e.filename}:${e.lineno}`));
+window.addEventListener("unhandledrejection", (e) => logEvent("scanner-crash", "Scanner page", (e.reason && e.reason.message) || String(e.reason), e.reason && e.reason.stack));
+
 function rawSend(cmd, timeoutMs) {
   return new Promise((resolve) => {
     buf = "";
     let t;
-    const done = (out) => { clearTimeout(t); pending = null; resolve(out); };
+    const done = (out) => { clearTimeout(t); pending = null; traceAdd(cmd, out); resolve(out); };
     t = setTimeout(() => done(buf), timeoutMs);
     pending = done;
     const data = new TextEncoder().encode(cmd + "\r");
@@ -2256,7 +2335,7 @@ function requestAi(mode) {
   if (mode === "full") $("aiBox").innerHTML = `<span style="color:var(--o)">🤖 Analyzing live data, codes, monitors and Mode $06…</span>`;
   sendValue({ type: "ai", id: aiPendingId, mode, at: new Date().toLocaleTimeString(), pids: snapshot(), dtcs, readiness: readinessSummary, mode6: mode6Summary, tests: T.results || {} });
   const id = aiPendingId;
-  setTimeout(() => { if (aiPendingId === id) { aiPendingId = null; if (mode === "full") $("aiBox").textContent = "AI request timed out. Try again."; } }, 90000);
+  setTimeout(() => { if (aiPendingId === id) { aiPendingId = null; if (mode === "full") $("aiBox").textContent = "AI request timed out. Try again."; logEvent("ai", "AI check (" + mode + ")", "No answer from the app within 90 s"); } }, 90000);
 }
 function showAi(text, label) {
   let h = esc(text || "")
@@ -2345,6 +2424,7 @@ $("bleBtn").addEventListener("click", async () => {
     await connectGatt();
     if (!(await initVehicle())) {
       log("ECM not responding. Turn the key fully ON (or start the engine) and tap Connect again.");
+      logEvent("scanner", "Connect", "ECM did not answer 0100 on CAN or auto protocol");
       $("bleBtn").disabled = false; return;
     }
     connected = true; enableBtns(true);
@@ -2360,6 +2440,7 @@ $("bleBtn").addEventListener("click", async () => {
     if (connected) sendSync(true);   // push VIN + all codes + snapshot into the app (no page reload)
   } catch (err) {
     log("Error: " + err.message);
+    if (!/cancel|chooser|User cancelled/i.test(err.message)) logEvent("scanner", "Connect", err.message, err.stack);
   } finally {
     $("bleBtn").disabled = connected;
   }
@@ -2385,6 +2466,10 @@ $("driveBtn").addEventListener("click", () => {
     lastSpeak = 0; speak("Test drive started. Tests are running. When it's safe, include steady cruising, one full throttle pull, and one firm stop from 30 miles per hour.");
   } else stopDriveTests();
 });
+$("dbgBtn").addEventListener("click", () => {
+  sendValue({ type: "log", id: "dbg-" + Date.now(), entries: LOGQ.splice(0), debug: debugSnapshot() });
+  log("Debug info sent — see the 📋 Log tab → 🐞 Problem log.");
+});
 $("modBtn").addEventListener("click", async () => { await scanModules(); sendSync(false); });
 $("readBtn").addEventListener("click", async () => {
   log("Re-reading codes, readiness and Mode $06…");
@@ -2407,6 +2492,7 @@ $("clearBtn").addEventListener("click", async () => {
     log("Codes cleared and monitors reset.");
   } else {
     log("ECM did not confirm the clear. Try key ON, engine OFF.");
+    logEvent("scanner", "Clear codes", "No 44 reply to Mode 04");
     alert("The ECM did not confirm the clear (no 44 response). Try again with key ON, engine OFF.");
   }
 });
@@ -3402,7 +3488,7 @@ async function nvhRecord(kind) {
     const top = N.res.peaks[0];
     reportTest(kind === "acc" ? "Vibration (NVH)" : "Noise (NVH)", { speed_mph: Math.round(spd), rpm: Math.round(rpm), top_hz: top && +top.f.toFixed(1),
       match: top && top.match ? top.match.name : "no order match", verdict: top && top.match ? `${top.f.toFixed(1)} Hz matches ${top.match.name}: ${top.match.why}` : "Strongest frequency doesn't match a rotating order" });
-  } catch (e) { N.res = { error: e.message || String(e) }; }
+  } catch (e) { N.res = { error: e.message || String(e) }; logEvent("test", "Vibration/noise test", N.res.error, e.stack); }
   clearInterval(stamp); N.phase = "idle"; renderTests();
 }
 function nvhHtml() {
@@ -3437,7 +3523,7 @@ async function tailRecord() {
     const g = score < 0.25 ? "g" : score < 0.45 ? "y" : "r";
     L.res = { rpm, cyl, orders, score, g };
     reportTest("Tailpipe pulse listener", { rpm: Math.round(rpm), unevenness: +score.toFixed(2), grade: gradeTxt(g), verdict: g === "g" ? "Exhaust pulses even" : "Exhaust pulses uneven — possible misfire/weak cylinder" });
-  } catch (e) { L.res = { error: e.message || String(e) }; }
+  } catch (e) { L.res = { error: e.message || String(e) }; logEvent("test", "Tailpipe test", L.res.error, e.stack); }
   clearInterval(stamp); L.phase = "idle"; renderTests();
 }
 function tailHtml() {
@@ -3628,6 +3714,13 @@ def handle_ble_event(ev: dict):
                   customer=ss.customer_name, phone=ss.customer_phone)
     queue_update(toast=f"Scanner synced: {vin or 'no VIN'} · {len(codes)} code(s) sent to the Diagnose tab", **upd)
 
+  elif ev.get("type") == "log":
+    for e in ev.get("entries") or []:
+      log_problem(e.get("kind", "scanner"), e.get("where", "Bluetooth scanner"), e.get("message", ""), e.get("details", ""))
+    if ev.get("debug"):
+      ss.scanner_debug = ev["debug"]
+      ss._toast = "Scanner debug info saved to the problem log"
+
   elif ev.get("type") == "tests":
     ss.test_results = ev.get("results") or {}
 
@@ -3680,7 +3773,7 @@ Use clean bold section headers and direct shop-floor language. Skip sections wit
     st.rerun()
 
 
-with tab2:
+with tab2, guard("Live Telemetry tab"):
   st.subheader("📊 Live Telemetry, OEM Enhanced PIDs & Monitors")
   context_bar()
   st.caption("Works in Chrome (Android, Windows, macOS, ChromeOS). Connecting reads the VIN and codes and fills them"
@@ -3713,7 +3806,7 @@ def scan_context() -> str:
           f"Live data snapshot at sync ({sd.get('at') or '?'}): {pids}" + tests)
 
 
-with tab3:
+with tab3, guard("Diagnose tab"):
   st.subheader("🔧 Diagnose: Strategy, Scope Lab & Copilot")
   context_bar()
 
@@ -4027,7 +4120,7 @@ pre{{white-space:pre-wrap;font-family:inherit;font-size:13px;background:#fafafa;
 </body></html>"""
 
 
-with tab3:
+with tab3, guard("Diagnose tab"):
   st.write("---")
   st.markdown("#### 4 · Customer / shop report")
   st.caption("One page with the vehicle, all codes, freeze frame, every test result (green / yellow / red) and the plan. "
@@ -4041,7 +4134,7 @@ with tab3:
 # ========================================================
 # --- TAB 5: VEHICLE & DTC LOG ---
 # ========================================================
-with tab5:
+with tab5, guard("Log tab"):
   st.subheader("📋 Vehicle Diagnostic Scan History")
   st.caption("Logged automatically when the scanner syncs or you run a diagnostic tree. Note: on Streamlit Cloud this"
              " file resets whenever the app restarts, so export it regularly.")
@@ -4060,3 +4153,45 @@ with tab5:
         queue_update(toast="Log cleared")
   else:
     st.info("No vehicles or DTCs logged yet. Connect the scanner (Live Telemetry tab) or run a diagnostic tree (Diagnose tab) to start logging.")
+
+  # ---------- 🐞 Problem log ----------
+  st.write("---")
+  st.subheader("🐞 Problem log")
+  st.caption("Crashes, AI/API failures and Bluetooth scanner errors are saved here automatically. If something goes wrong, "
+             "describe it below, tap the copy icon on the report and paste it to Claude. (On Streamlit Cloud this log "
+             "resets when the app restarts, so copy it soon after the problem.)")
+  problems = load_problems()
+  if problems:
+    st.dataframe([{k: p.get(k, "") for k in ("time", "kind", "where", "message")} for p in problems[:50]], use_container_width=True)
+  else:
+    st.success("No problems logged.")
+  what = st.text_area("What went wrong? (what you tapped, what you expected, what happened)", key="problem_note", height=80)
+  dbg = ss.get("scanner_debug") or {}
+  recent = problems[:12]
+  report = "\n".join([
+      "TEST DON'T GUESS — PROBLEM REPORT",
+      f"App version: {APP_VERSION} · {datetime.now():%Y-%m-%d %I:%M %p}",
+      f"Vehicle: {ss.vehicle_info or 'none'} · VIN {ss.active_vin or 'none'} · OEM profile {make_profile()}",
+      f"Codes in Diagnose tab: {ss.active_dtc or 'none'}",
+      f"What happened: {what.strip() or '(not described)'}",
+      "",
+      f"RECENT LOGGED PROBLEMS ({len(recent)}):",
+      *[f"- [{p.get('time')}] {p.get('kind')} in {p.get('where')}: {p.get('message')}"
+        + (f"\n    {p.get('details', '').strip()[-1500:]}" if p.get("details") else "") for p in recent],
+      "",
+      "SCANNER STATE: " + (json.dumps({k: v for k, v in dbg.items() if k != "trace"}) if dbg else "not sent (tap 🐞 Send debug info on the Live Telemetry tab)"),
+      *(["LAST ADAPTER EXCHANGES:", *dbg.get("trace", [])[-60:]] if dbg.get("trace") else []),
+  ])
+  st.markdown("**Report to send Claude** — tap the copy icon in the top-right corner of the box:")
+  st.code(report, language=None)
+  c1, c2 = st.columns(2)
+  with c1:
+    st.download_button("⬇️ Download full problem log", data="\n".join(json.dumps(p) for p in problems[::-1]) or "empty",
+                       file_name=f"problem_log_{datetime.now():%Y%m%d_%H%M}.txt", mime="text/plain")
+  with c2:
+    if problems and st.button("🧹 Clear problem log"):
+      try:
+        os.remove(PROBLEM_LOG)
+      except OSError:
+        pass
+      queue_update(toast="Problem log cleared")
