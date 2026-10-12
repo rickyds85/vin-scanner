@@ -381,31 +381,140 @@ def vin_check_digit_ok(vin: str) -> bool:
 
 
 def scan_vin_barcode(img: Image.Image) -> str:
-  for candidate in (img, ImageEnhance.Contrast(ImageOps.grayscale(img)).enhance(2.2)):
-    for b in zxingcpp.read_barcodes(candidate, try_rotate=True, try_downscale=True, try_invert=True):
-      m = VIN_RE.search(b.text.upper())
-      if m:
-        return m.group(0)
+  """Door-jamb / registration barcodes (Code 39, DataMatrix, QR, PDF417). Tries several clean-ups of the photo."""
+  gray = ImageOps.grayscale(img)
+  big = gray.resize((gray.width * 2, gray.height * 2)) if max(gray.size) < 1600 else gray
+  versions = [img, ImageEnhance.Contrast(gray).enhance(2.2), ImageEnhance.Sharpness(ImageEnhance.Contrast(big).enhance(2.5)).enhance(2.0),
+              big.point(lambda p: 255 if p > 128 else 0)]
+  for candidate in versions:
+    try:
+      found = zxingcpp.read_barcodes(candidate, try_rotate=True, try_downscale=True, try_invert=True)
+    except Exception:
+      continue
+    for b in found:
+      for m in re.finditer(r"[A-Z0-9]{17}", re.sub(r"[^A-Z0-9]", "", b.text.upper().replace("I", "1").replace("O", "0").replace("Q", "0"))):
+        if VIN_RE.fullmatch(m.group(0)):
+          return m.group(0)
   return ""
 
 
+# Characters people (and OCR) mix up on VIN plates. VINs never use I, O or Q.
+_CONFUSE = {"0": "DQOU", "1": "IL7T", "2": "Z", "5": "S", "6": "G", "8": "B3", "3": "8", "7": "1T", "9": "G",
+            "D": "0", "Z": "2", "S": "5", "G": "6", "B": "8", "U": "V0", "V": "U", "T": "17"}
+
+
+def clean_vin_text(s: str) -> list[str]:
+  """Pull every 17-character VIN-looking string out of text, fixing letters that can't appear in a VIN."""
+  t = s.upper().replace("O", "0").replace("Q", "0").replace("I", "1")
+  t = re.sub(r"[\s\-\.\*]", "", t)
+  return list(dict.fromkeys(m.group(0) for m in re.finditer(r"[A-HJ-NPR-Z0-9]{17}", t)))
+
+
+def vin_fixes(v: str) -> list[str]:
+  """If the check digit fails, try single-character swaps of look-alike characters that make it pass."""
+  if vin_check_digit_ok(v):
+    return [v]
+  out = []
+  for i, ch in enumerate(v):
+    for alt in _CONFUSE.get(ch, ""):
+      if alt in "IOQ":
+        continue
+      c = v[:i] + alt + v[i + 1:]
+      if vin_check_digit_ok(c):
+        out.append(c)
+  return out
+
+
+@st.cache_data(ttl=7 * 86400, show_spinner=False, max_entries=500)
+def nhtsa_ok(vin: str) -> bool:
+  """True when NHTSA decodes the VIN with no errors (error code 0)."""
+  try:
+    r = http().get(f"https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/{vin}?format=json", timeout=10)
+    res = {i["Variable"]: i.get("Value") for i in r.json().get("Results", [])}
+    return str(res.get("Error Code", "")).strip() == "0" and bool(res.get("Make"))
+  except Exception:
+    return False
+
+
+VIN_READ_PROMPT = """You are reading a vehicle identification number (VIN) from a photo. It may be a door-jamb sticker, the dashboard plate seen through the windshield, an engine/frame stamping, a title, registration or insurance card, or a scan-tool screen.
+Read the printed 17-character VIN exactly as printed, character by character. VINs never contain the letters I, O or Q.
+Return JSON only: {"vins": ["<each 17-character VIN you can see, best reading first>"], "unsure_positions": [<1-based positions you are not sure about>], "where": "<where in the photo>"}.
+If no VIN is visible return {"vins": [], "where": ""}."""
+
+
+def _jpeg_b64(img: Image.Image, max_side: int) -> str:
+  im = img.convert("RGB")
+  im.thumbnail((max_side, max_side))
+  b = io.BytesIO()
+  im.save(b, format="JPEG", quality=90)
+  return base64.b64encode(b.getvalue()).decode()
+
+
+def _ai_vin_reads(img: Image.Image) -> dict:
+  """Ask Gemini (and Claude, if its key is set) to read the printed VIN. Returns {model: [vins]}."""
+  reads = {}
+  try:
+    raw = gemini([{"text": VIN_READ_PROMPT}, {"inline_data": {"mime_type": "image/jpeg", "data": _jpeg_b64(img, 2048)}}],
+                 json_mode=True, timeout=40)
+    reads["Gemini"] = [c for v in (json.loads(raw).get("vins") or []) for c in clean_vin_text(str(v))]
+  except (AIError, ValueError, AttributeError):
+    pass
+  if has_claude():
+    try:
+      key = secret("ANTHROPIC_API_KEY")
+      res = http().post(CLAUDE_URL, timeout=60, headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                        json={"model": secret("CLAUDE_MODEL") or CLAUDE_DEFAULT_MODEL, "max_tokens": 400, "messages": [{"role": "user", "content": [
+                            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": _jpeg_b64(img, 1568)}},
+                            {"type": "text", "text": VIN_READ_PROMPT}]}]})
+      if res.status_code == 200:
+        txt = "".join(b.get("text", "") for b in res.json().get("content", []) if b.get("type") == "text")
+        m = re.search(r"\{.*\}", txt, re.S)
+        vins = json.loads(m.group(0)).get("vins", []) if m else []
+        reads["Claude"] = [c for v in vins for c in clean_vin_text(str(v))]
+      else:
+        log_problem("ai", "VIN photo read (Claude)", f"HTTP {res.status_code}: {res.text[:200]}")
+    except (requests.RequestException, ValueError, AttributeError) as e:
+      log_problem("ai", "VIN photo read (Claude)", str(e))
+  return reads
+
+
 @st.cache_data(show_spinner=False, max_entries=50)
-def find_vin(img_bytes: bytes) -> tuple[str, str]:
-  """Barcode first (free, instant), AI text read only if that fails. Cached per photo."""
+def find_vin(img_bytes: bytes) -> dict:
+  """Read a VIN from a photo: barcode first, then the printed characters with AI, then verify.
+  Returns {"vin", "method", "confidence": high|medium|low, "alts": [...], "note"}."""
   img = ImageOps.exif_transpose(Image.open(io.BytesIO(img_bytes)))
-  vin = scan_vin_barcode(img)
-  if vin:
-    return vin, "Barcode"
-  text = gemini(
-      [
-          {"text": "Locate the 17-character Vehicle Identification Number (VIN) in this image. VINs use digits and"
-                   " uppercase letters except I, O and Q. Return ONLY the VIN, or NONE if there isn't one."},
-          img_part(img),
-      ],
-      timeout=25,
-  )
-  m = VIN_RE.search(text.upper())
-  return (m.group(0), "AI photo text") if m else ("", "")
+  bc = scan_vin_barcode(img)
+  if bc and vin_check_digit_ok(bc):
+    return {"vin": bc, "method": "barcode", "confidence": "high", "alts": [], "note": "Read from the barcode; check digit OK."}
+  reads = _ai_vin_reads(img)
+  if bc:
+    reads["Barcode"] = [bc]
+  # score every candidate (plus look-alike fixes that make the check digit pass)
+  score, why = {}, {}
+  for src, vins in reads.items():
+    for rank, v in enumerate(vins[:3]):
+      for c in [v] + [f for f in vin_fixes(v) if f != v]:
+        pts = (3 if c == v else 1) - rank
+        score[c] = score.get(c, 0) + pts
+        why.setdefault(c, set()).add(src if c == v else f"{src} (corrected)")
+  if not score:
+    return {"vin": "", "method": "", "confidence": "low", "alts": [], "note": "No VIN found in the photo."}
+  ranked = sorted(score, key=lambda c: -score[c])[:5]
+  verified = []
+  for c in ranked:
+    ok_cd, ok_db = vin_check_digit_ok(c), nhtsa_ok(c)
+    score[c] += (4 if ok_cd else 0) + (4 if ok_db else 0)
+    if ok_cd and ok_db:
+      verified.append(c)
+  ranked.sort(key=lambda c: -score[c])
+  best = ranked[0]
+  agree = len([s_ for s_ in why[best] if "corrected" not in s_]) >= 2
+  conf = "high" if best in verified and (agree or "Barcode" in why[best]) else "medium" if best in verified else "low"
+  note = {"high": "Read by " + " + ".join(sorted(why[best])) + "; check digit and NHTSA decode OK.",
+          "medium": "Check digit and NHTSA decode OK (read by " + ", ".join(sorted(why[best])) + "). Glance at it to be sure.",
+          "low": "Couldn't fully verify this reading — compare it to the vehicle before using it."}[conf]
+  alts = [c for c in ranked[1:4] if vin_check_digit_ok(c)]
+  return {"vin": best, "method": " + ".join(sorted(why[best])), "confidence": conf, "alts": alts, "note": note}
 
 
 @st.cache_data(show_spinner=False, max_entries=20)
@@ -643,34 +752,55 @@ with tab1, guard("VIN & Customer tab"):
                  placeholder="e.g. 6428 DAWSON BLVD, STE 1730, NORCROSS, GA, 30093")
 
   st.write("---")
-  st.markdown("#### 📸 Camera / Photo VIN Scanner")
-  col_cam, col_up = st.columns(2)
-  with col_cam:
-    photo = st.camera_input("Snap VIN sticker, plate, or paperwork") if st.toggle("📷 Open Camera") else None
+  st.markdown("#### 📸 VIN from a photo")
+  st.caption("Tip: use **Take or upload photo** — on a phone it opens the full-resolution camera, which reads far better than "
+             "the small in-app camera. Get close, fill the frame with the VIN, avoid glare. Works with the door sticker, "
+             "windshield plate, registration/insurance card or a scan-tool screen. (Connecting the scanner reads the VIN "
+             "straight from the car and needs no photo.)")
+  col_up, col_cam = st.columns(2)
   with col_up:
-    uploaded = st.file_uploader("Or upload photo from phone gallery", type=["png", "jpg", "jpeg"], key="vin_upload")
+    uploaded = st.file_uploader("📷 Take or upload photo of the VIN", type=["png", "jpg", "jpeg", "webp"], key="vin_upload")
+  with col_cam:
+    photo = st.camera_input("In-app camera (lower resolution)") if st.toggle("Use in-app camera instead") else None
 
-  active_image = photo or uploaded
+  active_image = uploaded or photo
   if active_image:
     img_bytes = active_image.getvalue()
     photo_id = hashlib.md5(img_bytes).hexdigest()
-    st.image(img_bytes, caption="Captured Image")
-
-    found_vin, method = "", ""
     try:
-      with st.spinner("Reading VIN (barcode, then AI text)..."):
-        found_vin, method = find_vin(img_bytes)
-    except AIError as e:
-      st.warning(f"Barcode not found and AI read failed: {e}")
+      st.image(img_bytes, caption="Photo", width=420)
+    except Exception:
+      pass
 
+    read = {"vin": ""}
+    try:
+      with st.spinner("Reading the VIN (barcode + printed characters) and verifying it..."):
+        read = find_vin(img_bytes)
+    except Exception as e:   # unreadable image format etc.
+      log_problem("vin", "VIN photo read", f"{type(e).__name__}: {e}")
+      st.warning("Couldn't read that photo. Try a JPG/PNG, or type the VIN below.")
+
+    found_vin = read.get("vin", "")
     if found_vin:
-      st.success(f"VIN Detected ({method}): **{found_vin}**")
+      icon = {"high": "✅", "medium": "🟡", "low": "⚠️"}[read["confidence"]]
+      st.markdown(f"{icon} **{found_vin}**  \n<small>{read['note']}</small>", unsafe_allow_html=True)
       if ss.get("_applied_photo") != photo_id:  # apply each photo once so manual edits stick
         ss._applied_photo = photo_id
         load_vehicle(found_vin)
         queue_update(vin_input=found_vin)
+      if read.get("alts"):
+        st.caption("Not right? Other possible readings:")
+        alt_cols = st.columns(len(read["alts"]))
+        for col, alt in zip(alt_cols, read["alts"]):
+          if col.button(alt, key=f"alt_{alt}"):
+            load_vehicle(alt)
+            queue_update(vin_input=alt, toast=f"Using {alt}")
     else:
-      st.warning("Could not detect a 17-character VIN. Enter it manually below.")
+      st.warning(read.get("note") or "Could not find a VIN. Try a closer, sharper photo, or type it below.")
+    if (not found_vin or read.get("confidence") == "low") and st.button("🔁 Read this photo again"):
+      getattr(find_vin, "clear", lambda: None)()
+      ss._applied_photo = None
+      st.rerun()
 
     if st.button("📄 Extract Customer Details from this Image"):
       try:
