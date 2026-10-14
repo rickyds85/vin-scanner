@@ -968,6 +968,7 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
   <h3 style="color:var(--y)">🎯 GUIDED TESTS <span class="note">fuel trim, VE, catalyst, charging, power &amp; braking</span></h3>
   <div id="tests" class="box" style="color:var(--w)">
     <div id="driveTests"></div>
+    <div id="drivesBox"></div>
     <div class="bar" id="testTabs" style="margin-bottom:8px"></div>
     <div id="testBody"></div>
   </div>
@@ -2429,17 +2430,34 @@ function stopStream() { streaming = false; loopToken++; $("pauseBtn").textConten
 
 function speak(text) {
   const now = Date.now(); if (now - lastSpeak < 18000) return; lastSpeak = now;
+  if (typeof driveRecAlert === "function") driveRecAlert(text);
   if ("speechSynthesis" in window) { speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(text); u.rate = 1.05; speechSynthesis.speak(u); }
 }
+// ---- deceleration fuel cut / open loop detection (fuel trims are meaningless then) ----
+let lastDecelT = 0, minTps = null, trimBadSince = 0;
+function closedLoop() { const f = shown.fss; return !f || f === "--" || f === "N/A" || /^CL/.test(f); }
+function inDecel() {
+  if (num.tps != null && (num.spd ?? 0) < 2 && (num.rpm ?? 2000) < 1100) minTps = minTps == null ? num.tps : Math.min(minTps, num.tps);
+  const throttleShut = num.tps != null && num.tps <= (minTps ?? num.tps) + 1.5;
+  const decel = /decel/i.test(shown.fss || "") || ((num.rpm ?? 0) > 1100 && (num.spd ?? 0) > 5 && (throttleShut || (num.load ?? 100) <= 18));
+  if (decel) lastDecelT = nowS();
+  return decel || nowS() - lastDecelT < 4;   // trims settle for a few seconds after fuel cut ends
+}
+function trimsTrustworthy() { return closedLoop() && !inDecel(); }
+
 function driveChecks() {
   if (!driveOn) return;
   const t1 = (num.stft1 ?? 0) + (num.ltft1 ?? 0);
   const hasB2 = num.stft2 !== undefined;
   const t2 = (num.stft2 ?? 0) + (num.ltft2 ?? 0);
-  if (t1 > 16) speak(`Bank 1 total fuel trim plus ${Math.round(t1)} percent. Lean.`);
-  else if (t1 < -16) speak(`Bank 1 total fuel trim minus ${Math.abs(Math.round(t1))} percent. Rich.`);
-  else if (hasB2 && t2 > 16) speak(`Bank 2 total fuel trim plus ${Math.round(t2)} percent. Lean.`);
-  else if (hasB2 && t2 < -16) speak(`Bank 2 total fuel trim minus ${Math.abs(Math.round(t2))} percent. Rich.`);
+  // Trim alerts only in closed loop, not during decel fuel cut, and only if they stay out for 3+ seconds
+  const bad = trimsTrustworthy() && (Math.abs(t1) > 16 || (hasB2 && Math.abs(t2) > 16));
+  trimBadSince = bad ? (trimBadSince || nowS()) : 0;
+  const trimAlert = bad && nowS() - trimBadSince >= 3;
+  if (trimAlert && t1 > 16) speak(`Bank 1 total fuel trim plus ${Math.round(t1)} percent. Lean.`);
+  else if (trimAlert && t1 < -16) speak(`Bank 1 total fuel trim minus ${Math.abs(Math.round(t1))} percent. Rich.`);
+  else if (trimAlert && hasB2 && t2 > 16) speak(`Bank 2 total fuel trim plus ${Math.round(t2)} percent. Lean.`);
+  else if (trimAlert && hasB2 && t2 < -16) speak(`Bank 2 total fuel trim minus ${Math.abs(Math.round(t2))} percent. Rich.`);
   else if ((num.ect ?? 0) >= 225) speak(`High coolant temperature, ${num.ect} degrees.`);
   else if ((num.rpm ?? 0) > 500 && num.volt && num.volt < 13.0) speak(`Low charging voltage, ${num.volt.toFixed(1)} volts.`);
   if (Date.now() - lastDriveAi > 60000) { lastDriveAi = Date.now(); requestAi("drive"); }
@@ -2653,6 +2671,7 @@ function startDriveTests() {
   T.chg = { koeo: T.chg.koeo, idle: null, loaded: null, drive: null };
   Object.assign(T.perf, { mode: null, phase: "idle", pts: [], acc: [], result: null, auto: true });
   extraDriveStart();
+  driveRecStart();
   renderTests();
 }
 function driveTestsTick() {
@@ -2688,6 +2707,7 @@ function stopDriveTests() {
   extraDriveStop();
   D.report = driveReportHtml();
   D.minutes = (nowS() - D.t0) / 60;
+  driveRecStop();
   renderTests();
   const n = Object.keys(D.done).length;
   lastSpeak = 0; speak(`Test drive done. ${n} test${n === 1 ? "" : "s"} completed. Results are on screen.`);
@@ -2742,6 +2762,7 @@ function reportTest(name, summary, quiet) {
 
 function renderTests() {
   $("driveTests").innerHTML = driveStatusHtml();
+  $("drivesBox").innerHTML = savedDrivesHtml();
   $("testTabs").innerHTML = TESTS.map(([k, l]) => `<button data-ttab="${k}" class="${k === testTab ? "on" : ""}">${l}</button>`).join("");
   const body = $("testBody");
   if (testTab === "ft") body.innerHTML = ftHtml();
@@ -2800,6 +2821,7 @@ function ftTick() {
   if (!T.ft.on || !numT.stft1 || numT.stft1 <= T.ft.lastT) return;
   T.ft.lastT = numT.stft1;
   if ((num.ect ?? 200) < 160) return;   // wait for warm engine / closed loop
+  if (!trimsTrustworthy()) return;       // skip decel fuel cut & open loop
   const c = ftCondition(); if (!c) return;
   const t1 = (num.stft1 ?? 0) + (num.ltft1 ?? 0);
   const has2 = fresh("stft2", 10) && num.stft2 != null;
@@ -3790,6 +3812,78 @@ function extraReportRows(add) {
   if (a && a.gears.length) reportTest("Transmission ratio analysis", { gears: a.gears.map((g) => +g.ratio.toFixed(1)), flags: a.flags.map((f) => f.replace(/<[^>]+>/g, "")), grade: a.flags.length ? "MARGINAL" : "GOOD" }, true);
 }
 
+
+// ===================== Test drive recorder (auto-saved on this device + sent to the app) =====================
+const DRIVE_KEYS = ["rpm", "spd", "load", "tps", "stft1", "ltft1", "stft2", "ltft2", "maf", "map", "ect", "iat", "o2b1s1", "o2b1s2", "timing", "volt", "frp"];
+const FSS_CODE = (t) => (!t || t === "--" ? null : /^CL O2/.test(t) ? 5 : /^CL/.test(t) ? 1 : /decel/.test(t) ? 3 : /cold/.test(t) ? 2 : /fault/.test(t) ? 4 : 9);
+const FSS_NAME = { 1: "CL", 2: "OL cold", 3: "OL decel", 4: "OL fault", 5: "CL O2 fault", 9: "other" };
+const LS_DRIVES = "tdg_drives", LS_CURRENT = "tdg_drive_current";
+let REC = null, recTimer = null, recSaveT = 0;
+function lsGet(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (_) { return d; } }
+function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (_) { return false; } }
+const r2 = (x) => (x == null || !isFinite(x) ? null : Math.round(x * 100) / 100);
+function snapNow() { const o = {}; DRIVE_KEYS.forEach((k) => { if (num[k] != null) o[k] = r2(num[k]); }); o.fss = shown.fss || ""; o.decel = inDecel(); return o; }
+function driveRecStart() {
+  REC = { id: "drv-" + Date.now(), started: new Date().toLocaleString(), startMs: Date.now(), vehicle: ARGS.vehicle || "", vin: vinRead || "",
+    keys: DRIVE_KEYS, samples: [], alerts: [], status: "recording" };
+  clearInterval(recTimer);
+  recTimer = setInterval(() => {
+    if (!REC || !connected) return;
+    REC.samples.push([Math.round((Date.now() - REC.startMs) / 1000), ...DRIVE_KEYS.map((k) => (fresh(k, 5) ? r2(num[k]) : null)), FSS_CODE(shown.fss), inDecel() ? 1 : 0]);
+    if (REC.samples.length > 7200) REC.samples.shift();               // up to 2 hours at 1 sample/s
+    if (Date.now() - recSaveT > 15000) { recSaveT = Date.now(); lsSet(LS_CURRENT, REC); }   // survives reloads / crashes
+  }, 1000);
+}
+function driveRecAlert(text) { if (REC && REC.status === "recording") REC.alerts.push({ t: Math.round((Date.now() - REC.startMs) / 1000), at: new Date().toLocaleTimeString(), text, snap: snapNow() }); }
+function driveRecFinish(rec, status) {
+  rec.status = status; rec.minutes = Math.round(((rec.samples.length ? rec.samples[rec.samples.length - 1][0] : 0) / 60) * 10) / 10;
+  let list = lsGet(LS_DRIVES, []).filter((d) => d.id !== rec.id);
+  list.unshift(rec); list = list.slice(0, 10);
+  while (!lsSet(LS_DRIVES, list) && list.length > 1) list.pop();   // drop oldest if storage is full
+  try { localStorage.removeItem(LS_CURRENT); } catch (_) {}
+}
+function driveRecStop() {
+  clearInterval(recTimer); if (!REC) return;
+  const D = T.drive;
+  Object.assign(REC, { results: JSON.parse(JSON.stringify(T.results || {})), codes: dtcs, misfires: misEvents.slice(-100),
+    report: (D.report || "").replace(/<br\s*\/?>/g, "\n").replace(/<\/tr>/g, "\n").replace(/<\/td>/g, " | ").replace(/<[^>]+>/g, "").replace(/\n\s*\n/g, "\n").trim() });
+  driveRecFinish(REC, "complete");
+  sendDrive(REC);
+  REC = null;
+}
+function sendDrive(rec) { sendValue({ type: "drive", id: "drive-" + Date.now(), record: rec }); }
+// On page load: rescue a drive that was cut off by a reload or crash
+(function rescueDrive() {
+  const cur = lsGet(LS_CURRENT, null);
+  if (cur && cur.samples && cur.samples.length) driveRecFinish(cur, "interrupted (page closed mid-drive)");
+})();
+function exportDriveCsv(rec) {
+  const head = ["seconds", ...rec.keys.map((k) => LABEL[k] || k), "fuel system", "decel/fuel cut"];
+  const rows = [head.map((h) => `"${h}"`).join(",")].concat(rec.samples.map((s) => s.slice(0, -2).concat([FSS_NAME[s[s.length - 2]] || "", s[s.length - 1] ? "yes" : ""]).map((v) => v ?? "").join(",")));
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([rows.join("\n")], { type: "text/csv" }));
+  a.download = `testdrive_${(rec.vehicle || "vehicle").replace(/\W+/g, "_")}_${rec.id.slice(4)}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+}
+function savedDrivesHtml() {
+  const list = lsGet(LS_DRIVES, []);
+  if (!list.length) return "";
+  return `<details data-drvlist ${T.drivesOpen ? "open" : ""} style="margin:8px 0"><summary class="grp" style="cursor:pointer;color:var(--b)">📁 Saved test drives on this device (${list.length})</summary>
+    <table class="ttab"><tr><th style="text-align:left">When</th><th style="text-align:left">Vehicle</th><th>Minutes</th><th>Alerts</th><th></th></tr>
+    ${list.map((d, i) => `<tr><td style="text-align:left">${esc(d.started)}${/interrupted/.test(d.status) ? ' <span class="grade-y">(interrupted)</span>' : ""}</td>
+      <td style="text-align:left">${esc(d.vehicle || "—")}</td><td>${d.minutes ?? "—"}</td><td>${(d.alerts || []).length}</td>
+      <td><button class="tbtn" data-drv="send" data-i="${i}">Send to app / Claude</button><button class="tbtn sec" data-drv="csv" data-i="${i}">CSV</button><button class="tbtn sec" data-drv="del" data-i="${i}">✕</button></td></tr>`).join("")}</table>
+    <div class="note">"Send to app" puts the drive in the 📋 Log tab → 🚗 Test drive review, where you can copy it to Claude or have the AI team review it.</div></details>`;
+}
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-drv]"); if (!b) return;
+  const list = lsGet(LS_DRIVES, []), d = list[+b.dataset.i]; if (!d) return;
+  if (b.dataset.drv === "send") { sendDrive(d); log("Drive sent to the app — see 📋 Log → 🚗 Test drive review."); }
+  if (b.dataset.drv === "csv") exportDriveCsv(d);
+  if (b.dataset.drv === "del" && confirm("Delete this saved drive?")) { list.splice(+b.dataset.i, 1); lsSet(LS_DRIVES, list); renderTests(); }
+});
+document.addEventListener("toggle", (e) => { if (e.target.matches && e.target.matches("[data-drvlist]")) T.drivesOpen = e.target.open; }, true);
+
 renderTests();
 </script>
 </body>
@@ -3850,6 +3944,19 @@ def handle_ble_event(ev: dict):
     if ev.get("debug"):
       ss.scanner_debug = ev["debug"]
       ss._toast = "Scanner debug info saved to the problem log"
+
+  elif ev.get("type") == "drive":
+    rec = ev.get("record") or {}
+    if rec.get("id"):
+      ss.setdefault("drives", {})[rec["id"]] = rec
+      try:
+        os.makedirs("drives", exist_ok=True)
+        with open(os.path.join("drives", re.sub(r"[^\w\-]", "", rec["id"]) + ".json"), "w", encoding="utf-8") as f:
+          json.dump(rec, f)
+      except OSError:
+        pass
+      ss.drive_pick = rec["id"]
+      ss._toast = "Test drive saved — see 📋 Log → 🚗 Test drive review"
 
   elif ev.get("type") == "tests":
     ss.test_results = ev.get("results") or {}
@@ -4197,6 +4304,61 @@ Respond directly, practically, and concisely to the latest question. Focus on ph
     ss.chat_history.append({"role": "assistant", "content": reply})
 
 # ========================================================
+# --- TEST DRIVE REVIEW (saved drives from the Bluetooth dashboard) ---
+# ========================================================
+FSS_NAMES = {1: "CL", 2: "OL cold", 3: "OL decel", 4: "OL fault", 5: "CL O2 fault", 9: "other"}
+
+
+def load_drives() -> dict:
+  drives = dict(ss.get("drives") or {})
+  try:
+    for fn in os.listdir("drives"):
+      if fn.endswith(".json") and fn[:-5] not in drives:
+        with open(os.path.join("drives", fn), encoding="utf-8") as f:
+          d = json.load(f)
+          drives[d.get("id", fn[:-5])] = d
+  except (OSError, ValueError):
+    pass
+  return dict(sorted(drives.items(), key=lambda kv: kv[0], reverse=True))
+
+
+def drive_rows(rec: dict) -> list[dict]:
+  keys = rec.get("keys") or []
+  out = []
+  for smp in rec.get("samples") or []:
+    row = {"sec": smp[0]}
+    row.update({k: smp[1 + i] for i, k in enumerate(keys)})
+    row["fuel_system"] = FSS_NAMES.get(smp[-2], "") if len(smp) >= len(keys) + 3 else ""
+    row["decel"] = bool(smp[-1]) if len(smp) >= len(keys) + 3 else False
+    out.append(row)
+  return out
+
+
+def drive_text(rec: dict) -> str:
+  rows = drive_rows(rec)
+  step = 5 if len(rows) <= 1800 else 10
+  cols = ["sec", "rpm", "spd", "load", "tps", "stft1", "ltft1", "stft2", "ltft2", "o2b1s1", "o2b1s2", "ect", "fuel_system", "decel"]
+  cols = [c for c in cols if any(r.get(c) not in (None, "", False) for r in rows)] or ["sec"]
+  def fmt(v):
+    return "" if v is None else ("Y" if v is True else "" if v is False else str(v))
+  lines = [",".join(cols)] + [",".join(fmt(r.get(c)) for c in cols) for r in rows[::step]][:600]
+  alerts = rec.get("alerts") or []
+  return "\n".join([
+      "TEST DON'T GUESS — TEST DRIVE",
+      f"App version {APP_VERSION} · Drive {rec.get('started')} · {rec.get('minutes')} min · status: {rec.get('status')}",
+      f"Vehicle: {rec.get('vehicle') or ss.vehicle_info or 'unknown'} · VIN {rec.get('vin') or ss.active_vin or 'unknown'}",
+      f"Codes: {json.dumps(rec.get('codes') or {})}",
+      "", "DRIVE REPORT:", rec.get("report") or "(none)",
+      "", "TEST RESULTS:", json.dumps(rec.get("results") or {}, indent=0)[:4000],
+      "", f"SPOKEN ALERTS ({len(alerts)}), with readings at that moment:",
+      *[f"- {a.get('at')} (+{a.get('t')}s): {a.get('text')} | {json.dumps(a.get('snap'))}" for a in alerts],
+      "", f"MISFIRE EVENTS: {json.dumps((rec.get('misfires') or [])[-30:])}",
+      "", f"TIMELINE every {step} s (fuel_system CL=closed loop; decel=Y means fuel cut/closed throttle):",
+      *lines,
+  ])
+
+
+# ========================================================
 # --- CUSTOMER / SHOP REPORT (shown at the bottom of the Diagnose tab) ---
 # ========================================================
 def build_report_html(notes: str) -> str:
@@ -4283,6 +4445,56 @@ with tab5, guard("Log tab"):
         queue_update(toast="Log cleared")
   else:
     st.info("No vehicles or DTCs logged yet. Connect the scanner (Live Telemetry tab) or run a diagnostic tree (Diagnose tab) to start logging.")
+
+  # ---------- 🚗 Test drive review ----------
+  st.write("---")
+  st.subheader("🚗 Test drive review")
+  drives = load_drives()
+  if not drives:
+    st.caption("Every test drive is saved automatically when you tap Stop Test Drive (and on your phone, even if the page "
+               "reloads mid-drive). Older drives on your phone: Live Telemetry tab → 🎯 Guided Tests → 📁 Saved test drives → Send to app.")
+  else:
+    ids = list(drives)
+    if ss.get("drive_pick") not in ids:
+      ss.drive_pick = ids[0]
+    pick = st.selectbox("Drive", ids, key="drive_pick",
+                        format_func=lambda i: f"{drives[i].get('started')} · {drives[i].get('vehicle') or 'vehicle'} · "
+                                              f"{drives[i].get('minutes')} min · {len(drives[i].get('alerts') or [])} alert(s)")
+    rec = drives[pick]
+    alerts = rec.get("alerts") or []
+    if alerts:
+      st.markdown("**Spoken alerts** (with the readings at that moment)")
+      st.dataframe([{"time": a.get("at"), "alert": a.get("text"), "fuel system": (a.get("snap") or {}).get("fss"),
+                     "decel": "yes" if (a.get("snap") or {}).get("decel") else "",
+                     **{k: (a.get("snap") or {}).get(k) for k in ("rpm", "spd", "load", "stft1", "ltft1", "o2b1s1")}} for a in alerts],
+                   use_container_width=True)
+    if rec.get("report"):
+      with st.expander("Drive report"):
+        st.text(rec["report"])
+    rows = drive_rows(rec)
+    if rows:
+      st.line_chart([{"seconds": r["sec"], "STFT B1": r.get("stft1"), "LTFT B1": r.get("ltft1")} for r in rows], x="seconds",
+                    height=220)
+    txt = drive_text(rec)
+    c1, c2 = st.columns(2)
+    with c1:
+      if st.button("🧠 Have the AI team review this drive"):
+        prompt = ("You are an expert ASE master diagnostic technician. Review this recorded test drive. Explain each spoken "
+                  "alert (was it a real problem or normal behavior such as decel fuel cut, open loop, or warm-up?), evaluate "
+                  "fuel trims by condition, and list anything that needs follow-up testing with the specific test to do.\n\n" + txt)
+        with st.status("Reviewing the drive...") as status:
+          ans, research, draft = team_answer(prompt, rec.get("vehicle") or ss.vehicle_info or "vehicle", ss.active_dtc, "", False, status)
+          status.update(label="Done", state="complete")
+        ss.drive_review = {"id": pick, "text": ans}
+    with c2:
+      csv_rows = ["seconds," + ",".join(rec.get("keys") or []) + ",fuel_system,decel"] + [
+          ",".join("" if r.get(k) is None else str(r.get(k)) for k in ["sec", *(rec.get("keys") or []), "fuel_system"]) + ("," + ("yes" if r["decel"] else ""))
+          for r in rows]
+      st.download_button("⬇️ Download drive data (CSV)", data="\n".join(csv_rows), file_name=f"{pick}.csv", mime="text/csv")
+    if (ss.get("drive_review") or {}).get("id") == pick:
+      st.markdown(ss.drive_review["text"])
+    st.markdown("**Copy this to Claude** — tap the copy icon in the top-right corner of the box:")
+    st.code(txt[:30000], language=None)
 
   # ---------- 🐞 Problem log ----------
   st.write("---")
