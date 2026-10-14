@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image, ImageEnhance, ImageOps
 import requests
@@ -319,7 +320,49 @@ def claude(prompt: str, *, max_tokens: int = 4000, timeout: int = 120) -> str:
   return text
 
 
-REVIEW_PROMPT = """You are the senior master technician on a three-member diagnostic team. Perplexity searched the web, and Gemini wrote a first-draft plan.
+# --- DeepSeek (second independent draft) ---
+DEEPSEEK_URL = "https://api.deepseek.com/chat/completions"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-flash"   # change with DEEPSEEK_MODEL in Secrets (e.g. deepseek-v4-pro)
+
+
+def has_deepseek() -> bool:
+  return bool(secret("DEEPSEEK_API_KEY"))
+
+
+def deepseek_label() -> str:
+  m = secret("DEEPSEEK_MODEL") or DEEPSEEK_DEFAULT_MODEL
+  return m.replace("deepseek-", "DeepSeek ").replace("-", " ").replace("v4", "V4").title().replace("Deepseek", "DeepSeek").replace("V4 ", "V4 ")
+
+
+def _deepseek_raw(key: str, model: str, session: requests.Session, prompt: str, max_tokens: int, timeout: int) -> str:
+  """No Streamlit calls in here, so it is safe to run in a background thread."""
+  try:
+    res = session.post(DEEPSEEK_URL, timeout=timeout, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                       json={"model": model, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]})
+  except requests.RequestException as e:
+    raise RuntimeError(f"DeepSeek connection error: {e}") from e
+  if res.status_code != 200:
+    raise RuntimeError(f"DeepSeek API error ({res.status_code}, {model}): {res.text[:300]}")
+  try:
+    text = res.json()["choices"][0]["message"].get("content") or ""
+  except (KeyError, IndexError, ValueError) as e:
+    raise RuntimeError("DeepSeek returned an unreadable answer.") from e
+  if not text.strip():
+    raise RuntimeError("DeepSeek returned an empty answer.")
+  return text
+
+
+def deepseek(prompt: str, *, max_tokens: int = 4000, timeout: int = 120) -> str:
+  key = secret("DEEPSEEK_API_KEY")
+  if not key:
+    raise AIError("DEEPSEEK_API_KEY is missing from Streamlit Secrets.")
+  try:
+    return _deepseek_raw(key, secret("DEEPSEEK_MODEL") or DEEPSEEK_DEFAULT_MODEL, http(), prompt, max_tokens, timeout)
+  except RuntimeError as e:
+    raise AIError(str(e)) from e
+
+
+REVIEW_PROMPT = """You are the senior master technician on a diagnostic team. Perplexity searched the web, and Gemini and DeepSeek each wrote a first-draft plan on their own.
 Your job: produce the FINAL plan the technician will follow.
 
 ORIGINAL TASK (vehicle, codes, symptoms, scan data and test results, plus required format):
@@ -331,42 +374,61 @@ WEB RESEARCH (Perplexity; may contain errors):
 GEMINI'S DRAFT:
 {draft}
 
+DEEPSEEK'S DRAFT (written separately — a second opinion):
+{ds_draft}
+
 INSTRUCTIONS:
 - Keep the exact section format the original task requires.
-- Check the draft against the scan data, test results and research. Fix anything wrong, remove generic or irrelevant steps, add important tests or pattern failures it missed.
+- Compare both drafts against the scan data, test results and research. Keep the best of each, fix anything wrong, remove generic or irrelevant steps, add important tests or pattern failures it missed.
 - Order the tests from fastest/cheapest and most likely to least, so the tech doesn't throw parts at it.
 - Never invent TSB numbers or specs; only use ones from the research or that you are sure of.
-- End with "### Team Notes": 2-5 bullets on what you changed from the draft and anything the research and draft disagreed on."""
+- End with "### Team Notes": 2-5 bullets on what you changed, and where Gemini, DeepSeek and the research disagreed and who was right."""
 
 
-def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: bool, status=None) -> tuple[str, str, str]:
-  """Perplexity researches -> Gemini drafts -> Claude reviews and writes the final plan.
-  Steps are skipped if their key isn't set. Returns (final answer, research, draft)."""
-  research, draft = "", ""
+def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: bool, status=None) -> tuple[str, str, str, str]:
+  """Perplexity researches -> Gemini and DeepSeek draft at the same time -> Claude reviews both and writes the final plan.
+  Steps are skipped if their key isn't set. Returns (final answer, research, gemini draft, deepseek draft)."""
+  research, draft, ds_draft, gem_err = "", "", "", ""
   if use_web:
     if status:
       status.update(label="🌐 Perplexity is researching TSBs, recalls and known fixes...")
     research = web_research(vehicle, codes, symptoms)
-  if status:
-    status.update(label=f"✨ {gemini_label()} is drafting the plan" + (" with the web research..." if research else "..."))
   full = prompt + (TEAM_RULES.format(research=research[:6000]) if research else "")
+  writers = f"✨ {gemini_label()}" + (f" and 🐋 {deepseek_label()} are" if has_deepseek() else " is")
+  if status:
+    status.update(label=f"{writers} drafting the plan" + (" with the web research..." if research else "..."))
+  pool, ds_job = None, None
+  if has_deepseek():   # DeepSeek runs in the background while Gemini works, so it adds no wait time
+    pool = ThreadPoolExecutor(max_workers=1)
+    ds_job = pool.submit(_deepseek_raw, secret("DEEPSEEK_API_KEY"), secret("DEEPSEEK_MODEL") or DEEPSEEK_DEFAULT_MODEL, http(), full, 4000, 120)
   try:
     draft = gemini([{"text": full}])
   except AIError as e:
-    draft = ""
     gem_err = str(e)
+  if ds_job:
+    try:
+      ds_draft = ds_job.result(timeout=150)
+    except Exception as e:
+      log_problem("ai", "DeepSeek draft", str(e))
+      ds_draft = ""
+    pool.shutdown(wait=False)
   if has_claude():
     if status:
-      status.update(label=f"🧠 {claude_label()} is reviewing and finalizing the plan...")
+      status.update(label=f"🧠 {claude_label()} is reviewing the drafts and finalizing the plan...")
     try:
-      final = claude(REVIEW_PROMPT.format(task=prompt, research=research[:6000] or "none", draft=draft or "(Gemini draft unavailable — write the plan yourself)"))
-      return final, research, draft
+      final = claude(REVIEW_PROMPT.format(task=prompt, research=research[:6000] or "none",
+                                          draft=draft or "(Gemini draft unavailable)",
+                                          ds_draft=ds_draft or "(DeepSeek draft unavailable)"))
+      return final, research, draft, ds_draft
     except AIError as e:
-      if draft:
-        return draft + f"\n\n_⚠️ Claude review unavailable: {e}_", research, ""
+      best = draft or ds_draft
+      if best:
+        return best + f"\n\n_⚠️ Claude review unavailable: {e}_", research, "", (ds_draft if draft else "")
   if draft:
-    return draft, research, ""
-  return (f"⚠️ Gemini failed ({gem_err}). Showing Perplexity's research instead:\n\n{research}" if research else f"⚠️ {gem_err}"), research, ""
+    return draft, research, "", ds_draft
+  if ds_draft:
+    return ds_draft + (f"\n\n_⚠️ Gemini failed: {gem_err}_" if gem_err else ""), research, "", ""
+  return (f"⚠️ Gemini failed ({gem_err}). Showing Perplexity's research instead:\n\n{research}" if research else f"⚠️ {gem_err}"), research, "", ""
 
 
 # --- VIN ---
@@ -4075,10 +4137,12 @@ with tab3, guard("Diagnose tab"):
     use_web = st.toggle("🌐 Include Perplexity web research", value=has_pplx, disabled=not has_pplx, key="use_web",
                         help="Perplexity finds TSBs, recalls and known fixes online. Turn off for a faster answer.")
     st.caption("Team: " + " → ".join(x for x in [
-        "🌐 Perplexity researches" if has_pplx else "", f"✨ {gemini_label()} drafts",
+        "🌐 Perplexity researches" if has_pplx else "",
+        f"✨ {gemini_label()}" + (f" + 🐋 {deepseek_label()}" if has_deepseek() else "") + " draft",
         f"🧠 {claude_label()} reviews & finalizes" if has_claude() else ""] if x) +
         ("" if has_pplx else " · add PERPLEXITY_API_KEY for web research") +
-        ("" if has_claude() else " · add ANTHROPIC_API_KEY for Claude's review"))
+        ("" if has_claude() else " · add ANTHROPIC_API_KEY for Claude's review") +
+        ("" if has_deepseek() else " · add DEEPSEEK_API_KEY for a DeepSeek second opinion"))
   with col_btn:
     st.write("")
     symptoms = ss.symptoms.strip()
@@ -4118,9 +4182,9 @@ Format strictly using these Markdown sections:
 - Real-world failure patterns and TSBs for {vehicle} matching these symptoms.
 """
     with st.status("Working on it...", expanded=False) as status:
-      text, research, draft = team_answer(sym_prompt, vehicle, "", symptoms, use_web, status)
+      text, research, draft, ds_draft = team_answer(sym_prompt, vehicle, "", symptoms, use_web, status)
       status.update(label="Done", state="complete")
-    ss.dtc_result = {"title": f"Symptoms · {vehicle}", "text": text, "research": research, "draft": draft}
+    ss.dtc_result = {"title": f"Symptoms · {vehicle}", "text": text, "research": research, "draft": draft, "ds_draft": ds_draft}
 
   if lookup_clicked and codes:
     vehicle = ss.vehicle_info or "General OBD-II Vehicle"
@@ -4161,18 +4225,22 @@ Format strictly using these Markdown sections:
 - Real-world failure patterns for {vehicle} on this system.
 """
     with st.status("Working on it...", expanded=False) as status:
-      text, research, draft = team_answer(dtc_prompt, vehicle, code_str, symptoms, use_web, status)
+      text, research, draft, ds_draft = team_answer(dtc_prompt, vehicle, code_str, symptoms, use_web, status)
       status.update(label="Done", state="complete")
-    ss.dtc_result = {"title": f"{code_str} · {vehicle}", "text": text, "research": research, "draft": draft}
+    ss.dtc_result = {"title": f"{code_str} · {vehicle}", "text": text, "research": research, "draft": draft, "ds_draft": ds_draft}
 
   if ss.dtc_result:  # stays on screen while you use other tabs
     team = " + ".join(x for x in ["🌐 Perplexity" if ss.dtc_result.get("research") else "", "✨ " + gemini_label(),
+                                   "🐋 " + deepseek_label() if ss.dtc_result.get("ds_draft") else "",
                                    "🧠 " + claude_label() if ss.dtc_result.get("draft") else ""] if x)
     with st.expander(f"📋 Test plan: {ss.dtc_result['title']} · {team}", expanded=True):
       st.markdown(ss.dtc_result["text"])
     if ss.dtc_result.get("draft"):
       with st.expander(f"✨ {gemini_label()}'s first draft (before {claude_label()}'s review)"):
         st.markdown(ss.dtc_result["draft"])
+    if ss.dtc_result.get("ds_draft"):
+      with st.expander(f"🐋 {deepseek_label()}'s draft (second opinion)"):
+        st.markdown(ss.dtc_result["ds_draft"])
     if ss.dtc_result.get("research"):
       with st.expander("🌐 Web research Perplexity found (TSBs, recalls, known fixes, sources)"):
         st.markdown(ss.dtc_result["research"])
@@ -4288,6 +4356,12 @@ Respond directly, practically, and concisely to the latest question. Focus on ph
           status.update(label=f"🧠 {claude_label()} is answering...")
           try:
             reply = claude(q, max_tokens=2000)
+          except AIError:
+            reply = None
+        if reply is None and has_deepseek():   # DeepSeek is the next backup
+          status.update(label=f"🐋 {deepseek_label()} is answering...")
+          try:
+            reply = deepseek(q, max_tokens=2000)
           except AIError:
             reply = None
         if reply is None:
@@ -4483,7 +4557,7 @@ with tab5, guard("Log tab"):
                   "alert (was it a real problem or normal behavior such as decel fuel cut, open loop, or warm-up?), evaluate "
                   "fuel trims by condition, and list anything that needs follow-up testing with the specific test to do.\n\n" + txt)
         with st.status("Reviewing the drive...") as status:
-          ans, research, draft = team_answer(prompt, rec.get("vehicle") or ss.vehicle_info or "vehicle", ss.active_dtc, "", False, status)
+          ans, research, draft, ds_draft = team_answer(prompt, rec.get("vehicle") or ss.vehicle_info or "vehicle", ss.active_dtc, "", False, status)
           status.update(label="Done", state="complete")
         ss.drive_review = {"id": pick, "text": ans}
     with c2:
