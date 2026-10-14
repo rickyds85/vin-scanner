@@ -298,14 +298,15 @@ def claude_label() -> str:
   return m.replace("claude-", "Claude ").replace("-", " ").title().replace(" 5 5", " 5.5").replace("Claude Claude", "Claude")
 
 
-def claude(prompt: str, *, max_tokens: int = 4000, timeout: int = 120) -> str:
+def claude(prompt: str, *, max_tokens: int = 4000, timeout: int = 120, image_b64: str = "") -> str:
   key = secret("ANTHROPIC_API_KEY")
   if not key:
     raise AIError("ANTHROPIC_API_KEY is missing from Streamlit Secrets.")
   try:
     res = http().post(CLAUDE_URL, timeout=timeout, json={
         "model": secret("CLAUDE_MODEL") or CLAUDE_DEFAULT_MODEL, "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": prompt}]},
+        "messages": [{"role": "user", "content": ([{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}}]
+                                                  if image_b64 else []) + [{"type": "text", "text": prompt}]}]},
         headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
   except requests.RequestException as e:
     raise AIError(f"Claude connection error: {e}") from e
@@ -380,29 +381,39 @@ DEEPSEEK'S DRAFT (written separately — a second opinion):
 INSTRUCTIONS:
 - Keep the exact section format the original task requires.
 - Compare both drafts against the scan data, test results and research. Keep the best of each, fix anything wrong, remove generic or irrelevant steps, add important tests or pattern failures it missed.
+- If a photo (scope / meter capture) is attached, look at it yourself and check that what the drafts say it shows is right.
+- Your main job is making sure NOTHING IS MISSED: any reading, code, alert or test result in the task that neither draft explained, you explain.
 - Order the tests from fastest/cheapest and most likely to least, so the tech doesn't throw parts at it.
 - Never invent TSB numbers or specs; only use ones from the research or that you are sure of.
 - End with "### Team Notes": 2-5 bullets on what you changed, and where Gemini, DeepSeek and the research disagreed and who was right."""
 
 
-def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: bool, status=None) -> tuple[str, str, str, str]:
-  """Perplexity researches -> Gemini and DeepSeek draft at the same time -> Claude reviews both and writes the final plan.
-  Steps are skipped if their key isn't set. Returns (final answer, research, gemini draft, deepseek draft)."""
-  research, draft, ds_draft, gem_err = "", "", "", ""
-  if use_web:
+def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: bool, status=None, *,
+                question: str = "", image_b64: str = "", fast: bool = False, research: str = "") -> tuple[str, str, str, str]:
+  """The whole team on one job: Perplexity researches -> Gemini and DeepSeek draft at the same time
+  -> Claude checks both (and the photo, if any) and writes the final answer.
+  Steps are skipped if their key isn't set. fast=True = short answers (live test drive checks).
+  Returns (final answer, research, gemini draft, deepseek draft)."""
+  draft, ds_draft, gem_err = "", "", ""
+  tokens = 900 if fast else 4000
+  if use_web and not research:
     if status:
       status.update(label="🌐 Perplexity is researching TSBs, recalls and known fixes...")
-    research = web_research(vehicle, codes, symptoms)
+    research = web_research(vehicle, codes, symptoms, question=question)
   full = prompt + (TEAM_RULES.format(research=research[:6000]) if research else "")
   writers = f"✨ {gemini_label()}" + (f" and 🐋 {deepseek_label()} are" if has_deepseek() else " is")
   if status:
-    status.update(label=f"{writers} drafting the plan" + (" with the web research..." if research else "..."))
+    status.update(label=f"{writers} working on it" + (" with the web research..." if research else "..."))
   pool, ds_job = None, None
   if has_deepseek():   # DeepSeek runs in the background while Gemini works, so it adds no wait time
+    ds_prompt = full + ("\n\nNOTE: a scope/meter photo was attached that you cannot see. Work from the written readings; "
+                        "another technician is looking at the photo." if image_b64 else "")
     pool = ThreadPoolExecutor(max_workers=1)
-    ds_job = pool.submit(_deepseek_raw, secret("DEEPSEEK_API_KEY"), secret("DEEPSEEK_MODEL") or DEEPSEEK_DEFAULT_MODEL, http(), full, 4000, 120)
+    ds_job = pool.submit(_deepseek_raw, secret("DEEPSEEK_API_KEY"), secret("DEEPSEEK_MODEL") or DEEPSEEK_DEFAULT_MODEL, http(),
+                         ds_prompt, tokens, 60 if fast else 120)
   try:
-    draft = gemini([{"text": full}])
+    parts = [{"text": full}] + ([{"inline_data": {"mime_type": "image/jpeg", "data": image_b64}}] if image_b64 else [])
+    draft = gemini(parts, timeout=45 if fast else 60)
   except AIError as e:
     gem_err = str(e)
   if ds_job:
@@ -414,11 +425,13 @@ def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: b
     pool.shutdown(wait=False)
   if has_claude():
     if status:
-      status.update(label=f"🧠 {claude_label()} is reviewing the drafts and finalizing the plan...")
+      status.update(label=f"🧠 {claude_label()} is checking everyone's work so nothing is missed...")
     try:
       final = claude(REVIEW_PROMPT.format(task=prompt, research=research[:6000] or "none",
                                           draft=draft or "(Gemini draft unavailable)",
-                                          ds_draft=ds_draft or "(DeepSeek draft unavailable)"))
+                                          ds_draft=ds_draft or "(DeepSeek draft unavailable)")
+                     + ("\n\nKeep the final answer SHORT (the tech is driving): under 120 words, then 1-2 Team Notes bullets." if fast else ""),
+                     max_tokens=tokens + 300, timeout=60 if fast else 150, image_b64=image_b64)
       return final, research, draft, ds_draft
     except AIError as e:
       best = draft or ds_draft
@@ -429,6 +442,11 @@ def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: b
   if ds_draft:
     return ds_draft + (f"\n\n_⚠️ Gemini failed: {gem_err}_" if gem_err else ""), research, "", ""
   return (f"⚠️ Gemini failed ({gem_err}). Showing Perplexity's research instead:\n\n{research}" if research else f"⚠️ {gem_err}"), research, "", ""
+
+
+def team_names(draft: str, ds_draft: str, research: str) -> str:
+  return " + ".join(x for x in ["🌐 Perplexity" if research else "", "✨ " + gemini_label() if draft or not has_claude() else "",
+                                "🐋 " + deepseek_label() if ds_draft else "", "🧠 " + claude_label() if (draft or ds_draft) and has_claude() else ""] if x)
 
 
 # --- VIN ---
@@ -2527,7 +2545,7 @@ function driveChecks() {
   else if (trimAlert && hasB2 && t2 < -16) speak(`Bank 2 total fuel trim minus ${Math.abs(Math.round(t2))} percent. Rich.`);
   else if ((num.ect ?? 0) >= 225) speak(`High coolant temperature, ${num.ect} degrees.`);
   else if ((num.rpm ?? 0) > 500 && num.volt && num.volt < 13.0) speak(`Low charging voltage, ${num.volt.toFixed(1)} volts.`);
-  if (Date.now() - lastDriveAi > 60000) { lastDriveAi = Date.now(); requestAi("drive"); }
+  if (Date.now() - lastDriveAi > 90000) { lastDriveAi = Date.now(); requestAi("drive"); }
 }
 async function wake(on) {
   try {
@@ -2547,10 +2565,10 @@ function snapshot() {
 function requestAi(mode) {
   if (aiPendingId) return;
   aiPendingId = "ai-" + Date.now();
-  if (mode === "full") $("aiBox").innerHTML = `<span style="color:var(--o)">🤖 Analyzing live data, codes, monitors and Mode $06…</span>`;
+  if (mode === "full") $("aiBox").innerHTML = `<span style="color:var(--o)">🤖 The AI team is analyzing live data, codes, monitors, Mode $06 and test results… (about 30–60 s)</span>`;
   sendValue({ type: "ai", id: aiPendingId, mode, at: new Date().toLocaleTimeString(), pids: snapshot(), dtcs, readiness: readinessSummary, mode6: mode6Summary, tests: T.results || {} });
   const id = aiPendingId;
-  setTimeout(() => { if (aiPendingId === id) { aiPendingId = null; if (mode === "full") $("aiBox").textContent = "AI request timed out. Try again."; logEvent("ai", "AI check (" + mode + ")", "No answer from the app within 90 s"); } }, 90000);
+  setTimeout(() => { if (aiPendingId === id) { aiPendingId = null; if (mode === "full") $("aiBox").textContent = "AI request timed out. Try again."; logEvent("ai", "AI check (" + mode + ")", "No answer from the app within 3 min"); } }, 180000);
 }
 function showAi(text, label) {
   let h = esc(text || "")
@@ -4117,7 +4135,8 @@ def handle_ble_event(ev: dict):
       except OSError:
         pass
       ss.drive_pick = rec["id"]
-      ss._toast = "Test drive saved — see 📋 Log → 🚗 Test drive review"
+      ss.drive_review_pending = rec["id"]   # the AI team reviews every drive automatically
+      ss._toast = "Test drive saved — the AI team is reviewing it (📋 Log → 🚗 Test drive review)"
 
   elif ev.get("type") == "tests":
     ss.test_results = ev.get("results") or {}
@@ -4165,9 +4184,13 @@ DIAGNOSTIC TASK:
 
 Use clean bold section headers and direct shop-floor language. Skip sections with no data."""
       label = f"[Full AI Check - {ev.get('at')}]"
-    with st.spinner("Gemini is analyzing the scan data..."):
-      text = ask_gemini(prompt)
-    ss.ble_ai = {"id": ev.get("id"), "text": text, "label": label}
+    drive_mode = ev.get("mode") == "drive"
+    with st.status("🤖 AI team is checking the live data...", expanded=False) as status:
+      text, research, draft, ds_draft = team_answer(
+          prompt, vehicle, dtcs, ss.symptoms.strip(), use_web=bool(not drive_mode and ss.get("use_web") and secret("PERPLEXITY_API_KEY")),
+          status=status, fast=drive_mode)
+      status.update(label="Done", state="complete")
+    ss.ble_ai = {"id": ev.get("id"), "text": text, "label": label + " · " + team_names(draft, ds_draft, research)}
     st.rerun()
 
 
@@ -4396,16 +4419,25 @@ FORMAT STRICTLY AS:
 ### 2. Component Condemnation & Defect Root Cause
 ### 3. Immediate Pinpoint Verification Step
 """
-    parts = [{"text": prompt}] + ([img_part(pil_scope_image)] if pil_scope_image else [])
-    with st.spinner("Gemini Vision is analyzing waveform signatures and physical readings..."):
-      try:
-        ss.scope_result = gemini(parts)
-      except AIError as e:
-        ss.scope_result = f"⚠️ {e}"
+    img_b64 = img_part(pil_scope_image)["inline_data"]["data"] if pil_scope_image else ""
+    with st.status("Working on it...", expanded=False) as status:
+      text, _r, draft, ds_draft = team_answer(prompt, ss.vehicle_info or "vehicle", code_str, ss.symptoms.strip(), False, status,
+                                              image_b64=img_b64)
+      status.update(label="Done", state="complete")
+    ss.scope_result = {"text": text, "team": team_names(draft, ds_draft, ""), "draft": draft, "ds_draft": ds_draft}
 
   if ss.scope_result:
-    with st.expander("🔬 Scope & readings evaluation", expanded=True):
-      st.markdown(ss.scope_result)
+    sr = ss.scope_result if isinstance(ss.scope_result, dict) else {"text": str(ss.scope_result), "team": ""}
+    with st.expander(f"🔬 Scope & readings evaluation · {sr.get('team', '')}", expanded=True):
+      st.markdown(sr["text"])
+    if sr.get("draft") or sr.get("ds_draft"):
+      with st.expander("👀 See each AI's own read"):
+        if sr.get("draft"):
+          st.markdown(f"**✨ {gemini_label()}** (saw the photo)")
+          st.markdown(sr["draft"])
+        if sr.get("ds_draft"):
+          st.markdown(f"**🐋 {deepseek_label()}** (readings only — can't see photos)")
+          st.markdown(sr["ds_draft"])
 
   # ---------- 3. Copilot ----------
   st.write("---")
@@ -4434,7 +4466,7 @@ Fault codes being worked: {code_str or 'None'}
 Symptoms / complaint: {ss.symptoms.strip() or 'not given'}
 {scan_context()}
 Current test plan (if any): {plan or 'none yet'}
-Latest scope/readings evaluation (if any): {(ss.scope_result or 'none')[:1500]}
+Latest scope/readings evaluation (if any): {((ss.scope_result or {}).get('text', '') if isinstance(ss.scope_result, dict) else (ss.scope_result or ''))[:1500] or 'none'}
 
 Recent conversation:
 {history}
@@ -4445,31 +4477,11 @@ Respond directly, practically, and concisely to the latest question. Focus on ph
 """
     with st.chat_message("assistant"):
       with st.status("Working on it...", expanded=False) as status:
-        research = ""
-        if ss.get("use_web", False) and secret("PERPLEXITY_API_KEY"):
-          status.update(label="🌐 Perplexity is searching for this question...")
-          research = web_research(ss.vehicle_info or "General vehicle", code_str, ss.symptoms.strip(), question=user_question)
-        q = chat_prompt + (TEAM_RULES.format(research=research[:4000]) if research else "")
-        reply = None
-        if has_claude():   # Claude answers chat when available (Gemini is the backup)
-          status.update(label=f"🧠 {claude_label()} is answering...")
-          try:
-            reply = claude(q, max_tokens=2000)
-          except AIError:
-            reply = None
-        if reply is None and has_deepseek():   # DeepSeek is the next backup
-          status.update(label=f"🐋 {deepseek_label()} is answering...")
-          try:
-            reply = deepseek(q, max_tokens=2000)
-          except AIError:
-            reply = None
-        if reply is None:
-          status.update(label=f"✨ {gemini_label()} is answering...")
-          try:
-            reply = gemini([{"text": q}])
-          except AIError as e:
-            reply = f"⚠️ {e}" + (f"\n\n**Web research:**\n{research}" if research else "")
+        reply, research, draft, ds_draft = team_answer(
+            chat_prompt, ss.vehicle_info or "General vehicle", code_str, ss.symptoms.strip(),
+            bool(ss.get("use_web", False) and secret("PERPLEXITY_API_KEY")), status, question=user_question)
         status.update(label="Done", state="complete")
+      st.caption(team_names(draft, ds_draft, research))
       st.markdown(reply)
       if research:
         with st.expander("🌐 Sources Perplexity found"):
@@ -4599,6 +4611,37 @@ with tab3, guard("Diagnose tab"):
 # ========================================================
 # --- TAB 5: VEHICLE & DTC LOG ---
 # ========================================================
+DRIVE_REVIEW_TASK = """You are an expert ASE master diagnostic technician. Review this recorded test drive so NOTHING IS MISSED.
+- Explain every spoken alert: a real problem, or normal behavior (decel fuel cut, open loop, warm-up, a shift)?
+- Evaluate fuel trims by condition (idle / cruise / load), misfires, charging, catalyst, transmission and torque converter
+  (TCC slip, RPM flare or surging at steady speed), and every guided test result.
+- Look through the samples yourself for problems the app's alerts did NOT catch.
+- List anything that needs follow-up testing, with the specific test to do.
+
+"""
+
+
+def review_drive(rec: dict, status_label: str = "Reviewing the drive...") -> str:
+  with st.status(status_label) as status:
+    ans, research, draft, ds_draft = team_answer(DRIVE_REVIEW_TASK + drive_text(rec), rec.get("vehicle") or ss.vehicle_info or "vehicle",
+                                                 ss.active_dtc, ss.symptoms.strip(), False, status)
+    status.update(label="Done", state="complete")
+  ss.setdefault("drive_reviews", {})[rec["id"]] = ans + f"\n\n_{team_names(draft, ds_draft, research)}_"
+  return ans
+
+
+# A drive that just finished gets reviewed by the whole team automatically (retried on the next run if it gets interrupted)
+if ss.get("drive_review_pending"):
+  with guard("Automatic test drive review"):
+    _rec = load_drives().get(ss.drive_review_pending)
+    if _rec and _rec["id"] not in (ss.get("drive_reviews") or {}):
+      review_drive(_rec, "🤖 AI team is reviewing the test drive you just finished...")
+      ss.ble_ai = {"id": "review-" + _rec["id"], "text": ss.drive_reviews[_rec["id"]], "label": "[AI team test drive review]"}
+      ss.drive_review_pending = None
+      st.rerun()
+    ss.drive_review_pending = None
+
+
 with tab5, guard("Log tab"):
   st.subheader("📋 Vehicle Diagnostic Scan History")
   st.caption("Logged automatically when the scanner syncs or you run a diagnostic tree. Note: on Streamlit Cloud this"
@@ -4651,21 +4694,16 @@ with tab5, guard("Log tab"):
     txt = drive_text(rec)
     c1, c2 = st.columns(2)
     with c1:
-      if st.button("🧠 Have the AI team review this drive"):
-        prompt = ("You are an expert ASE master diagnostic technician. Review this recorded test drive. Explain each spoken "
-                  "alert (was it a real problem or normal behavior such as decel fuel cut, open loop, or warm-up?), evaluate "
-                  "fuel trims by condition, and list anything that needs follow-up testing with the specific test to do.\n\n" + txt)
-        with st.status("Reviewing the drive...") as status:
-          ans, research, draft, ds_draft = team_answer(prompt, rec.get("vehicle") or ss.vehicle_info or "vehicle", ss.active_dtc, "", False, status)
-          status.update(label="Done", state="complete")
-        ss.drive_review = {"id": pick, "text": ans}
+      if st.button("🧠 Have the AI team review this drive" + (" again" if pick in (ss.get("drive_reviews") or {}) else "")):
+        review_drive(rec)
     with c2:
       csv_rows = ["seconds," + ",".join(rec.get("keys") or []) + ",fuel_system,decel"] + [
           ",".join("" if r.get(k) is None else str(r.get(k)) for k in ["sec", *(rec.get("keys") or []), "fuel_system"]) + ("," + ("yes" if r["decel"] else ""))
           for r in rows]
       st.download_button("⬇️ Download drive data (CSV)", data="\n".join(csv_rows), file_name=f"{pick}.csv", mime="text/csv")
-    if (ss.get("drive_review") or {}).get("id") == pick:
-      st.markdown(ss.drive_review["text"])
+    if pick in (ss.get("drive_reviews") or {}):
+      st.markdown("##### 🤖 AI team review of this drive")
+      st.markdown(ss.drive_reviews[pick])
     st.markdown("**Copy this to Claude** — tap the copy icon in the top-right corner of the box:")
     st.code(txt[:30000], language=None)
 
