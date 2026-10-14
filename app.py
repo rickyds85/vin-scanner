@@ -298,15 +298,22 @@ def claude_label() -> str:
   return m.replace("claude-", "Claude ").replace("-", " ").title().replace(" 5 5", " 5.5").replace("Claude Claude", "Claude")
 
 
-def claude(prompt: str, *, max_tokens: int = 4000, timeout: int = 120, image_b64: str = "") -> str:
+def _img_list(image_b64) -> list:
+  """One photo (a string) or several (a list) -> list of photos."""
+  if isinstance(image_b64, str):
+    return [image_b64] if image_b64 else []
+  return [x for x in (image_b64 or []) if x]
+
+
+def claude(prompt: str, *, max_tokens: int = 4000, timeout: int = 120, image_b64="") -> str:
   key = secret("ANTHROPIC_API_KEY")
   if not key:
     raise AIError("ANTHROPIC_API_KEY is missing from Streamlit Secrets.")
   try:
     res = http().post(CLAUDE_URL, timeout=timeout, json={
         "model": secret("CLAUDE_MODEL") or CLAUDE_DEFAULT_MODEL, "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": ([{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_b64}}]
-                                                  if image_b64 else []) + [{"type": "text", "text": prompt}]}]},
+        "messages": [{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b}}
+                                                  for b in _img_list(image_b64)] + [{"type": "text", "text": prompt}]}]},
         headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
   except requests.RequestException as e:
     raise AIError(f"Claude connection error: {e}") from e
@@ -381,7 +388,7 @@ DEEPSEEK'S DRAFT (written separately — a second opinion):
 INSTRUCTIONS:
 - Keep the exact section format the original task requires.
 - Compare both drafts against the scan data, test results and research. Keep the best of each, fix anything wrong, remove generic or irrelevant steps, add important tests or pattern failures it missed.
-- If a photo (scope / meter capture) is attached, look at it yourself and check that what the drafts say it shows is right.
+- If photos are attached (scope / meter capture, wiring diagram, connector, part), look at them yourself and check that what the drafts say they show is right. For wiring diagrams, read wire colors, pin numbers and splice/ground locations carefully.
 - Your main job is making sure NOTHING IS MISSED: any reading, code, alert or test result in the task that neither draft explained, you explain.
 - Order the tests from fastest/cheapest and most likely to least, so the tech doesn't throw parts at it.
 - Never invent TSB numbers or specs; only use ones from the research or that you are sure of.
@@ -389,7 +396,7 @@ INSTRUCTIONS:
 
 
 def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: bool, status=None, *,
-                question: str = "", image_b64: str = "", fast: bool = False, research: str = "") -> tuple[str, str, str, str]:
+                question: str = "", image_b64="", fast: bool = False, research: str = "") -> tuple[str, str, str, str]:
   """The whole team on one job: Perplexity researches -> Gemini and DeepSeek draft at the same time
   -> Claude checks both (and the photo, if any) and writes the final answer.
   Steps are skipped if their key isn't set. fast=True = short answers (live test drive checks).
@@ -406,13 +413,13 @@ def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: b
     status.update(label=f"{writers} working on it" + (" with the web research..." if research else "..."))
   pool, ds_job = None, None
   if has_deepseek():   # DeepSeek runs in the background while Gemini works, so it adds no wait time
-    ds_prompt = full + ("\n\nNOTE: a scope/meter photo was attached that you cannot see. Work from the written readings; "
-                        "another technician is looking at the photo." if image_b64 else "")
+    ds_prompt = full + ("\n\nNOTE: the technician attached photo(s) (scope, meter, wiring diagram or part) that you cannot see. "
+                        "Work from the text; another technician is reading the photos." if _img_list(image_b64) else "")
     pool = ThreadPoolExecutor(max_workers=1)
     ds_job = pool.submit(_deepseek_raw, secret("DEEPSEEK_API_KEY"), secret("DEEPSEEK_MODEL") or DEEPSEEK_DEFAULT_MODEL, http(),
                          ds_prompt, tokens, 60 if fast else 120)
   try:
-    parts = [{"text": full}] + ([{"inline_data": {"mime_type": "image/jpeg", "data": image_b64}}] if image_b64 else [])
+    parts = [{"text": full}] + [{"inline_data": {"mime_type": "image/jpeg", "data": b}} for b in _img_list(image_b64)]
     draft = gemini(parts, timeout=45 if fast else 60)
   except AIError as e:
     gem_err = str(e)
@@ -4450,14 +4457,44 @@ FORMAT STRICTLY AS:
 
   for msg in ss.chat_history:
     with st.chat_message(msg["role"]):
+      for thumb in msg.get("photos") or []:
+        st.image(thumb, width=220)
       st.markdown(msg["content"])
 
-  user_question = st.chat_input("Ask a diagnostic question (e.g., 'How do I isolate a leaking injector from a bad pump check valve?')")
+  # 📷 Photos for the next question: wiring diagrams, connectors, parts, scope or meter screens
+  nkey = ss.get("chat_photo_n", 0)
+  with st.expander("📷 Add photos to your question (wiring diagram, connector, part, scope, meter)",
+                   expanded=bool(ss.get(f"chat_cam_on_{nkey}"))):
+    chat_files = st.file_uploader("Take or upload photos (up to 4)", type=["png", "jpg", "jpeg", "webp"],
+                                  accept_multiple_files=True, key=f"chat_files_{nkey}") or []
+    chat_cam = st.camera_input("Take a photo", key=f"chat_cam_{nkey}") if st.toggle("Use in-app camera instead", key=f"chat_cam_on_{nkey}") else None
+    chat_imgs = []
+    for f in ([chat_cam] if chat_cam else []) + list(chat_files):
+      try:
+        chat_imgs.append(ImageOps.exif_transpose(Image.open(f)))
+      except Exception:
+        st.warning(f"Couldn't open {getattr(f, 'name', 'that photo')} — try a JPG or PNG.")
+    chat_imgs = chat_imgs[:4]
+    if chat_imgs:
+      st.image([im.convert("RGB") for im in chat_imgs], width=140)
+      st.caption(f"{len(chat_imgs)} photo(s) will go with your next question. Gemini and Claude read them; DeepSeek works from your text.")
+
+  user_question = st.chat_input("Ask a question (add photos above first if you want)" if not chat_imgs else
+                                f"Ask about the {len(chat_imgs)} photo(s) — e.g. 'Which wire is the 5V reference?'")
   if user_question:
-    ss.chat_history.append({"role": "user", "content": user_question})
+    photos_b64 = [_jpeg_b64(im, 2000) for im in chat_imgs]       # big enough to read wire colors and pin numbers
+    thumbs = []
+    for im in chat_imgs:
+      t = im.convert("RGB"); t.thumbnail((500, 500)); b = io.BytesIO(); t.save(b, format="JPEG", quality=80); thumbs.append(b.getvalue())
+    ss.chat_history.append({"role": "user", "content": user_question, "photos": thumbs})
+    if chat_imgs:
+      ss.chat_photo_n = nkey + 1        # empties the photo box for the next question
     with st.chat_message("user"):
+      for thumb in thumbs:
+        st.image(thumb, width=220)
       st.markdown(user_question)
-    history = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in ss.chat_history[-6:])
+    history = "\n".join(f"{m['role'].upper()}: {m['content']}" + (f" [attached {len(m['photos'])} photo(s)]" if m.get("photos") else "")
+                        for m in ss.chat_history[-6:])
     plan = (ss.dtc_result or {}).get("text", "")[:3000]
     chat_prompt = f"""
 You are an expert automotive diagnostic technician assisting a mechanic in the field.
@@ -4474,12 +4511,15 @@ Recent conversation:
 Earlier web research for this job (if any): {(ss.dtc_result or {}).get("research", "")[:2500] or 'none'}
 
 Respond directly, practically, and concisely to the latest question. Focus on physical shop tests, circuit checks, and logical isolation.
-"""
+""" + (f"""
+The technician attached {len(photos_b64)} photo(s) with this question (wiring diagram, connector, part, scope or meter).
+Read them carefully: wire colors, pin/cavity numbers, splices, grounds, connector IDs, component names, readings on screen.
+Say what you can read in the photo, and say so plainly if part of it is too blurry or cut off to read.""" if photos_b64 else "")
     with st.chat_message("assistant"):
       with st.status("Working on it...", expanded=False) as status:
         reply, research, draft, ds_draft = team_answer(
             chat_prompt, ss.vehicle_info or "General vehicle", code_str, ss.symptoms.strip(),
-            bool(ss.get("use_web", False) and secret("PERPLEXITY_API_KEY")), status, question=user_question)
+            bool(ss.get("use_web", False) and secret("PERPLEXITY_API_KEY")), status, question=user_question, image_b64=photos_b64)
         status.update(label="Done", state="complete")
       st.caption(team_names(draft, ds_draft, research))
       st.markdown(reply)
