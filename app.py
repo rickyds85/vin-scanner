@@ -20,25 +20,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-st.markdown(
-    """
-<div style="display: flex; align-items: center; gap: 14px; margin-bottom: 1.5rem;">
-  <svg width="65" height="42" viewBox="0 0 120 70" fill="none" xmlns="http://www.w3.org/2000/svg">
-    <path d="M 5 45 L 22 45 L 24 60 L 42 60 L 43 5 L 46 36 Q 48 34 54 36 T 64 36 T 74 35 T 80 36 Q 84 18 88 50 Q 92 24 96 44 Q 100 32 104 42 L 118 42"
-          stroke="#00FF66" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"
-          style="filter: drop-shadow(0px 0px 5px #00FF66);"/>
-  </svg>
-  <h1 style="margin: 0; padding: 0; font-size: 2.2rem; font-weight: 700;">Test Don't Guess</h1>
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-# ========================================================
-# --- CONSTANTS ---
-# ========================================================
-LOG_FILE = "scan_history.csv"
-APP_VERSION = "2026-10-20"
+APP_VERSION = "2026-10-20b"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -56,7 +38,67 @@ WHATS_NEW = [
     "NEW: Glitch catcher — stumbles, trim spikes and fuel-pressure drops are caught on a drive with a 20-second hi-res recording for the AI review",
     "NEW: Factory codes now say what the sub-code means (C0031-11 → circuit short to ground)",
     "NEW: Seal EVAP button (Mode $08) for smoke testing, and a cranking smoothness check that screens for a weak cylinder",
+    "REDESIGN: cleaner look throughout — one green accent, steadier gauge digits, pill tabs, status bar with a Next-step guide on every tab",
+    "FLOW: vehicle first on the intake tab (customer below), photo scanner collapses once the vehicle is set, Diagnose sections 4-6 fold away until needed",
+    "FLOW: Setup checklist at the top shows what's connected and exactly which Secret turns each feature on",
 ]
+
+st.markdown(
+    f"""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap');
+.stApp {{ font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }}
+.block-container {{ padding-top: 1.4rem !important; padding-bottom: 3rem !important; max-width: 1440px !important; }}
+#MainMenu, footer {{ visibility: hidden; }}
+/* segmented pill tabs */
+div[data-baseweb="tab-list"] {{ background: rgba(17,24,39,.55); border: 1px solid rgba(255,255,255,.08); border-radius: 12px;
+  padding: 5px; gap: 6px; margin-bottom: .6rem; overflow-x: auto; }}
+button[data-baseweb="tab"] {{ border-radius: 8px !important; padding: 9px 16px !important; font-weight: 600 !important;
+  font-size: .92rem !important; border: none !important; background: transparent !important; transition: all .18s ease !important; }}
+button[data-baseweb="tab"]:hover {{ background: rgba(255,255,255,.05) !important; }}
+button[data-baseweb="tab"][aria-selected="true"] {{ background: linear-gradient(180deg, rgba(16,185,129,.18) 0%, rgba(16,185,129,.06) 100%) !important;
+  color: #10B981 !important; box-shadow: inset 0 0 0 1px rgba(16,185,129,.35), 0 2px 8px rgba(0,0,0,.25) !important; }}
+div[data-baseweb="tab-highlight"] {{ display: none !important; }}
+/* dark-glass expanders & inputs */
+div[data-testid="stExpander"] {{ border: 1px solid rgba(255,255,255,.08) !important; border-radius: 10px !important; overflow: hidden; }}
+div[data-baseweb="input"] > div, div[data-baseweb="select"] > div, div[data-baseweb="textarea"] > div {{ border-radius: 8px !important; }}
+/* HUD context bar */
+.tdg-bar {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:rgba(15,22,35,.85); border:1px solid rgba(255,255,255,.08);
+  padding:9px 14px; border-radius:10px; margin-bottom:12px; font-size:.85rem; }}
+.tdg-bar .pill {{ background:rgba(255,255,255,.05); color:#E2E8F0; padding:3px 10px; border-radius:6px; font-weight:600; }}
+.tdg-bar .dtc {{ font-family:'JetBrains Mono',monospace; font-weight:600; padding:3px 10px; border-radius:6px; }}
+.tdg-next {{ flex-basis:100%; color:#8B9BB4; font-size:.8rem; }}
+.tdg-next b {{ color:#10B981; }}
+</style>
+
+<div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; padding:12px 18px;
+  background:linear-gradient(90deg, rgba(16,185,129,.10) 0%, rgba(17,24,39,.55) 55%); border:1px solid rgba(255,255,255,.08);
+  border-radius:14px; margin-bottom:1rem; box-shadow:0 10px 30px -10px rgba(0,0,0,.5);">
+  <div style="display:flex; align-items:center; gap:14px;">
+    <div style="background:rgba(16,185,129,.12); border:1px solid rgba(16,185,129,.3); padding:7px 9px; border-radius:10px; display:flex; align-items:center;">
+      <svg width="46" height="28" viewBox="0 0 120 70" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M 5 45 L 22 45 L 24 60 L 42 60 L 43 5 L 46 36 Q 48 34 54 36 T 64 36 T 74 35 T 80 36 Q 84 18 88 50 Q 92 24 96 44 Q 100 32 104 42 L 118 42"
+              stroke="#10B981" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"
+              style="filter: drop-shadow(0px 0px 6px rgba(16,185,129,.6));"/>
+      </svg>
+    </div>
+    <div>
+      <h1 style="margin:0; padding:0; font-size:1.55rem; font-weight:700; letter-spacing:-.02em;">Test Don't Guess</h1>
+      <div style="font-size:.74rem; color:#8B9BB4; font-weight:500; letter-spacing:.05em; text-transform:uppercase;">Telemetry &amp; AI diagnostics</div>
+    </div>
+  </div>
+  <div style="font-family:'JetBrains Mono',monospace; font-size:.72rem; color:#10B981; background:rgba(16,185,129,.1);
+    border:1px solid rgba(16,185,129,.25); padding:4px 10px; border-radius:999px;">v{APP_VERSION}</div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+# ========================================================
+# --- CONSTANTS ---
+# ========================================================
+LOG_FILE = "scan_history.csv"
+
 PROBLEM_LOG = "problem_log.jsonl"
 LOG_COLUMNS = ["Timestamp", "Customer", "Phone", "VIN", "Vehicle", "Fault Code (DTC)", "Tech"]
 VIN_RE = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
@@ -1222,11 +1264,34 @@ def log_csv(rows: list[dict]) -> str:
   return b.getvalue()
 
 
+def next_step() -> str:
+  """One line telling the tech where the job goes next — the same guided feel as a factory tool."""
+  if not ss.vehicle_info:
+    return "Tap <b>Connect &amp; Auto-Scan</b> on 📊 Scanner (fills everything in), or photo the VIN on 📷."
+  if not current_codes() and not (ss.symptoms or "").strip() and not ss.scan_data:
+    return "Connect the scanner on 📊 to read codes — or type codes/symptoms on 🔧 Diagnose."
+  if not ss.dtc_result:
+    return "Run the <b>Diagnostic Tree</b> on 🔧 Diagnose to get the test plan."
+  if not (ss.fix_part or "").strip():
+    return "Work the plan (scope + guided tests), then record the <b>confirmed fix</b> on 🔧 section 6."
+  return "Send the report (🔧 section 5), then close the job under 🚗 Cars in the shop."
+
+
 def context_bar():
-  st.info(
-      f"📋 **Context:** Customer: `{ss.customer_name or 'None'}` | Vehicle: `{ss.vehicle_info or 'No Vehicle Selected'}`"
-      f" | Active DTC: `{ss.active_dtc or 'None Specified'}`"
-  )
+  e = html_lib.escape
+  has_dtc = bool(ss.active_dtc)
+  dtc_style = ("background:rgba(239,68,68,.12);color:#F87171;border:1px solid rgba(239,68,68,.3)" if has_dtc
+               else "background:rgba(16,185,129,.1);color:#34D399;border:1px solid rgba(16,185,129,.25)")
+  job = "open job" if ss.get("job_id") else "not saved yet"
+  st.markdown(
+      f'<div class="tdg-bar">'
+      f'<span class="pill">🚗 {e(ss.vehicle_info or "No vehicle")}</span>'
+      f'<span class="pill" style="font-weight:500;color:#CBD5E1">👤 {e(ss.customer_name or "no customer")}'
+      f'{(" · " + e(ss.odometer) + " mi") if (ss.odometer or "").strip() else ""}</span>'
+      f'<span class="dtc" style="{dtc_style}">{e(ss.active_dtc or "no codes")}</span>'
+      f'<span style="color:#64748B;font-size:.75rem">{job}</span>'
+      f'<span class="tdg-next">▶ Next: {next_step()}</span>'
+      f'</div>', unsafe_allow_html=True)
 
 
 # ========================================================
@@ -1277,8 +1342,7 @@ if ss.get("_seen_version") != APP_VERSION:
   ss._seen_version = APP_VERSION
   st.toast(f"✅ Running version {APP_VERSION} — see 🆕 What's new at the top")
 
-with st.expander(f"🆕 What's new — version {APP_VERSION}"):
-  st.markdown("\n".join(f"- {w}" for w in WHATS_NEW))
+
 
 # Legacy links from the old "Sync" button (?ble_vin=...&ble_dtc=...): use once, then clear
 if "ble_vin" in st.query_params or "ble_dtc" in st.query_params:
@@ -1356,100 +1420,113 @@ def jobs_panel():
         st.rerun()
 
 
+def setup_panel():
+  checks = [
+      ("🔑 Shop login", bool(shop_users())), ("💾 Permanent storage", store_on()),
+      ("✨ Gemini (main AI)", bool(secret("GEMINI_API_KEY"))), ("🧠 Claude review", has_claude()),
+      ("🐋 DeepSeek 2nd opinion", has_deepseek()), ("🌐 Perplexity research", bool(secret("PERPLEXITY_API_KEY"))),
+      ("📧 Email reports", email_ready()), ("💬 Text customers", sms_ready()),
+  ]
+  on = sum(1 for _, ok in checks if ok)
+  with st.expander(("⚙️" if on == len(checks) else "🟡") + f" Setup — {on}/{len(checks)} connected"):
+    st.markdown("  \n".join(("✅ " if ok else "⬜ ") + n for n, ok in checks))
+    if on < len(checks):
+      st.caption("Turn one on by adding its key in **Manage app → Settings → Secrets**:  \n"
+                 "login → APP_PASSWORD (or APP_USERS = \"Name:pass, Name2:pass2\")  \n"
+                 "storage → SUPABASE_URL + SUPABASE_KEY  \n"
+                 "AIs → GEMINI_API_KEY · ANTHROPIC_API_KEY · DEEPSEEK_API_KEY · PERPLEXITY_API_KEY  \n"
+                 "email → SMTP_USER + SMTP_PASSWORD (Gmail app password)  \n"
+                 "texting → TWILIO_SID + TWILIO_TOKEN + TWILIO_FROM")
+
+
 with guard("Cars in the shop"):
-  jobs_panel()
+  _topL, _topR = st.columns([2.6, 1.4])
+  with _topL:
+    jobs_panel()
+  with _topR:
+    setup_panel()
+    with st.expander(f"🆕 What's new — v{APP_VERSION}"):
+      st.markdown("\n".join(f"- {w}" for w in WHATS_NEW))
 
 
 tab1, tab2, tab3, tab5 = st.tabs([
-    "📷 VIN & Customer Info",
-    "📊 Live Telemetry, Mode $06 & Monitors",
-    "🔧 Diagnose (Strategy, Scope & Copilot)",
-    "📋 Vehicle & DTC Log",
+    "📷 Vehicle & Customer",
+    "📊 Scanner & Live Data",
+    "🔧 Diagnose",
+    "📋 Log & History",
 ])
 
 # ========================================================
 # --- TAB 1: VIN & CUSTOMER INFO ---
 # ========================================================
 with tab1, guard("VIN & Customer tab"):
-  st.subheader("Customer & Vehicle Identification")
-
-  st.markdown("#### 👤 Customer Information")
-  col_c1, col_c2 = st.columns(2)
-  with col_c1:
-    st.text_input("Customer Name:", key="customer_name", placeholder="e.g. ROTAE LLC")
-    st.text_input("Phone Number:", key="customer_phone", placeholder="e.g. 678-365-2146")
-    st.text_input("Email (for sending the report):", key="customer_email", placeholder="e.g. name@gmail.com")
-  with col_c2:
-    st.text_area("Address:", key="customer_address", height=108,
-                 placeholder="e.g. 6428 DAWSON BLVD, STE 1730, NORCROSS, GA, 30093")
-    st.text_input("Odometer (miles):", key="odometer", placeholder="e.g. 163,420")
-
-  st.write("---")
-  st.markdown("#### 📸 VIN from a photo")
-  st.caption("Tip: use **Take or upload photo** — on a phone it opens the full-resolution camera, which reads far better than "
+  context_bar()
+  st.markdown("#### 🚗 Vehicle")
+  with st.expander("📸 Read the VIN from a photo", expanded=not ss.vehicle_details):
+    st.caption("Tip: use **Take or upload photo** — on a phone it opens the full-resolution camera, which reads far better than "
              "the small in-app camera. Get close, fill the frame with the VIN, avoid glare. Works with the door sticker, "
              "windshield plate, registration/insurance card or a scan-tool screen. (Connecting the scanner reads the VIN "
              "straight from the car and needs no photo.)")
-  col_up, col_cam = st.columns(2)
-  with col_up:
-    uploaded = st.file_uploader("📷 Take or upload photo of the VIN", type=["png", "jpg", "jpeg", "webp"],
-                                key=f"vin_upload_{ss.get('job_n', 0)}")
-  with col_cam:
-    photo = st.camera_input("In-app camera (lower resolution)") if st.toggle("Use in-app camera instead") else None
+    col_up, col_cam = st.columns(2)
+    with col_up:
+      uploaded = st.file_uploader("📷 Take or upload photo of the VIN", type=["png", "jpg", "jpeg", "webp"],
+                                  key=f"vin_upload_{ss.get('job_n', 0)}")
+    with col_cam:
+      photo = st.camera_input("In-app camera (lower resolution)") if st.toggle("Use in-app camera instead") else None
 
-  active_image = uploaded or photo
-  if active_image:
-    img_bytes = active_image.getvalue()
-    photo_id = hashlib.md5(img_bytes).hexdigest()
-    try:
-      st.image(img_bytes, caption="Photo", width=420)
-    except Exception:
-      pass
-
-    read = {"vin": ""}
-    try:
-      with st.spinner("Reading the VIN (barcode + printed characters) and verifying it..."):
-        read = find_vin(img_bytes)
-    except Exception as e:   # unreadable image format etc.
-      log_problem("vin", "VIN photo read", f"{type(e).__name__}: {e}")
-      st.warning("Couldn't read that photo. Try a JPG/PNG, or type the VIN below.")
-
-    found_vin = read.get("vin", "")
-    if found_vin:
-      icon = {"high": "✅", "medium": "🟡", "low": "⚠️"}[read["confidence"]]
-      st.markdown(f"{icon} **{found_vin}**  \n<small>{read['note']}</small>", unsafe_allow_html=True)
-      if ss.get("_applied_photo") != photo_id:  # apply each photo once so manual edits stick
-        ss._applied_photo = photo_id
-        load_vehicle(found_vin)
-        queue_update(vin_input=found_vin)
-      if read.get("alts"):
-        st.caption("Not right? Other possible readings:")
-        alt_cols = st.columns(len(read["alts"]))
-        for col, alt in zip(alt_cols, read["alts"]):
-          if col.button(alt, key=f"alt_{alt}"):
-            load_vehicle(alt)
-            queue_update(vin_input=alt, toast=f"Using {alt}")
-    else:
-      st.warning(read.get("note") or "Could not find a VIN. Try a closer, sharper photo, or type it below.")
-    if (not found_vin or read.get("confidence") == "low") and st.button("🔁 Read this photo again"):
-      getattr(find_vin, "clear", lambda: None)()
-      ss._applied_photo = None
-      st.rerun()
-
-    if st.button("📄 Extract Customer Details from this Image"):
+    active_image = uploaded or photo
+    if active_image:
+      img_bytes = active_image.getvalue()
+      photo_id = hashlib.md5(img_bytes).hexdigest()
       try:
-        with st.spinner("Extracting customer name, address, and phone..."):
-          info = extract_customer(img_bytes)
-      except (AIError, ValueError) as e:
-        st.error(f"Couldn't read customer details: {e}")
+        st.image(img_bytes, caption="Photo", width=420)
+      except Exception:
+        pass
+
+      read = {"vin": ""}
+      try:
+        with st.spinner("Reading the VIN (barcode + printed characters) and verifying it..."):
+          read = find_vin(img_bytes)
+      except Exception as e:   # unreadable image format etc.
+        log_problem("vin", "VIN photo read", f"{type(e).__name__}: {e}")
+        st.warning("Couldn't read that photo. Try a JPG/PNG, or type the VIN below.")
+
+      found_vin = read.get("vin", "")
+      if found_vin:
+        icon = {"high": "✅", "medium": "🟡", "low": "⚠️"}[read["confidence"]]
+        st.markdown(f"{icon} **{found_vin}**  \n<small>{read['note']}</small>", unsafe_allow_html=True)
+        if ss.get("_applied_photo") != photo_id:  # apply each photo once so manual edits stick
+          ss._applied_photo = photo_id
+          load_vehicle(found_vin)
+          queue_update(vin_input=found_vin)
+        if read.get("alts"):
+          st.caption("Not right? Other possible readings:")
+          alt_cols = st.columns(len(read["alts"]))
+          for col, alt in zip(alt_cols, read["alts"]):
+            if col.button(alt, key=f"alt_{alt}"):
+              load_vehicle(alt)
+              queue_update(vin_input=alt, toast=f"Using {alt}")
       else:
-        upd = {k: str(info.get(j, "")).strip() for k, j in
-               (("customer_name", "customer_name"), ("customer_address", "address"), ("customer_phone", "phone"),
-                ("customer_email", "email"), ("odometer", "odometer"))
-               if str(info.get(j, "")).strip()}
-        if upd:
-          queue_update(toast="Customer info updated", **upd)
-        st.warning("No customer details found in this image.")
+        st.warning(read.get("note") or "Could not find a VIN. Try a closer, sharper photo, or type it below.")
+      if (not found_vin or read.get("confidence") == "low") and st.button("🔁 Read this photo again"):
+        getattr(find_vin, "clear", lambda: None)()
+        ss._applied_photo = None
+        st.rerun()
+
+      if st.button("📄 Extract Customer Details from this Image"):
+        try:
+          with st.spinner("Extracting customer name, address, and phone..."):
+            info = extract_customer(img_bytes)
+        except (AIError, ValueError) as e:
+          st.error(f"Couldn't read customer details: {e}")
+        else:
+          upd = {k: str(info.get(j, "")).strip() for k, j in
+                 (("customer_name", "customer_name"), ("customer_address", "address"), ("customer_phone", "phone"),
+                  ("customer_email", "email"), ("odometer", "odometer"))
+                 if str(info.get(j, "")).strip()}
+          if upd:
+            queue_update(toast="Customer info updated", **upd)
+          st.warning("No customer details found in this image.")
 
   vin_typed = st.text_input("Vehicle VIN (17 characters) — decodes automatically:", key="vin_input", max_chars=17)
   vin_clean = vin_typed.strip().upper()
@@ -1520,6 +1597,20 @@ with tab1, guard("VIN & Customer tab"):
     elif ss.vehicle_details.get("Model"):
       st.caption("No NHTSA recalls found for this year/make/model.")
 
+  st.write("---")
+  st.markdown("#### 👤 Customer")
+  col_c1, col_c2 = st.columns(2)
+  with col_c1:
+    st.text_input("Customer Name:", key="customer_name", placeholder="e.g. ROTAE LLC")
+    st.text_input("Phone Number:", key="customer_phone", placeholder="e.g. 678-365-2146")
+    st.text_input("Email (for sending the report):", key="customer_email", placeholder="e.g. name@gmail.com")
+  with col_c2:
+    st.text_area("Address:", key="customer_address", height=108,
+                 placeholder="e.g. 6428 DAWSON BLVD, STE 1730, NORCROSS, GA, 30093")
+    st.text_input("Odometer (miles):", key="odometer", placeholder="e.g. 163,420")
+  st.caption("📄 Got a work order? Open 📸 Read the VIN from a photo above and tap "
+             "\"Extract Customer Details from this Image\" — it fills all of this in.")
+
 # ========================================================
 # --- TAB 2: LIVE TELEMETRY, ENHANCED PIDS, MONITORS & MODE 06 ---
 # ========================================================
@@ -1586,6 +1677,40 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
   .chart .hd .x { cursor:pointer; padding:0 4px; color:var(--muted); }
   .chart canvas { width:100%; height:120px; display:block; touch-action:pan-y; }
   .note { font-size:.72rem; color:var(--s); font-weight:400; }
+</style>
+<style>
+/* ===== 2026 design pass: dark-glass override (keeps every rule above, restyles on top) ===== */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap');
+:root { --bg:#0E1420; --card:#141C2E; --line:rgba(255,255,255,.08); --muted:#8B9BB4; --g:#10B981; --t:#14B8A6; --w:#F1F5F9; }
+body { color: var(--w); font-family: 'Inter', system-ui, -apple-system, sans-serif; -webkit-font-smoothing: antialiased; }
+.wrap { background: linear-gradient(180deg,#121A2A 0%,#0C121D 100%); border: 1px solid rgba(255,255,255,.1); border-radius: 14px; padding: 16px;
+  box-shadow: 0 20px 40px -15px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.05); }
+button { font-family: 'Inter', system-ui, sans-serif; font-weight: 600; font-size: .82rem; border: 1px solid rgba(255,255,255,.1) !important;
+  border-radius: 8px; background: #1A2333 !important; color: var(--w) !important; transition: all .15s ease;
+  box-shadow: 0 2px 4px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.05); }
+button:hover:not(:disabled) { background: #232F46 !important; border-color: rgba(255,255,255,.22) !important; transform: translateY(-1px); }
+button:active:not(:disabled) { transform: translateY(0); }
+button:disabled { background: rgba(255,255,255,.03) !important; color: #475569 !important; border-color: rgba(255,255,255,.04) !important;
+  box-shadow: none; cursor: not-allowed; }
+#bleBtn { background: linear-gradient(180deg,#10B981 0%,#059669 100%) !important; color: #052E16 !important; font-weight: 700;
+  border: 1px solid #34D399 !important; box-shadow: 0 0 16px rgba(16,185,129,.25); }
+#bleBtn:hover:not(:disabled) { filter: brightness(1.08); }
+#aiBtn:not(:disabled) { background: rgba(245,158,11,.14) !important; color: #FBBF24 !important; border-color: rgba(245,158,11,.35) !important; }
+#clearBtn:not(:disabled) { background: rgba(239,68,68,.12) !important; color: #FCA5A5 !important; border-color: rgba(239,68,68,.35) !important; }
+select { background: #0F1623; color: var(--w); border: 1px solid rgba(255,255,255,.14); padding: 6px 9px; border-radius: 8px; font-weight: 600; }
+#status { color: #94A3B8; font-family: 'JetBrains Mono', monospace; font-size: .78rem; background: #0A0F18;
+  border: 1px solid var(--line); padding: 8px 12px; border-radius: 8px; }
+h3 { font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
+.tile { background: linear-gradient(180deg, rgba(25,35,58,.75) 0%, rgba(15,22,36,.9) 100%); border: 1px solid var(--line);
+  border-radius: 10px; text-align: left; padding: 9px 11px; box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
+  transition: transform .12s ease, border-color .12s ease; }
+.tile:hover { border-color: rgba(255,255,255,.22); transform: translateY(-1px); }
+.tile .l { font-size: .66rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile .v { font-family: 'JetBrains Mono', monospace; font-variant-numeric: tabular-nums; font-size: 1.12rem; font-weight: 700;
+  letter-spacing: -.02em; }
+.box, .chart { background: rgba(15,22,36,.85); border: 1px solid var(--line); border-radius: 10px; }
+canvas.tplot { background: rgba(15,22,36,.85); border: 1px solid var(--line); border-radius: 10px; }
 </style>
 </head>
 <body>
@@ -1819,6 +1944,13 @@ function drawCharts() {
     // line
     g.strokeStyle = color; g.lineWidth = 2; g.lineJoin = "round"; g.beginPath();
     pts.forEach((p, i) => (i ? g.lineTo(X(p[0]), Y(p[1])) : g.moveTo(X(p[0]), Y(p[1])))); g.stroke();
+    if (pts.length > 1 && color.startsWith("rgb(")) {   // soft gradient under the trace, like a scope
+      const grad = g.createLinearGradient(0, T, 0, T + ph);
+      grad.addColorStop(0, color.replace("rgb(", "rgba(").replace(")", ", 0.18)"));
+      grad.addColorStop(1, "rgba(0,0,0,0)");
+      g.lineTo(X(pts[pts.length - 1][0]), T + ph); g.lineTo(X(pts[0][0]), T + ph); g.closePath();
+      g.fillStyle = grad; g.fill();
+    }
     const last = pts[pts.length - 1];
     g.fillStyle = color; g.beginPath(); g.arc(X(last[0]), Y(last[1]), 4, 0, 7); g.fill();
     // synced crosshair + readout
@@ -5605,153 +5737,154 @@ pre{{white-space:pre-wrap;font-family:inherit;font-size:13px;background:#fafafa;
 
 with tab3, guard("Diagnose tab"):
   st.write("---")
-  st.markdown("#### 4 · Job photos & estimate")
-  st.caption("Photos save with the job and go on the customer report — the leaky gasket or chafed wire sells the repair "
-             "better than words. The estimate prints on the report with a total.")
-  _pc1, _pc2 = st.columns(2)
-  with _pc1:
-    _new_photos = st.file_uploader("📸 Add photos to this job", type=["png", "jpg", "jpeg", "webp"],
-                                   accept_multiple_files=True, key=f"job_photos_{ss.get('photo_n', 0)}_{ss.get('job_n', 0)}")
-    if _new_photos and st.button(f"💾 Attach {len(_new_photos)} photo(s) to the job"):
-      autosave_job(force=True)
-      if not ss.get("job_id"):
-        st.warning("Add a customer, vehicle or code first so there's a job to attach them to.")
-      else:
-        _have = len(job_photos())
-        for _i, _f in enumerate(_new_photos[: max(0, 12 - _have)]):
-          try:
-            store_put("jobphoto", f"{ss.job_id}-{datetime.now().strftime('%H%M%S%f')}{_i}",
-                      {"job": ss.job_id, "b64": shrink_to_b64(_f.getvalue()), "name": getattr(_f, "name", ""),
-                       "at": datetime.now().strftime("%Y-%m-%d %I:%M %p")})
-          except Exception as _e:
-            st.warning(f"Couldn't save {getattr(_f, 'name', 'a photo')}: {_e}")
-        ss.photo_n = ss.get("photo_n", 0) + 1   # empty the picker
-        queue_update(toast="Photo(s) attached to the job")
-    _jp = job_photos()
-    if _jp:
-      st.caption(f"{len(_jp)} photo(s) on this job (12 max):")
-      for _ph in _jp:
-        _jc1, _jc2 = st.columns([5, 1])
-        with _jc1:
-          try:
-            st.image(base64.b64decode(_ph.get("b64", "")), width=260, caption=_ph.get("at", ""))
-          except Exception:
-            st.caption("(photo unreadable)")
-        if _jc2.button("🗑️", key=f"delp_{_ph['_id']}", help="Remove this photo"):
-          store_delete("jobphoto", _ph["_id"])
-          st.rerun()
-  with _pc2:
-    st.markdown("**🧾 Estimate** (tap a cell to edit; ➕ at the bottom adds a line)")
-    _est_in = ss.estimate_rows if isinstance(ss.estimate_rows, list) and ss.estimate_rows else         [{"Item": "", "Parts $": 0.0, "Labor $": 0.0}]
-    _est = st.data_editor(_est_in, num_rows="dynamic", use_container_width=True,
-                          key=f"est_{ss.get('job_n', 0)}_{ss.get('job_id') or 'new'}")
-    ss.estimate_rows = [r for r in (_est or []) if isinstance(r, dict)]
-    def _money(v):
-      try:
-        return float(str(v).replace("$", "").replace(",", "") or 0)
-      except ValueError:
-        return 0.0
-    _parts = sum(_money(r.get("Parts $")) for r in ss.estimate_rows)
-    _labor = sum(_money(r.get("Labor $")) for r in ss.estimate_rows)
-    if _parts or _labor:
-      st.markdown(f"Parts **${_parts:,.2f}** · Labor **${_labor:,.2f}** · **Total ${_parts + _labor:,.2f}**")
+  with st.expander("📸 4 · Job photos & estimate", expanded=bool(
+      [r for r in (ss.estimate_rows or []) if isinstance(r, dict) and str(r.get("Item") or "").strip()])):
+    st.caption("Photos save with the job and go on the customer report — the leaky gasket or chafed wire sells the repair "
+               "better than words. The estimate prints on the report with a total.")
+    _pc1, _pc2 = st.columns(2)
+    with _pc1:
+      _new_photos = st.file_uploader("📸 Add photos to this job", type=["png", "jpg", "jpeg", "webp"],
+                                     accept_multiple_files=True, key=f"job_photos_{ss.get('photo_n', 0)}_{ss.get('job_n', 0)}")
+      if _new_photos and st.button(f"💾 Attach {len(_new_photos)} photo(s) to the job"):
+        autosave_job(force=True)
+        if not ss.get("job_id"):
+          st.warning("Add a customer, vehicle or code first so there's a job to attach them to.")
+        else:
+          _have = len(job_photos())
+          for _i, _f in enumerate(_new_photos[: max(0, 12 - _have)]):
+            try:
+              store_put("jobphoto", f"{ss.job_id}-{datetime.now().strftime('%H%M%S%f')}{_i}",
+                        {"job": ss.job_id, "b64": shrink_to_b64(_f.getvalue()), "name": getattr(_f, "name", ""),
+                         "at": datetime.now().strftime("%Y-%m-%d %I:%M %p")})
+            except Exception as _e:
+              st.warning(f"Couldn't save {getattr(_f, 'name', 'a photo')}: {_e}")
+          ss.photo_n = ss.get("photo_n", 0) + 1   # empty the picker
+          queue_update(toast="Photo(s) attached to the job")
+      _jp = job_photos()
+      if _jp:
+        st.caption(f"{len(_jp)} photo(s) on this job (12 max):")
+        for _ph in _jp:
+          _jc1, _jc2 = st.columns([5, 1])
+          with _jc1:
+            try:
+              st.image(base64.b64decode(_ph.get("b64", "")), width=260, caption=_ph.get("at", ""))
+            except Exception:
+              st.caption("(photo unreadable)")
+          if _jc2.button("🗑️", key=f"delp_{_ph['_id']}", help="Remove this photo"):
+            store_delete("jobphoto", _ph["_id"])
+            st.rerun()
+    with _pc2:
+      st.markdown("**🧾 Estimate** (tap a cell to edit; ➕ at the bottom adds a line)")
+      _est_in = ss.estimate_rows if isinstance(ss.estimate_rows, list) and ss.estimate_rows else         [{"Item": "", "Parts $": 0.0, "Labor $": 0.0}]
+      _est = st.data_editor(_est_in, num_rows="dynamic", use_container_width=True,
+                            key=f"est_{ss.get('job_n', 0)}_{ss.get('job_id') or 'new'}")
+      ss.estimate_rows = [r for r in (_est or []) if isinstance(r, dict)]
+      def _money(v):
+        try:
+          return float(str(v).replace("$", "").replace(",", "") or 0)
+        except ValueError:
+          return 0.0
+      _parts = sum(_money(r.get("Parts $")) for r in ss.estimate_rows)
+      _labor = sum(_money(r.get("Labor $")) for r in ss.estimate_rows)
+      if _parts or _labor:
+        st.markdown(f"Parts **${_parts:,.2f}** · Labor **${_labor:,.2f}** · **Total ${_parts + _labor:,.2f}**")
 
   st.write("---")
-  st.markdown("#### 5 · Customer / shop report")
-  st.caption("One page with the vehicle, all codes, freeze frame, every test result (green / yellow / red) and the plan. "
-             "Open it on your phone and use Print → Save as PDF, or text it to the customer.")
-  notes = st.text_area("Technician notes / recommendation (goes on the report):", key="tech_notes", height=80,
-                       placeholder="e.g. Recommend replacing cylinder 3 ignition coil and spark plugs. Fuel trims normal after repair.")
-  _has_findings = bool(ss.dtc_result or ss.test_results or ss.tech_notes.strip() or ss.fix_part.strip() or current_codes())
-  if st.button("✍️ Write a plain-English summary for the customer", disabled=not _has_findings):
-    with st.spinner("Writing the customer summary..."):
-      _sum, _who = quick_ai(CUSTOMER_SUMMARY_PROMPT.format(
-          vehicle=ss.vehicle_info or "the vehicle", complaint=ss.symptoms.strip() or "not given", codes=", ".join(current_codes()) or "none",
-          tests=json.dumps(ss.test_results or {})[:2500], notes=ss.tech_notes.strip() or "none",
-          fix=(ss.fix_part.strip() + (f" (proved by: {ss.fix_test.strip()})" if ss.fix_test.strip() else "")) or "not done yet",
-          plan=(ss.dtc_result or {}).get("text", "")[:2500] or "none"), max_tokens=700)
-    if _sum.startswith("⚠️"):
-      st.error(_sum)
-    else:
-      ss.customer_summary = _sum.strip()
-  st.text_area("Customer summary (edit it as you like — it goes at the top of the report):", key="customer_summary", height=130,
-               placeholder="Tap the button above, or type your own summary for the customer.")
-  _rep_name = re.sub(r"\W+", "_", ss.vehicle_info or "vehicle")
-  _report_html = build_report_html(notes)
-  _bat = battery_slip_html() if any(re.search(r"charg|crank|battery|power", k, re.I) for k in (ss.test_results or {})) else ""
-  _sc1, _sc2, _sc3, _sc4 = st.columns(4)
-  with _sc1:
-    st.download_button("🧾 Download report", data=_report_html.encode("utf-8"), mime="text/html",
-                       file_name=f"report_{_rep_name}_{datetime.now():%Y%m%d}.html", use_container_width=True)
-  with _sc2:
-    if st.button("📧 Email it to the customer", use_container_width=True,
-                 disabled=not (email_ready() and (ss.customer_email or "").strip())):
-      with st.spinner("Sending the email..."):
-        _err = send_report_email(ss.customer_email.strip(), f"Diagnostic report — {ss.vehicle_info or 'your vehicle'}",
-                                 (ss.customer_summary or "").strip() or "Your diagnostic report is attached.",
-                                 _report_html, f"report_{_rep_name}_{datetime.now():%Y%m%d}.html")
-      if _err:
-        st.error(f"Couldn't send it: {_err}")
+  with st.expander("🧾 5 · Customer report — summary, email, text, print",
+                   expanded=bool((ss.customer_summary or "").strip() or (ss.tech_notes or "").strip())):
+    st.caption("One page with the vehicle, all codes, freeze frame, every test result (green / yellow / red) and the plan. "
+               "Open it on your phone and use Print → Save as PDF, or text it to the customer.")
+    notes = st.text_area("Technician notes / recommendation (goes on the report):", key="tech_notes", height=80,
+                         placeholder="e.g. Recommend replacing cylinder 3 ignition coil and spark plugs. Fuel trims normal after repair.")
+    _has_findings = bool(ss.dtc_result or ss.test_results or ss.tech_notes.strip() or ss.fix_part.strip() or current_codes())
+    if st.button("✍️ Write a plain-English summary for the customer", disabled=not _has_findings):
+      with st.spinner("Writing the customer summary..."):
+        _sum, _who = quick_ai(CUSTOMER_SUMMARY_PROMPT.format(
+            vehicle=ss.vehicle_info or "the vehicle", complaint=ss.symptoms.strip() or "not given", codes=", ".join(current_codes()) or "none",
+            tests=json.dumps(ss.test_results or {})[:2500], notes=ss.tech_notes.strip() or "none",
+            fix=(ss.fix_part.strip() + (f" (proved by: {ss.fix_test.strip()})" if ss.fix_test.strip() else "")) or "not done yet",
+            plan=(ss.dtc_result or {}).get("text", "")[:2500] or "none"), max_tokens=700)
+      if _sum.startswith("⚠️"):
+        st.error(_sum)
       else:
-        record_sent("email", ss.customer_email.strip(), "report")
-        st.success(f"Report emailed to {ss.customer_email.strip()} ✓")
-  with _sc3:
-    if st.button("💬 Text the summary", use_container_width=True,
-                 disabled=not (sms_ready() and (ss.customer_phone or "").strip() and (ss.customer_summary or "").strip())):
-      _shop = secret("SHOP_NAME") or "the shop"
-      with st.spinner("Sending the text..."):
-        _err = send_sms(ss.customer_phone, f"{_shop} — {ss.vehicle_info or 'your vehicle'}:\n{ss.customer_summary.strip()}")
-      if _err:
-        st.error(f"Couldn't send it: {_err}")
+        ss.customer_summary = _sum.strip()
+    st.text_area("Customer summary (edit it as you like — it goes at the top of the report):", key="customer_summary", height=130,
+                 placeholder="Tap the button above, or type your own summary for the customer.")
+    _rep_name = re.sub(r"\W+", "_", ss.vehicle_info or "vehicle")
+    _report_html = build_report_html(notes)
+    _bat = battery_slip_html() if any(re.search(r"charg|crank|battery|power", k, re.I) for k in (ss.test_results or {})) else ""
+    _sc1, _sc2, _sc3, _sc4 = st.columns(4)
+    with _sc1:
+      st.download_button("🧾 Download report", data=_report_html.encode("utf-8"), mime="text/html",
+                         file_name=f"report_{_rep_name}_{datetime.now():%Y%m%d}.html", use_container_width=True)
+    with _sc2:
+      if st.button("📧 Email it to the customer", use_container_width=True,
+                   disabled=not (email_ready() and (ss.customer_email or "").strip())):
+        with st.spinner("Sending the email..."):
+          _err = send_report_email(ss.customer_email.strip(), f"Diagnostic report — {ss.vehicle_info or 'your vehicle'}",
+                                   (ss.customer_summary or "").strip() or "Your diagnostic report is attached.",
+                                   _report_html, f"report_{_rep_name}_{datetime.now():%Y%m%d}.html")
+        if _err:
+          st.error(f"Couldn't send it: {_err}")
+        else:
+          record_sent("email", ss.customer_email.strip(), "report")
+          st.success(f"Report emailed to {ss.customer_email.strip()} ✓")
+    with _sc3:
+      if st.button("💬 Text the summary", use_container_width=True,
+                   disabled=not (sms_ready() and (ss.customer_phone or "").strip() and (ss.customer_summary or "").strip())):
+        _shop = secret("SHOP_NAME") or "the shop"
+        with st.spinner("Sending the text..."):
+          _err = send_sms(ss.customer_phone, f"{_shop} — {ss.vehicle_info or 'your vehicle'}:\n{ss.customer_summary.strip()}")
+        if _err:
+          st.error(f"Couldn't send it: {_err}")
+        else:
+          record_sent("text", ss.customer_phone.strip(), "summary")
+          st.success("Summary texted ✓")
+    with _sc4:
+      if _bat:
+        st.download_button("🔋 Battery/charging slip", data=_bat.encode("utf-8"), mime="text/html",
+                           file_name=f"battery_{_rep_name}_{datetime.now():%Y%m%d}.html", use_container_width=True)
       else:
-        record_sent("text", ss.customer_phone.strip(), "summary")
-        st.success("Summary texted ✓")
-  with _sc4:
-    if _bat:
-      st.download_button("🔋 Battery/charging slip", data=_bat.encode("utf-8"), mime="text/html",
-                         file_name=f"battery_{_rep_name}_{datetime.now():%Y%m%d}.html", use_container_width=True)
-    else:
-      st.caption("🔋 Run the Charging or Cranking guided test to get a battery slip here.")
-  if not email_ready():
-    st.caption("📧 To email reports: add SMTP_USER and SMTP_PASSWORD to Streamlit Secrets (for Gmail, make an "
-               "\"App password\" under Google Account → Security → 2-Step Verification, and use that, not your normal password).")
-  elif not (ss.customer_email or "").strip():
-    st.caption("📧 Add the customer's email on the VIN tab to enable emailing.")
-  if not sms_ready():
-    st.caption("💬 To text customers: make a free trial account at twilio.com, buy a texting number (~$1/mo), and add "
-               "TWILIO_SID, TWILIO_TOKEN and TWILIO_FROM (the number, like +16785551234) to Secrets.")
-  _sent = [r.get("data") or {} for r in store_list("sent", 3, {"job": ss.get("job_id")})] if ss.get("job_id") else []
-  if _sent:
-    st.caption("Sent: " + " · ".join(f"{x.get('what')} by {x.get('how')} to {x.get('to')} ({x.get('at')})" for x in _sent))
+        st.caption("🔋 Run the Charging or Cranking guided test to get a battery slip here.")
+    if not email_ready():
+      st.caption("📧 To email reports: add SMTP_USER and SMTP_PASSWORD to Streamlit Secrets (for Gmail, make an "
+                 "\"App password\" under Google Account → Security → 2-Step Verification, and use that, not your normal password).")
+    elif not (ss.customer_email or "").strip():
+      st.caption("📧 Add the customer's email on the VIN tab to enable emailing.")
+    if not sms_ready():
+      st.caption("💬 To text customers: make a free trial account at twilio.com, buy a texting number (~$1/mo), and add "
+                 "TWILIO_SID, TWILIO_TOKEN and TWILIO_FROM (the number, like +16785551234) to Secrets.")
+    _sent = [r.get("data") or {} for r in store_list("sent", 3, {"job": ss.get("job_id")})] if ss.get("job_id") else []
+    if _sent:
+      st.caption("Sent: " + " · ".join(f"{x.get('what')} by {x.get('how')} to {x.get('to')} ({x.get('at')})" for x in _sent))
 
-  # ---------- 5. Confirmed fix ----------
+    # ---------- 5. Confirmed fix ----------
   st.write("---")
-  st.markdown("#### 6 · Confirmed fix & follow-up (teaches the app)")
-  st.caption("When the car is fixed, write down what actually fixed it and the test that proved it. Next time a car like this "
-             "comes in, the AI sees your shop's real fixes first.")
-  f1, f2 = st.columns(2)
-  f1.text_input("What fixed it:", key="fix_part", placeholder="e.g. Replaced upstream O2 sensor (Bank 1 Sensor 1)")
-  f2.text_input("Test that proved it:", key="fix_test", placeholder="e.g. O2 now switching 0.1–0.9 V, total trims back within ±5%")
-  st.text_input("Extra notes (optional):", key="fix_notes", placeholder="e.g. Connector pin 3 was corroded too")
-  if st.button("💾 Save confirmed fix", type="primary", disabled=not (ss.fix_part.strip() and ss.vehicle_info)):
-    if save_fix():
-      st.success("Saved. It's now part of your shop's history for this car and for others like it.")
-    else:
-      st.error("Couldn't save the fix — add the vehicle or customer first.")
-  if not ss.vehicle_info:
-    st.caption("Set the vehicle on the VIN tab first.")
+  with st.expander("✅ 6 · Confirmed fix & follow-up — teaches the app", expanded=bool((ss.fix_part or "").strip())):
+    st.caption("When the car is fixed, write down what actually fixed it and the test that proved it. Next time a car like this "
+               "comes in, the AI sees your shop's real fixes first.")
+    f1, f2 = st.columns(2)
+    f1.text_input("What fixed it:", key="fix_part", placeholder="e.g. Replaced upstream O2 sensor (Bank 1 Sensor 1)")
+    f2.text_input("Test that proved it:", key="fix_test", placeholder="e.g. O2 now switching 0.1–0.9 V, total trims back within ±5%")
+    st.text_input("Extra notes (optional):", key="fix_notes", placeholder="e.g. Connector pin 3 was corroded too")
+    if st.button("💾 Save confirmed fix", type="primary", disabled=not (ss.fix_part.strip() and ss.vehicle_info)):
+      if save_fix():
+        st.success("Saved. It's now part of your shop's history for this car and for others like it.")
+      else:
+        st.error("Couldn't save the fix — add the vehicle or customer first.")
+    if not ss.vehicle_info:
+      st.caption("Set the vehicle on the VIN tab first.")
 
-  st.markdown("**📅 Follow up with this customer?**")
-  _fu1, _fu2 = st.columns(2)
-  _fu_opts = list(FOLLOW_UP_LABELS)
-  _cur_fu = ss.follow_up_days if ss.follow_up_days in FOLLOW_UP_LABELS else 0
-  _fu_pick = _fu1.selectbox("Call them back", _fu_opts, index=_fu_opts.index(_cur_fu),
-                            format_func=lambda d: FOLLOW_UP_LABELS[d], key=f"fu_{ss.get('job_n', 0)}")
-  ss.follow_up_days = _fu_pick
-  _fu2.text_input("About what:", key="follow_up_note", placeholder="e.g. Rear brakes at 4mm — due soon")
-  if _fu_pick:
-    st.caption("It'll show under 📅 Callbacks due on the Log tab when the time comes (counted from the job's last update).")
-
+    st.markdown("**📅 Follow up with this customer?**")
+    _fu1, _fu2 = st.columns(2)
+    _fu_opts = list(FOLLOW_UP_LABELS)
+    _cur_fu = ss.follow_up_days if ss.follow_up_days in FOLLOW_UP_LABELS else 0
+    _fu_pick = _fu1.selectbox("Call them back", _fu_opts, index=_fu_opts.index(_cur_fu),
+                              format_func=lambda d: FOLLOW_UP_LABELS[d], key=f"fu_{ss.get('job_n', 0)}")
+    ss.follow_up_days = _fu_pick
+    _fu2.text_input("About what:", key="follow_up_note", placeholder="e.g. Rear brakes at 4mm — due soon")
+    if _fu_pick:
+      st.caption("It'll show under 📅 Callbacks due on the Log tab when the time comes (counted from the job's last update).")
 # ========================================================
 # --- TAB 5: VEHICLE & DTC LOG ---
 # ========================================================
