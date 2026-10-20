@@ -1,6 +1,7 @@
 import base64
+import copy
 import csv
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import html as html_lib
 import io
@@ -37,7 +38,7 @@ st.markdown(
 # --- CONSTANTS ---
 # ========================================================
 LOG_FILE = "scan_history.csv"
-APP_VERSION = "2026-10-12"
+APP_VERSION = "2026-10-19"
 PROBLEM_LOG = "problem_log.jsonl"
 LOG_COLUMNS = ["Timestamp", "Customer", "Phone", "VIN", "Vehicle", "Fault Code (DTC)"]
 VIN_RE = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
@@ -69,9 +70,10 @@ DEFAULTS = {
     "chat_history": [], "dtc_result": None, "scope_result": None, "symptoms": "",
     "man_make": "", "man_make_other": "", "man_model": "", "man_trim": "", "man_engine": "",
     "ble_ai": None, "ble_last_event": None, "ble_dtcs": {}, "test_results": {},
+    "tech_notes": "", "customer_summary": "", "fix_part": "", "fix_test": "", "fix_notes": "",
 }
 for _k, _v in DEFAULTS.items():
-    ss.setdefault(_k, _v)
+    ss.setdefault(_k, copy.deepcopy(_v))
 
 # Widget values can only be changed BEFORE the widget is drawn, so updates
 # coming from buttons/Bluetooth are queued, then applied here on the rerun.
@@ -115,10 +117,19 @@ def log_problem(kind: str, where: str, message: str, details: str = "", extra: d
       f.write(json.dumps(entry) + "\n")
   except OSError:
     pass
+  try:
+    if store_on():
+      store_put("problem", datetime.now().strftime("%Y%m%d%H%M%S%f"), entry, local_copy=False)
+  except Exception:
+    pass
   return entry
 
 
 def load_problems(limit: int = 200) -> list[dict]:
+  if store_on():
+    rows = [r.get("data") or {} for r in store_list("problem", limit)]
+    if rows:
+      return rows
   try:
     with open(PROBLEM_LOG, encoding="utf-8") as f:
       rows = [json.loads(line) for line in f if line.strip()]
@@ -167,6 +178,162 @@ def secret(name: str) -> str:
 @st.cache_resource
 def http() -> requests.Session:
   return requests.Session()  # keep-alive: faster repeat API calls
+
+
+# ========================================================
+# --- PERMANENT STORAGE (Supabase; falls back to the app's temporary disk) ---
+# ========================================================
+# Jobs, scan log, test drives, confirmed fixes and the problem log are saved here so they survive restarts
+# and updates. Needs SUPABASE_URL and SUPABASE_KEY in Streamlit Secrets (see the setup notes).
+SUPA_TABLE = "tdg_records"
+DATA_DIR = "data"
+
+
+def store_on() -> bool:
+  return bool(secret("SUPABASE_URL") and secret("SUPABASE_KEY"))
+
+
+def _supa_url() -> str:
+  return secret("SUPABASE_URL").strip().rstrip("/") + f"/rest/v1/{SUPA_TABLE}"
+
+
+def _supa_headers(extra: dict | None = None) -> dict:
+  key = secret("SUPABASE_KEY").strip()
+  h = {"apikey": key, "Content-Type": "application/json"}
+  if key.startswith("eyJ"):   # older-style Supabase keys also go in the Authorization header
+    h["Authorization"] = f"Bearer {key}"
+  h.update(extra or {})
+  return h
+
+
+@st.cache_resource
+def _store_versions() -> dict:
+  return {}
+
+
+def _bump(kind: str):
+  v = _store_versions()
+  v[kind] = v.get(kind, 0) + 1
+
+
+def _store_error(msg: str):
+  """Note a storage problem without calling log_problem (which itself saves to storage)."""
+  st.session_state["_store_err"] = msg
+  try:
+    with open(PROBLEM_LOG, "a", encoding="utf-8") as f:
+      f.write(json.dumps({"time": datetime.now().strftime("%Y-%m-%d %I:%M:%S %p"), "version": APP_VERSION,
+                          "kind": "storage", "where": "Permanent storage", "message": msg[:500]}) + "\n")
+  except OSError:
+    pass
+
+
+def _local_dir(kind: str) -> str:
+  d = os.path.join(DATA_DIR, re.sub(r"[^\w\-]", "", kind))
+  os.makedirs(d, exist_ok=True)
+  return d
+
+
+def _clean(data):
+  return json.loads(json.dumps(data, default=str))
+
+
+def store_put(kind: str, rid: str, data: dict, local_copy: bool = True) -> bool:
+  """Save one record. Returns True if it reached permanent storage."""
+  data = _clean(data)
+  _bump(kind)
+  ok = False
+  if store_on():
+    try:
+      r = http().post(_supa_url(), timeout=10, json=[{"kind": kind, "id": rid, "data": data,
+                                                      "updated_at": datetime.now(timezone.utc).isoformat()}],
+                      headers=_supa_headers({"Prefer": "resolution=merge-duplicates,return=minimal"}))
+      ok = r.status_code < 300
+      if not ok:
+        _store_error(f"Saving {kind} failed: HTTP {r.status_code} {r.text[:200]}")
+    except requests.RequestException as e:
+      _store_error(f"Saving {kind} failed: {e}")
+  if not ok and local_copy:   # keep it on the temporary disk so nothing is lost this session
+    try:
+      with open(os.path.join(_local_dir(kind), re.sub(r"[^\w\-]", "", rid) + ".json"), "w", encoding="utf-8") as f:
+        json.dump({"id": rid, "data": data, "updated_at": datetime.now(timezone.utc).isoformat()}, f)
+    except OSError:
+      pass
+  return ok
+
+
+def store_get(kind: str, rid: str) -> dict | None:
+  if store_on():
+    try:
+      r = http().get(_supa_url(), headers=_supa_headers(), timeout=10,
+                     params={"kind": f"eq.{kind}", "id": f"eq.{rid}", "select": "data"})
+      if r.status_code == 200 and r.json():
+        return r.json()[0].get("data")
+    except (requests.RequestException, ValueError) as e:
+      _store_error(f"Loading {kind} failed: {e}")
+  try:
+    with open(os.path.join(_local_dir(kind), re.sub(r"[^\w\-]", "", rid) + ".json"), encoding="utf-8") as f:
+      return json.load(f).get("data")
+  except (OSError, ValueError):
+    return None
+
+
+def store_list(kind: str, limit: int = 200, where: dict | None = None) -> list[dict]:
+  """Newest first: [{"id", "data", "updated_at"}, ...]. `where` matches fields inside data exactly."""
+  return _store_list(kind, limit, json.dumps(where or {}, sort_keys=True), _store_versions().get(kind, 0), store_on())
+
+
+@st.cache_data(ttl=120, show_spinner=False, max_entries=300)
+def _store_list(kind: str, limit: int, where_json: str, ver: int, online: bool) -> list[dict]:
+  where = json.loads(where_json)
+  rows = []
+  if online:
+    params = {"kind": f"eq.{kind}", "select": "id,data,updated_at", "order": "updated_at.desc", "limit": str(limit)}
+    for k, v in where.items():
+      params[f"data->>{k}"] = f"eq.{v}"
+    try:
+      r = http().get(_supa_url(), headers=_supa_headers(), params=params, timeout=10)
+      if r.status_code == 200:
+        rows = r.json()
+      else:
+        _store_error(f"Listing {kind} failed: HTTP {r.status_code} {r.text[:200]}")
+    except (requests.RequestException, ValueError) as e:
+      _store_error(f"Listing {kind} failed: {e}")
+  seen = {r.get("id") for r in rows}
+  try:   # plus anything on the temporary disk (everything, when Supabase isn't set up)
+    d = _local_dir(kind)
+    for fn in os.listdir(d):
+      if fn.endswith(".json"):
+        try:
+          with open(os.path.join(d, fn), encoding="utf-8") as f:
+            rec = json.load(f)
+        except (OSError, ValueError):
+          continue
+        if rec.get("id") not in seen and all(str((rec.get("data") or {}).get(k, "")) == str(v) for k, v in where.items()):
+          rows.append(rec)
+  except OSError:
+    pass
+  rows.sort(key=lambda r: str(r.get("updated_at", "")), reverse=True)
+  return rows[:limit]
+
+
+def store_delete(kind: str, rid: str | None = None):
+  """Delete one record, or every record of this kind when rid is None."""
+  _bump(kind)
+  if store_on():
+    params = {"kind": f"eq.{kind}"}
+    if rid:
+      params["id"] = f"eq.{rid}"
+    try:
+      http().delete(_supa_url(), headers=_supa_headers(), params=params, timeout=10)
+    except requests.RequestException as e:
+      _store_error(f"Deleting {kind} failed: {e}")
+  try:
+    d = _local_dir(kind)
+    for fn in os.listdir(d):
+      if rid is None or fn == re.sub(r"[^\w\-]", "", rid) + ".json":
+        os.remove(os.path.join(d, fn))
+  except OSError:
+    pass
 
 
 def img_part(img: Image.Image) -> dict:
@@ -454,6 +621,20 @@ def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: b
 def team_names(draft: str, ds_draft: str, research: str) -> str:
   return " + ".join(x for x in ["🌐 Perplexity" if research else "", "✨ " + gemini_label() if draft or not has_claude() else "",
                                 "🐋 " + deepseek_label() if ds_draft else "", "🧠 " + claude_label() if (draft or ds_draft) and has_claude() else ""] if x)
+
+
+def quick_ai(prompt: str, image_b64="", max_tokens: int = 1500) -> tuple[str, str]:
+  """One AI, one answer: Claude if its key is set, otherwise Gemini. Returns (answer, who answered)."""
+  if has_claude():
+    try:
+      return claude(prompt, max_tokens=max_tokens, timeout=90, image_b64=image_b64), "🧠 " + claude_label()
+    except AIError:
+      pass   # fall through to Gemini
+  try:
+    parts = [{"text": prompt}] + [{"inline_data": {"mime_type": "image/jpeg", "data": b}} for b in _img_list(image_b64)]
+    return gemini(parts, timeout=60), "✨ " + gemini_label()
+  except AIError as e:
+    return f"⚠️ {e}", ""
 
 
 # --- VIN ---
@@ -774,26 +955,173 @@ def make_profile() -> str:
   return MAKE_PROFILES.get(ss.vehicle_make, "GENERIC")
 
 
+# --- RECALLS (NHTSA, free) ---
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=300)
+def nhtsa_recalls(make: str, model: str, year: str) -> list[dict]:
+  """Every recall for this year / make / model (not VIN-specific)."""
+  if not (make and model and str(year).isdigit()):
+    return []
+  try:
+    r = http().get("https://api.nhtsa.gov/recalls/recallsByVehicle",
+                   params={"make": make, "model": model, "modelYear": str(year)}, timeout=10)
+    r.raise_for_status()
+    return r.json().get("results") or []
+  except (requests.RequestException, ValueError):
+    return []
+
+
+def vehicle_recalls() -> list[dict]:
+  vd = ss.vehicle_details or {}
+  return nhtsa_recalls(str(vd.get("Make", "")), str(vd.get("Model", "")), str(vd.get("Model Year", "")))
+
+
+# --- JOBS (each car in the shop is a job, saved automatically) ---
+JOB_FIELDS = ["customer_name", "customer_phone", "customer_address", "vin_input", "active_vin", "vehicle_info", "vehicle_make",
+              "vehicle_details", "sel_codes", "manual_dtc", "symptoms", "ble_dtcs", "scan_data", "test_results", "dtc_result",
+              "scope_result", "chat_history", "tech_notes", "customer_summary", "fix_part", "fix_test", "fix_notes"]
+
+
+def job_snapshot() -> dict:
+  d = {k: ss.get(k) for k in JOB_FIELDS}
+  # photos stay out of storage (too big); the text of the chat is kept
+  d["chat_history"] = [{"role": m.get("role"), "content": m.get("content"), "photos_n": len(m.get("photos") or []) or m.get("photos_n", 0)}
+                       for m in (ss.get("chat_history") or [])][-40:]
+  return d
+
+
+def job_has_content(d: dict) -> bool:
+  return any(d.get(k) for k in ("customer_name", "vehicle_info", "sel_codes", "manual_dtc", "symptoms"))
+
+
+def job_codes(d: dict) -> str:
+  codes = list(d.get("sel_codes") or [])
+  codes += [c for c in re.split(r"[,\s;/]+", str(d.get("manual_dtc") or "").upper()) if DTC_RE.fullmatch(c) and c not in codes]
+  return ", ".join(codes)
+
+
+def autosave_job(force: bool = False):
+  snap = job_snapshot()
+  if not job_has_content(snap):
+    return
+  h = hashlib.md5(json.dumps(snap, sort_keys=True, default=str).encode()).hexdigest()
+  if h == ss.get("_job_hash") and not force:
+    return
+  if not ss.get("job_id"):
+    ss.job_id = "J" + datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + os.urandom(2).hex()
+    ss.job_created = datetime.now().strftime("%Y-%m-%d %I:%M %p")
+    ss.job_status = "open"
+    st.query_params["job"] = ss.job_id
+  snap.update(id=ss.job_id, status=ss.get("job_status") or "open", created=ss.get("job_created") or "",
+              updated=datetime.now().strftime("%Y-%m-%d %I:%M %p"), codes=job_codes(snap))
+  store_put("job", ss.job_id, snap)
+  ss._job_hash = h
+
+
+def load_job(jid: str) -> bool:
+  rec = store_get("job", jid)
+  if not rec:
+    return False
+  for k in JOB_FIELDS:
+    ss[k] = rec.get(k) if rec.get(k) is not None else copy.deepcopy(DEFAULTS.get(k, ""))
+  ss.job_id, ss.job_status, ss.job_created = jid, rec.get("status") or "open", rec.get("created") or ""
+  ss.ble_ai, ss.vin_error = None, ""
+  ss.job_n = ss.get("job_n", 0) + 1   # empties the photo boxes
+  ss._job_hash = hashlib.md5(json.dumps(job_snapshot(), sort_keys=True, default=str).encode()).hexdigest()
+  st.query_params["job"] = jid
+  return True
+
+
+def new_job():
+  for k in JOB_FIELDS:
+    ss[k] = copy.deepcopy(DEFAULTS.get(k, ""))
+  ss.job_id, ss.job_status, ss.job_created, ss._job_hash = None, "open", "", None
+  ss.ble_ai, ss.vin_error = None, ""
+  ss.job_n = ss.get("job_n", 0) + 1
+  if "job" in st.query_params:
+    del st.query_params["job"]
+
+
+# --- SHOP HISTORY: earlier visits + this shop's confirmed fixes, fed to the AI ---
+def vin_history(vin: str) -> list[dict]:
+  if not vin:
+    return []
+  fixes = {r["id"]: r.get("data") or {} for r in store_list("fix", 50, {"vin": vin})}
+  out = []
+  for r in store_list("job", 50, {"active_vin": vin}):
+    if r["id"] == ss.get("job_id"):
+      continue
+    d = r.get("data") or {}
+    f = fixes.get(r["id"]) or {}
+    out.append({"date": d.get("created") or d.get("updated", ""), "complaint": d.get("symptoms", ""), "codes": d.get("codes", ""),
+                "fix": f.get("fix", ""), "proved by": f.get("confirmed_by", ""), "notes": d.get("tech_notes", "")})
+  return out
+
+
+def similar_fixes(limit: int = 8) -> list[dict]:
+  vd = ss.vehicle_details or {}
+  make, model = str(vd.get("Make", "")).upper(), str(vd.get("Model", "")).upper()
+  if not (make and model):
+    return []
+  codes = set(current_codes())
+  rows = [r.get("data") or {} for r in store_list("fix", 100, {"make": make, "model": model}) if r["id"] != ss.get("job_id")]
+  rows.sort(key=lambda f: -len(codes & set(f.get("codes") or [])))   # same codes first
+  return rows[:limit]
+
+
+def shop_context() -> str:
+  """This shop's own history for the AI prompts ('' if there is none)."""
+  out = []
+  try:
+    visits = vin_history(ss.active_vin)
+    if visits:
+      out.append("EARLIER VISITS OF THIS SAME VEHICLE (VIN) TO THIS SHOP:")
+      out += [f"- {v['date']}: codes {v['codes'] or 'none'}; complaint: {v['complaint'] or '-'}; "
+              f"confirmed fix: {v['fix'] or 'not recorded'}" for v in visits[:5]]
+    fixes = similar_fixes()
+    if fixes:
+      out.append("THIS SHOP'S CONFIRMED FIXES ON THE SAME MAKE/MODEL (real repairs that were proven; weigh them heavily but still test):")
+      out += [f"- {f.get('vehicle', '')}: codes {', '.join(f.get('codes') or []) or 'none'}; "
+              f"complaint: {(f.get('complaint') or '-')[:120]} -> FIXED BY {f.get('fix')} (proved by: {f.get('confirmed_by') or '-'})"
+              for f in fixes]
+    recalls = vehicle_recalls()
+    if recalls:
+      out.append(f"NHTSA RECALLS FOR THIS YEAR/MAKE/MODEL ({len(recalls)}; may or may not be done on this VIN):")
+      out += [f"- {r.get('NHTSACampaignNumber', '')} {r.get('Component', '')}: {str(r.get('Summary', ''))[:220]}" for r in recalls[:6]]
+  except Exception as e:   # history is a bonus; never block a diagnosis over it
+    log_problem("storage", "Shop history for AI", str(e))
+  return ("\n\n" + "\n".join(out)) if out else ""
+
+
+def save_fix():
+  vd = ss.vehicle_details or {}
+  autosave_job(force=True)
+  if not ss.get("job_id"):
+    return False
+  rec = {"date": datetime.now().strftime("%Y-%m-%d"), "job": ss.job_id, "vin": ss.active_vin, "vehicle": ss.vehicle_info,
+         "make": str(vd.get("Make", "")).upper(), "model": str(vd.get("Model", "")).upper(), "year": str(vd.get("Model Year", "")),
+         "engine": str(vd.get("Displacement (L)") or vd.get("Engine") or ""), "codes": current_codes(),
+         "complaint": ss.symptoms.strip(), "fix": ss.fix_part.strip(), "confirmed_by": ss.fix_test.strip(), "notes": ss.fix_notes.strip()}
+  store_put("fix", ss.job_id, rec)
+  return True
+
+
 # --- LOG ---
 def append_to_log(vin: str, vehicle: str, dtc: str, customer: str = "", phone: str = ""):
-  new = not os.path.isfile(LOG_FILE)
-  try:
-    with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
-      w = csv.writer(f)
-      if new:
-        w.writerow(LOG_COLUMNS)
-      w.writerow([datetime.now().strftime("%Y-%m-%d %I:%M %p"), customer or "N/A", phone or "N/A",
-                  vin or "N/A", vehicle or "Unknown Vehicle", dtc or "N/A"])
-  except OSError:
-    pass
+  row = dict(zip(LOG_COLUMNS, [datetime.now().strftime("%Y-%m-%d %I:%M %p"), customer or "N/A", phone or "N/A",
+                               vin or "N/A", vehicle or "Unknown Vehicle", dtc or "N/A"]))
+  store_put("log", datetime.now().strftime("%Y%m%d%H%M%S%f"), row)
 
 
 def load_log() -> list[dict]:
-  try:
-    with open(LOG_FILE, encoding="utf-8") as f:
-      return list(csv.DictReader(f))[::-1]
-  except OSError:
-    return []
+  return [{c: (r.get("data") or {}).get(c, "") for c in LOG_COLUMNS} for r in store_list("log", 500)]
+
+
+def log_csv(rows: list[dict]) -> str:
+  b = io.StringIO()
+  w = csv.DictWriter(b, fieldnames=LOG_COLUMNS)
+  w.writeheader()
+  w.writerows(rows)
+  return b.getvalue()
 
 
 def context_bar():
@@ -803,17 +1131,111 @@ def context_bar():
   )
 
 
+# ========================================================
+# --- SHOP LOGIN (only when APP_PASSWORD is set in Streamlit Secrets) ---
+# ========================================================
+def require_password():
+  pw = secret("APP_PASSWORD")
+  if not pw:
+    return
+  token = hashlib.sha256(("tdg-login:" + pw).encode()).hexdigest()[:24]
+  if ss.get("_authed") == token or st.query_params.get("k") == token:
+    ss._authed = token
+    if st.query_params.get("k") != token:
+      st.query_params["k"] = token   # keeps this phone/computer logged in after a refresh (bookmark the page)
+    return
+  st.markdown("### 🔒 Shop login")
+  with st.form("login"):
+    entered = st.text_input("Password", type="password")
+    if st.form_submit_button("Log in", type="primary"):
+      if hashlib.sha256(entered.encode()).digest() == hashlib.sha256(pw.encode()).digest():
+        ss._authed = token
+        st.query_params["k"] = token
+        st.rerun()
+      st.error("Wrong password.")
+  st.stop()
+
+
+require_password()
+
 # Legacy links from the old "Sync" button (?ble_vin=...&ble_dtc=...): use once, then clear
 if "ble_vin" in st.query_params or "ble_dtc" in st.query_params:
   _qv = st.query_params.get("ble_vin", "").upper().strip()
   _qd = st.query_params.get("ble_dtc", "").upper().strip()
-  st.query_params.clear()
+  for _qk in ("ble_vin", "ble_dtc"):
+    if _qk in st.query_params:
+      del st.query_params[_qk]
   _upd = {}
   if VIN_RE.fullmatch(_qv) and load_vehicle(_qv):
     _upd["vin_input"] = _qv
   if _qd:
     _upd["manual_dtc"] = _qd
   queue_update(**_upd)
+
+
+# ========================================================
+# --- CARS IN THE SHOP (open jobs) ---
+# ========================================================
+if (_jr := ss.pop("_job_request", None)) is not None:
+  if _jr == "new":
+    new_job()
+  elif not load_job(_jr):
+    ss._toast = "Couldn't open that job."
+elif "job_id" not in ss:
+  ss.job_id = None
+  if _qj := st.query_params.get("job"):
+    if not load_job(_qj):   # e.g. the link is from before permanent storage was set up
+      del st.query_params["job"]
+ss.active_dtc = ", ".join(current_codes())
+
+
+def jobs_panel():
+  jobs = store_list("job", 60, {"status": "open"})
+  cur = ss.get("job_id")
+  now_on = f" · now: {ss.vehicle_info or ss.customer_name or 'new car'}" if job_has_content(job_snapshot()) else ""
+  with st.expander(f"🚗 Cars in the shop ({len(jobs)} open){now_on}", expanded=False):
+    if not store_on():
+      st.warning("⚠️ Permanent storage isn't set up yet, so jobs, the log and test drives are still erased when the app "
+                 "restarts or you update it. Add SUPABASE_URL and SUPABASE_KEY to Streamlit Secrets to fix this.")
+    elif ss.get("_store_err"):
+      st.warning(f"⚠️ Last save had a problem: {ss._store_err} (details in 📋 Log → 🐞 Problem log)")
+    st.caption("Every car is saved automatically as you work. Switch between cars here; refreshing the page keeps your place.")
+    c1, c2 = st.columns(2)
+    if c1.button("➕ Start a new car", use_container_width=True):
+      ss._job_request = "new"
+      st.rerun()
+    if cur and c2.button("✅ Close this job (car is done)", use_container_width=True):
+      ss.job_status = "closed"
+      autosave_job(force=True)
+      ss._job_request = "new"
+      ss._toast = "Job closed"
+      st.rerun()
+    for r in jobs:
+      d = r.get("data") or {}
+      a, b = st.columns([5, 1])
+      a.markdown(f"{'👉 ' if r['id'] == cur else ''}**{d.get('vehicle_info') or 'Vehicle not set'}** · {d.get('customer_name') or 'no name'}"
+                 f" · {d.get('codes') or 'no codes'}  \n<small>Started {d.get('created', '')} · updated {d.get('updated', '')}</small>",
+                 unsafe_allow_html=True)
+      if r["id"] != cur and b.button("Open", key=f"open_{r['id']}", use_container_width=True):
+        ss._job_request = r["id"]
+        st.rerun()
+    closed = store_list("job", 25, {"status": "closed"})
+    if closed:
+      pick = st.selectbox("Reopen a closed job", [r["id"] for r in closed], index=None, placeholder="Recently closed jobs…",
+                          format_func=lambda i: next(f"{(r.get('data') or {}).get('updated', '')} · "
+                                                     f"{(r.get('data') or {}).get('vehicle_info') or 'vehicle'} · "
+                                                     f"{(r.get('data') or {}).get('customer_name') or 'no name'}"
+                                                     for r in closed if r["id"] == i), key=f"reopen_{ss.get('job_n', 0)}")
+      if pick and st.button("↩️ Reopen it"):
+        rec = store_get("job", pick) or {}
+        rec["status"] = "open"
+        store_put("job", pick, rec)
+        ss._job_request = pick
+        st.rerun()
+
+
+with guard("Cars in the shop"):
+  jobs_panel()
 
 
 tab1, tab2, tab3, tab5 = st.tabs([
@@ -846,7 +1268,8 @@ with tab1, guard("VIN & Customer tab"):
              "straight from the car and needs no photo.)")
   col_up, col_cam = st.columns(2)
   with col_up:
-    uploaded = st.file_uploader("📷 Take or upload photo of the VIN", type=["png", "jpg", "jpeg", "webp"], key="vin_upload")
+    uploaded = st.file_uploader("📷 Take or upload photo of the VIN", type=["png", "jpg", "jpeg", "webp"],
+                                key=f"vin_upload_{ss.get('job_n', 0)}")
   with col_cam:
     photo = st.camera_input("In-app camera (lower resolution)") if st.toggle("Use in-app camera instead") else None
 
@@ -947,6 +1370,28 @@ with tab1, guard("VIN & Customer tab"):
     for i, (k, v) in enumerate(ss.vehicle_details.items()):
       (col1 if i % 2 == 0 else col2).write(f"**{k}:** {v}")
     st.caption(f"Bluetooth enhanced-PID profile: **{make_profile()}**")
+
+    # 🕘 Has this exact car been here before?
+    visits = vin_history(ss.active_vin)
+    if visits:
+      with st.expander(f"🕘 This car has been here before — {len(visits)} earlier visit(s)", expanded=True):
+        st.dataframe(visits, use_container_width=True, hide_index=True)
+        st.caption("The AI sees these visits and their confirmed fixes when it builds a test plan.")
+    elif ss.active_vin:
+      st.caption("🕘 First visit for this VIN.")
+
+    # ⚠️ Recalls for this year / make / model
+    recalls = vehicle_recalls()
+    if recalls:
+      with st.expander(f"⚠️ {len(recalls)} NHTSA recall(s) for the {ss.vehicle_details.get('Model Year', '')} "
+                       f"{ss.vehicle_details.get('Make', '')} {ss.vehicle_details.get('Model', '')}"):
+        st.caption("These cover every vehicle of this year/make/model. To see if THIS car's recalls are done, enter the VIN at "
+                   "nhtsa.gov/recalls or the maker's site.")
+        for r in recalls:
+          st.markdown(f"**{r.get('Component', '')}** · campaign {r.get('NHTSACampaignNumber', '')} · {r.get('ReportReceivedDate', '')}  \n"
+                      f"{r.get('Summary', '')}  \n_Fix: {r.get('Remedy', '')}_")
+    elif ss.vehicle_details.get("Model"):
+      st.caption("No NHTSA recalls found for this year/make/model.")
 
 # ========================================================
 # --- TAB 2: LIVE TELEMETRY, ENHANCED PIDS, MONITORS & MODE 06 ---
@@ -2590,11 +3035,39 @@ function showAi(text, label) {
 const BTN_IDS = ["pauseBtn", "driveBtn", "readBtn", "clearBtn", "aiBtn", "syncBtn", "modBtn"];
 const enableBtns = (on) => BTN_IDS.forEach((id) => { $(id).disabled = !on; });
 
-function onDisconnect() {
+// If the adapter drops (bumps, ignition flicker, phone hiccup), reconnect on our own and keep the test drive going.
+let reconnecting = false;
+async function onDisconnect() {
+  const wasLive = streaming || driveOn, wasDriving = driveOn;
   connected = false; stopStream(); enableBtns(false);
-  if (driveOn) { driveOn = false; $("driveBanner").style.display = "none"; wake(false); }
+  if (reconnecting) return;   // a retry below dropped again; the loop keeps trying
+  reconnecting = true;
+  $("bleBtn").disabled = true; $("bleBtn").textContent = "🔄 Reconnecting…";
+  logEvent("scanner", "Bluetooth", "Adapter disconnected" + (wasDriving ? " during a test drive" : ""));
+  if (wasDriving) { lastSpeak = 0; speak("Scanner connection lost. Reconnecting."); }
+  for (let i = 1; i <= 6; i++) {
+    log(`Adapter dropped — reconnecting (try ${i} of 6)…`);
+    await sleep(1000 + 1500 * i);
+    try {
+      await connectGatt();
+      if (await initVehicle()) {
+        connected = true; enableBtns(true);
+        $("bleBtn").textContent = "✅ Connected"; $("bleBtn").disabled = true;
+        log("Reconnected ✓"); logEvent("scanner", "Bluetooth", `Reconnected automatically on try ${i}`);
+        if (driveOn) { lastSpeak = 0; speak("Scanner reconnected."); }
+        if (wasLive) startStream();
+        reconnecting = false; return;
+      }
+    } catch (_) { /* adapter not back yet */ }
+  }
+  reconnecting = false;
+  if (driveOn) {   // give up: end the drive cleanly so everything recorded so far is saved
+    driveOn = false; $("driveBanner").style.display = "none"; $("driveBtn").textContent = "🚗 Test Drive Audio";
+    wake(false); stopDriveTests(); speak("Could not reconnect to the scanner. The test drive was saved.");
+  }
   $("bleBtn").textContent = "🔄 Reconnect"; $("bleBtn").disabled = false;
-  log("Adapter disconnected. Tap Reconnect.");
+  log("Couldn't reconnect on its own. Check the adapter is plugged in and the key is ON, then tap Reconnect.");
+  logEvent("scanner", "Bluetooth", "Automatic reconnect failed after 6 tries");
 }
 
 async function connectGatt() {
@@ -2864,6 +3337,12 @@ function renderTests() {
   if (testTab === "perf") body.innerHTML = perfHtml();
   if (EXTRA_HTML[testTab]) body.innerHTML = EXTRA_HTML[testTab]();
   drawTestPlots(); drawExtraPlots();
+  // redraw the plots once the page has its real width (they were coming up blank when drawn before layout)
+  if (!window._plotRO && window.ResizeObserver) {
+    let w = 0;
+    window._plotRO = new ResizeObserver(() => { if (body.clientWidth !== w) { w = body.clientWidth; try { drawTestPlots(); drawExtraPlots(); } catch (_) {} } });
+    window._plotRO.observe(body);
+  }
 }
 document.addEventListener("click", (e) => {
   const t = e.target.closest("[data-ttab]");
@@ -3281,6 +3760,8 @@ function drawTestPlots() {
     const pts = T.ft.bins ? T.ft.bins.pts : [];
     const dotAt = (x, y, col) => { g.fillStyle = col; g.beginPath(); g.arc(A.X(Math.min(100, x)), A.Y(Math.max(-30, Math.min(30, y))), 3, 0, 7); g.fill(); };
     pts.forEach((p) => { dotAt(p[0], p[1], c("--y")); if (p[2] != null) dotAt(p[0], p[2], c("--b")); });
+    if (!pts.length) { g.fillStyle = c("--muted"); g.font = "12px sans-serif"; g.textAlign = "center";
+      g.fillText("Tap Start recording — each dot is a trim reading (across = engine load %).", A.L + A.pw / 2, A.Y(0) - 10); g.font = "10px sans-serif"; }
     g.textAlign = "left";
     [["Bank 1", c("--y"), 0], ["Bank 2", c("--b"), 62]].forEach(([l, col, dx]) => { g.fillStyle = col; g.beginPath(); g.arc(A.L + 10 + dx, 15, 4, 0, 7); g.fill(); g.fillStyle = c("--muted"); g.fillText(l, A.L + 17 + dx, 18); });
   }
@@ -4134,13 +4615,9 @@ def handle_ble_event(ev: dict):
   elif ev.get("type") == "drive":
     rec = ev.get("record") or {}
     if rec.get("id"):
+      rec.setdefault("job", ss.get("job_id"))
       ss.setdefault("drives", {})[rec["id"]] = rec
-      try:
-        os.makedirs("drives", exist_ok=True)
-        with open(os.path.join("drives", re.sub(r"[^\w\-]", "", rec["id"]) + ".json"), "w", encoding="utf-8") as f:
-          json.dump(rec, f)
-      except OSError:
-        pass
+      store_put("drive", rec["id"], rec)
       ss.drive_pick = rec["id"]
       ss.drive_review_pending = rec["id"]   # the AI team reviews every drive automatically
       ss._toast = "Test drive saved — the AI team is reviewing it (📋 Log → 🚗 Test drive review)"
@@ -4180,6 +4657,7 @@ MODE $06 RESULTS (value [min..max]):
 
 GUIDED TEST RESULTS (fuel trim / VE / catalyst / charging / power & braking, if run):
 {json.dumps(ev.get('tests') or ss.test_results or {}) or 'none'}
+{shop_context()}
 
 DIAGNOSTIC TASK:
 1. Fuel control: total trim (STFT + LTFT) Bank 1 vs Bank 2; single- vs dual-bank pattern.
@@ -4225,13 +4703,13 @@ def scan_context() -> str:
   """Everything the scanner captured, for the AI prompts."""
   tests = ("\nGuided test results: " + json.dumps(ss.test_results)) if ss.test_results else ""
   if not ss.ble_dtcs and not ss.scan_data:
-    return "No scanner data (codes entered by hand)." + tests
+    return "No scanner data (codes entered by hand)." + tests + shop_context()
   sd = ss.scan_data or {}
   pids = json.dumps(sd.get("pids") or {}, indent=0) if sd.get("pids") else "not captured"
   return (f"Scanner codes: {_fmt_dtcs(ss.ble_dtcs)}\n"
           f"I/M readiness: {sd.get('readiness') or 'not read'}\n"
           f"Mode $06 results: {sd.get('mode6') or 'not read'}\n"
-          f"Live data snapshot at sync ({sd.get('at') or '?'}): {pids}" + tests)
+          f"Live data snapshot at sync ({sd.get('at') or '?'}): {pids}" + tests + shop_context())
 
 
 with tab3, guard("Diagnose tab"):
@@ -4309,11 +4787,13 @@ Format strictly using these Markdown sections:
 
 ### 5. Known Platform Pattern Failures & TSBs
 - Real-world failure patterns and TSBs for {vehicle} matching these symptoms.
+- Put any matching confirmed fix from THIS SHOP'S OWN HISTORY and any matching NHTSA recall first.
 """
     with st.status("Working on it...", expanded=False) as status:
       text, research, draft, ds_draft = team_answer(sym_prompt, vehicle, "", symptoms, use_web, status)
       status.update(label="Done", state="complete")
-    ss.dtc_result = {"title": f"Symptoms · {vehicle}", "text": text, "research": research, "draft": draft, "ds_draft": ds_draft}
+    ss.dtc_result = {"title": f"Symptoms · {vehicle}", "text": text, "research": research, "draft": draft, "ds_draft": ds_draft,
+                    "team": team_names(draft, ds_draft, research)}
 
   if lookup_clicked and codes:
     vehicle = ss.vehicle_info or "General OBD-II Vehicle"
@@ -4352,16 +4832,17 @@ Format strictly using these Markdown sections:
 
 ### 6. Known Platform Pattern Failures & TSBs
 - Real-world failure patterns for {vehicle} on this system.
+- Put any matching confirmed fix from THIS SHOP'S OWN HISTORY and any matching NHTSA recall first.
 """
     with st.status("Working on it...", expanded=False) as status:
       text, research, draft, ds_draft = team_answer(dtc_prompt, vehicle, code_str, symptoms, use_web, status)
       status.update(label="Done", state="complete")
-    ss.dtc_result = {"title": f"{code_str} · {vehicle}", "text": text, "research": research, "draft": draft, "ds_draft": ds_draft}
+    ss.dtc_result = {"title": f"{code_str} · {vehicle}", "text": text, "research": research, "draft": draft, "ds_draft": ds_draft,
+                    "team": team_names(draft, ds_draft, research)}
 
   if ss.dtc_result:  # stays on screen while you use other tabs
-    team = " + ".join(x for x in ["🌐 Perplexity" if ss.dtc_result.get("research") else "", "✨ " + gemini_label(),
-                                   "🐋 " + deepseek_label() if ss.dtc_result.get("ds_draft") else "",
-                                   "🧠 " + claude_label() if ss.dtc_result.get("draft") else ""] if x)
+    team = ss.dtc_result.get("team") or team_names(ss.dtc_result.get("draft", ""), ss.dtc_result.get("ds_draft", ""),
+                                                    ss.dtc_result.get("research", ""))
     with st.expander(f"📋 Test plan: {ss.dtc_result['title']} · {team}", expanded=True):
       st.markdown(ss.dtc_result["text"])
     if ss.dtc_result.get("draft"):
@@ -4466,7 +4947,7 @@ FORMAT STRICTLY AS:
   with st.expander("📷 Add photos to your question (wiring diagram, connector, part, scope, meter)",
                    expanded=bool(ss.get(f"chat_cam_on_{nkey}"))):
     chat_files = st.file_uploader("Take or upload photos (up to 4)", type=["png", "jpg", "jpeg", "webp"],
-                                  accept_multiple_files=True, key=f"chat_files_{nkey}") or []
+                                  accept_multiple_files=True, key=f"chat_files_{nkey}_{ss.get('job_n', 0)}") or []
     chat_cam = st.camera_input("Take a photo", key=f"chat_cam_{nkey}") if st.toggle("Use in-app camera instead", key=f"chat_cam_on_{nkey}") else None
     chat_imgs = []
     for f in ([chat_cam] if chat_cam else []) + list(chat_files):
@@ -4479,6 +4960,8 @@ FORMAT STRICTLY AS:
       st.image([im.convert("RGB") for im in chat_imgs], width=140)
       st.caption(f"{len(chat_imgs)} photo(s) will go with your next question. Gemini and Claude read them; DeepSeek works from your text.")
 
+  chat_quick = st.toggle("⚡ Quick answers — one AI, a few seconds (turn off to have the whole team check every answer)",
+                         value=True, key="chat_quick")
   user_question = st.chat_input("Ask a question (add photos above first if you want)" if not chat_imgs else
                                 f"Ask about the {len(chat_imgs)} photo(s) — e.g. 'Which wire is the 5V reference?'")
   if user_question:
@@ -4516,12 +4999,18 @@ The technician attached {len(photos_b64)} photo(s) with this question (wiring di
 Read them carefully: wire colors, pin/cavity numbers, splices, grounds, connector IDs, component names, readings on screen.
 Say what you can read in the photo, and say so plainly if part of it is too blurry or cut off to read.""" if photos_b64 else "")
     with st.chat_message("assistant"):
-      with st.status("Working on it...", expanded=False) as status:
-        reply, research, draft, ds_draft = team_answer(
-            chat_prompt, ss.vehicle_info or "General vehicle", code_str, ss.symptoms.strip(),
-            bool(ss.get("use_web", False) and secret("PERPLEXITY_API_KEY")), status, question=user_question, image_b64=photos_b64)
-        status.update(label="Done", state="complete")
-      st.caption(team_names(draft, ds_draft, research))
+      if chat_quick:
+        with st.spinner("Thinking..."):
+          reply, who = quick_ai(chat_prompt, image_b64=photos_b64, max_tokens=1500)
+        research = ""
+        st.caption(who + " · quick answer")
+      else:
+        with st.status("Working on it...", expanded=False) as status:
+          reply, research, draft, ds_draft = team_answer(
+              chat_prompt, ss.vehicle_info or "General vehicle", code_str, ss.symptoms.strip(),
+              bool(ss.get("use_web", False) and secret("PERPLEXITY_API_KEY")), status, question=user_question, image_b64=photos_b64)
+          status.update(label="Done", state="complete")
+        st.caption(team_names(draft, ds_draft, research))
       st.markdown(reply)
       if research:
         with st.expander("🌐 Sources Perplexity found"):
@@ -4536,14 +5025,9 @@ FSS_NAMES = {1: "CL", 2: "OL cold", 3: "OL decel", 4: "OL fault", 5: "CL O2 faul
 
 def load_drives() -> dict:
   drives = dict(ss.get("drives") or {})
-  try:
-    for fn in os.listdir("drives"):
-      if fn.endswith(".json") and fn[:-5] not in drives:
-        with open(os.path.join("drives", fn), encoding="utf-8") as f:
-          d = json.load(f)
-          drives[d.get("id", fn[:-5])] = d
-  except (OSError, ValueError):
-    pass
+  for r in store_list("drive", 40):
+    if r.get("id") and r["id"] not in drives and isinstance(r.get("data"), dict):
+      drives[r["id"]] = r["data"]
   return dict(sorted(drives.items(), key=lambda kv: kv[0], reverse=True))
 
 
@@ -4586,6 +5070,23 @@ def drive_text(rec: dict) -> str:
 # ========================================================
 # --- CUSTOMER / SHOP REPORT (shown at the bottom of the Diagnose tab) ---
 # ========================================================
+CUSTOMER_SUMMARY_PROMPT = """Write a short summary of this diagnosis for the CAR OWNER (not a mechanic).
+Vehicle: {vehicle}
+Customer's complaint: {complaint}
+Trouble codes: {codes}
+Test results: {tests}
+Technician's notes / recommendation: {notes}
+Repair done: {fix}
+Technician's diagnostic plan (for background only): {plan}
+
+RULES:
+- 4 to 7 short sentences in plain, friendly English. No jargon; if you must name a part, say what it does in a few words.
+- Cover: what we found, what it means for the car (safety, reliability, or cost of waiting), and what we recommend or already fixed.
+- Use ONLY the facts above. Do not invent findings, test results, prices or time estimates.
+- If the technician's notes give a recommendation, that is the recommendation. If nothing is confirmed yet, say more testing is needed.
+- No headings, no bullet points, no sign-off."""
+
+
 def build_report_html(notes: str) -> str:
   e = html_lib.escape
   d, vd = ss.ble_dtcs or {}, ss.vehicle_details or {}
@@ -4628,6 +5129,8 @@ pre{{white-space:pre-wrap;font-family:inherit;font-size:13px;background:#fafafa;
 <tr><th>Customer</th><td>{e(ss.customer_name or '')}</td><th>Phone</th><td>{e(ss.customer_phone or '')}</td></tr>
 <tr><th>Vehicle</th><td>{e(ss.vehicle_info or '')}</td><th>VIN</th><td>{e(ss.active_vin or 'not provided')}</td></tr>
 <tr><th>Engine</th><td>{e(eng)}</td><th>Complaint</th><td>{e(ss.symptoms or '')}</td></tr></table>
+{"<h2>What we found</h2><p style='font-size:15px;line-height:1.5'>" + e(ss.customer_summary).replace(chr(10), "<br>") + "</p>" if (ss.customer_summary or "").strip() else ""}
+{"<h2>Repair performed</h2><p><b>" + e(ss.fix_part) + "</b>" + ("<br>Verified by: " + e(ss.fix_test) if (ss.fix_test or "").strip() else "") + "</p>" if (ss.fix_part or "").strip() else ""}
 <h2>Trouble codes</h2><table><tr><th>Module</th><th>Code</th><th>Status</th></tr>{rows_codes}</table>
 {ff_html}
 <h2>Test results</h2><table><tr><th>Test</th><th>Result</th><th>Details</th></tr>{rows_tests}</table>
@@ -4644,9 +5147,40 @@ with tab3, guard("Diagnose tab"):
              "Open it on your phone and use Print → Save as PDF, or text it to the customer.")
   notes = st.text_area("Technician notes / recommendation (goes on the report):", key="tech_notes", height=80,
                        placeholder="e.g. Recommend replacing cylinder 3 ignition coil and spark plugs. Fuel trims normal after repair.")
+  _has_findings = bool(ss.dtc_result or ss.test_results or ss.tech_notes.strip() or ss.fix_part.strip() or current_codes())
+  if st.button("✍️ Write a plain-English summary for the customer", disabled=not _has_findings):
+    with st.spinner("Writing the customer summary..."):
+      _sum, _who = quick_ai(CUSTOMER_SUMMARY_PROMPT.format(
+          vehicle=ss.vehicle_info or "the vehicle", complaint=ss.symptoms.strip() or "not given", codes=", ".join(current_codes()) or "none",
+          tests=json.dumps(ss.test_results or {})[:2500], notes=ss.tech_notes.strip() or "none",
+          fix=(ss.fix_part.strip() + (f" (proved by: {ss.fix_test.strip()})" if ss.fix_test.strip() else "")) or "not done yet",
+          plan=(ss.dtc_result or {}).get("text", "")[:2500] or "none"), max_tokens=700)
+    if _sum.startswith("⚠️"):
+      st.error(_sum)
+    else:
+      ss.customer_summary = _sum.strip()
+  st.text_area("Customer summary (edit it as you like — it goes at the top of the report):", key="customer_summary", height=130,
+               placeholder="Tap the button above, or type your own summary for the customer.")
   _rep_name = re.sub(r"\W+", "_", ss.vehicle_info or "vehicle")
   st.download_button("🧾 Download report", data=build_report_html(notes).encode("utf-8"), mime="text/html",
                      file_name=f"report_{_rep_name}_{datetime.now():%Y%m%d}.html")
+
+  # ---------- 5. Confirmed fix ----------
+  st.write("---")
+  st.markdown("#### 5 · Confirmed fix (teaches the app)")
+  st.caption("When the car is fixed, write down what actually fixed it and the test that proved it. Next time a car like this "
+             "comes in, the AI sees your shop's real fixes first.")
+  f1, f2 = st.columns(2)
+  f1.text_input("What fixed it:", key="fix_part", placeholder="e.g. Replaced upstream O2 sensor (Bank 1 Sensor 1)")
+  f2.text_input("Test that proved it:", key="fix_test", placeholder="e.g. O2 now switching 0.1–0.9 V, total trims back within ±5%")
+  st.text_input("Extra notes (optional):", key="fix_notes", placeholder="e.g. Connector pin 3 was corroded too")
+  if st.button("💾 Save confirmed fix", type="primary", disabled=not (ss.fix_part.strip() and ss.vehicle_info)):
+    if save_fix():
+      st.success("Saved. It's now part of your shop's history for this car and for others like it.")
+    else:
+      st.error("Couldn't save the fix — add the vehicle or customer first.")
+  if not ss.vehicle_info:
+    st.caption("Set the vehicle on the VIN tab first.")
 
 # ========================================================
 # --- TAB 5: VEHICLE & DTC LOG ---
@@ -4684,20 +5218,22 @@ if ss.get("drive_review_pending"):
 
 with tab5, guard("Log tab"):
   st.subheader("📋 Vehicle Diagnostic Scan History")
-  st.caption("Logged automatically when the scanner syncs or you run a diagnostic tree. Note: on Streamlit Cloud this"
-             " file resets whenever the app restarts, so export it regularly.")
+  st.caption("Logged automatically when the scanner syncs or you run a diagnostic tree. " +
+             ("Saved permanently." if store_on() else "⚠️ Permanent storage isn't set up yet, so this resets when the app "
+                                                       "restarts — export it regularly."))
 
   history = load_log()
   if history:
-    st.dataframe(history, use_container_width=True)
+    q = st.text_input("🔎 Search the log (name, phone, VIN, vehicle or code):", key="log_search")
+    shown_rows = [r for r in history if q.strip().lower() in " ".join(str(v) for v in r.values()).lower()] if q.strip() else history
+    st.dataframe(shown_rows, use_container_width=True, hide_index=True)
     col_csv, col_del = st.columns(2)
     with col_csv:
-      with open(LOG_FILE, "rb") as f:
-        st.download_button("📥 Export Log to CSV", data=f.read(), file_name="diagnostic_scan_log.csv", mime="text/csv")
+      st.download_button("📥 Export Log to CSV", data=log_csv(history), file_name="diagnostic_scan_log.csv", mime="text/csv")
     with col_del:
       confirm = st.checkbox("Yes, delete all log entries")
       if st.button("🗑️ Clear Log History", disabled=not confirm):
-        os.remove(LOG_FILE)
+        store_delete("log")
         queue_update(toast="Log cleared")
   else:
     st.info("No vehicles or DTCs logged yet. Connect the scanner (Live Telemetry tab) or run a diagnostic tree (Diagnose tab) to start logging.")
@@ -4751,8 +5287,8 @@ with tab5, guard("Log tab"):
   st.write("---")
   st.subheader("🐞 Problem log")
   st.caption("Crashes, AI/API failures and Bluetooth scanner errors are saved here automatically. If something goes wrong, "
-             "describe it below, tap the copy icon on the report and paste it to Claude. (On Streamlit Cloud this log "
-             "resets when the app restarts, so copy it soon after the problem.)")
+             "describe it below, tap the copy icon on the report and paste it to Claude." +
+             ("" if store_on() else " (Until permanent storage is set up, this log resets when the app restarts, so copy it soon.)"))
   problems = load_problems()
   if problems:
     st.dataframe([{k: p.get(k, "") for k in ("time", "kind", "where", "message")} for p in problems[:50]], use_container_width=True)
@@ -4787,4 +5323,12 @@ with tab5, guard("Log tab"):
         os.remove(PROBLEM_LOG)
       except OSError:
         pass
+      store_delete("problem")
       queue_update(toast="Problem log cleared")
+
+
+# ========================================================
+# --- AUTOSAVE: the current car is saved after every change ---
+# ========================================================
+with guard("Autosave"):
+  autosave_job()
