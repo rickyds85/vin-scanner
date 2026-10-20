@@ -583,7 +583,8 @@ def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: b
     ds_prompt = full + ("\n\nNOTE: the technician attached photo(s) (scope, meter, wiring diagram or part) that you cannot see. "
                         "Work from the text; another technician is reading the photos." if _img_list(image_b64) else "")
     pool = ThreadPoolExecutor(max_workers=1)
-    ds_job = pool.submit(_deepseek_raw, secret("DEEPSEEK_API_KEY"), secret("DEEPSEEK_MODEL") or DEEPSEEK_DEFAULT_MODEL, http(),
+    # its own connection: the shared one isn't guaranteed safe while Gemini uses it at the same time
+    ds_job = pool.submit(_deepseek_raw, secret("DEEPSEEK_API_KEY"), secret("DEEPSEEK_MODEL") or DEEPSEEK_DEFAULT_MODEL, requests.Session(),
                          ds_prompt, tokens, 60 if fast else 120)
   try:
     parts = [{"text": full}] + [{"inline_data": {"mime_type": "image/jpeg", "data": b}} for b in _img_list(image_b64)]
@@ -788,16 +789,19 @@ def find_vin(img_bytes: bytes) -> dict:
 @st.cache_data(show_spinner=False, max_entries=20)
 def extract_customer(img_bytes: bytes) -> dict:
   img = ImageOps.exif_transpose(Image.open(io.BytesIO(img_bytes)))
-  raw = gemini(
-      [
-          {"text": "Read this work order / invoice. Extract ONLY the customer name, address and phone number."
-                   " Return a JSON object with keys 'customer_name', 'address', 'phone' (empty string if missing)."},
-          img_part(img),
-      ],
-      json_mode=True,
-      timeout=25,
-  )
-  return json.loads(raw)
+  ask = ("Read this work order / invoice. Extract ONLY the customer name, address and phone number."
+         " Return a JSON object with keys 'customer_name', 'address', 'phone' (empty string if missing).")
+  try:
+    return json.loads(gemini([{"text": ask}, img_part(img)], json_mode=True, timeout=25))
+  except (AIError, ValueError):
+    if not has_claude():
+      raise
+  # Gemini failed (quota, outage, bad answer): let Claude read it instead
+  txt = claude(ask + " Reply with the JSON only.", max_tokens=400, timeout=60, image_b64=img_part(img)["inline_data"]["data"])
+  m = re.search(r"\{.*\}", txt, re.S)
+  if not m:
+    raise ValueError("No customer details found in the AI's answer.")
+  return json.loads(m.group(0))
 
 
 @st.cache_data(ttl=7 * 86400, show_spinner=False, max_entries=500)
@@ -1342,20 +1346,22 @@ with tab1, guard("VIN & Customer tab"):
 
   with st.expander("🚗 No VIN? Enter the vehicle by hand", expanded=not ss.vehicle_details):
     this_year = datetime.now().year
+    _mk = f"_{ss.get('job_n', 0)}"   # fresh boxes for each new car; model box resets when year/make change
     m1, m2, m3 = st.columns(3)
     man_year = m1.selectbox("Year", [str(y) for y in range(this_year + 1, 1980, -1)], index=None, placeholder="Year",
-                            key="man_year")
-    man_make = m2.selectbox("Make", MANUAL_MAKES, index=None, placeholder="Make", key="man_make_sel")
+                            key=f"man_year{_mk}")
+    man_make = m2.selectbox("Make", MANUAL_MAKES, index=None, placeholder="Make", key=f"man_make_sel{_mk}")
     if man_make == "Other...":
-      man_make = m2.text_input("Type the make", key="man_make_other").strip().title()
+      man_make = m2.text_input("Type the make", key=f"man_make_other{_mk}").strip().title()
     model_list = models_for(man_make, int(man_year)) if man_year and man_make else []
     if model_list:
-      man_model = m3.selectbox("Model", model_list, index=None, placeholder="Model", key="man_model_sel")
+      man_model = m3.selectbox("Model", model_list, index=None, placeholder="Model",
+                               key=f"man_model_sel{_mk}_{man_year}_{man_make}")
     else:
-      man_model = m3.text_input("Model", key="man_model", placeholder="e.g. Accord")
+      man_model = m3.text_input("Model", key=f"man_model{_mk}_{man_year}_{man_make}", placeholder="e.g. Accord")
     m4, m5 = st.columns(2)
-    man_trim = m4.text_input("Submodel / trim (optional)", key="man_trim", placeholder="e.g. EX-L, LT, SR5")
-    man_engine = m5.text_input("Engine size (optional)", key="man_engine", placeholder="e.g. 2.4L, 5.3L V8")
+    man_trim = m4.text_input("Submodel / trim (optional)", key=f"man_trim{_mk}", placeholder="e.g. EX-L, LT, SR5")
+    man_engine = m5.text_input("Engine size (optional)", key=f"man_engine{_mk}", placeholder="e.g. 2.4L, 5.3L V8")
     ready = bool(man_year and man_make and man_model)
     if st.button("✅ Use this vehicle", disabled=not ready, type="primary"):
       set_manual_vehicle(man_year, man_make, (man_model or "").strip(), man_trim, man_engine)
@@ -1746,7 +1752,7 @@ function rawSend(cmd, timeoutMs) {
     buf = "";
     let t;
     const done = (out) => { clearTimeout(t); pending = null; traceAdd(cmd, out); resolve(out); };
-    t = setTimeout(() => done(buf), timeoutMs);
+    t = setTimeout(() => { staleReply = true; done(buf); }, timeoutMs);
     pending = done;
     const data = new TextEncoder().encode(cmd + "\r");
     const w = rxChar.properties.writeWithoutResponse && rxChar.writeValueWithoutResponse
@@ -1756,9 +1762,18 @@ function rawSend(cmd, timeoutMs) {
   });
 }
 // One command at a time on the wire
+// After a timeout the adapter may still be answering the old command. Wait for its ">" prompt (or a short
+// pause) and throw that late reply away, so it can't mix into the next command's answer.
+// (Don't send a bare "\r" to flush: on an ELM327 that REPEATS the last command.)
+let staleReply = false;
+async function drainStale(maxMs = 600) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < maxMs && !buf.includes(">")) await sleep(25);
+  buf = ""; staleReply = false;
+}
 function sendCmd(cmd, timeoutMs = 1000) {
   if (!rxChar) return Promise.resolve("");
-  const p = cmdChain.then(() => rawSend(cmd, timeoutMs));
+  const p = cmdChain.then(async () => { if (staleReply) await drainStale(); return rawSend(cmd, timeoutMs); });
   cmdChain = p.catch(() => {});
   return p;
 }
