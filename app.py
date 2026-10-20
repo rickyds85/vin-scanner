@@ -38,9 +38,27 @@ st.markdown(
 # --- CONSTANTS ---
 # ========================================================
 LOG_FILE = "scan_history.csv"
-APP_VERSION = "2026-10-19"
+APP_VERSION = "2026-10-20"
+WHATS_NEW = [
+    "Email or text the report to the customer (needs the email/text setup in Secrets)",
+    "Job photos: attach pictures to the job; they go on the customer report",
+    "Estimate builder with parts & labor totals on the report",
+    "Follow-up reminders: flag a job for a callback and see the list in the Log tab",
+    "Freeze frame vs. live comparison on the Diagnose tab",
+    "Battery & charging slip you can print for the customer",
+    "Waveform library: save known-good scope captures and compare against them",
+    "Drive cycle coach: a plan for incomplete monitors, and spoken alerts when one completes on a drive",
+    "Odometer field — saved with the job, the history and the report",
+    "Shop summary: cars, top codes, top fixes and comebacks by month",
+    "One-tap backup of everything in storage",
+    "Multiple logins with names (APP_USERS in Secrets) — the log shows who worked each car",
+    "NEW: 'Doesn't add up' alerts — tiles flag skewed sensors (temp disagreement, MAP vs BARO, low MAF, trims, PCM voltage drop)",
+    "NEW: Glitch catcher — stumbles, trim spikes and fuel-pressure drops are caught on a drive with a 20-second hi-res recording for the AI review",
+    "NEW: Factory codes now say what the sub-code means (C0031-11 → circuit short to ground)",
+    "NEW: Seal EVAP button (Mode $08) for smoke testing, and a cranking smoothness check that screens for a weak cylinder",
+]
 PROBLEM_LOG = "problem_log.jsonl"
-LOG_COLUMNS = ["Timestamp", "Customer", "Phone", "VIN", "Vehicle", "Fault Code (DTC)"]
+LOG_COLUMNS = ["Timestamp", "Customer", "Phone", "VIN", "Vehicle", "Fault Code (DTC)", "Tech"]
 VIN_RE = re.compile(r"[A-HJ-NPR-Z0-9]{17}")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 # Model can be changed without editing code: add GEMINI_MODEL = "..." to Streamlit Secrets.
@@ -71,6 +89,8 @@ DEFAULTS = {
     "man_make": "", "man_make_other": "", "man_model": "", "man_trim": "", "man_engine": "",
     "ble_ai": None, "ble_last_event": None, "ble_dtcs": {}, "test_results": {},
     "tech_notes": "", "customer_summary": "", "fix_part": "", "fix_test": "", "fix_notes": "",
+    "customer_email": "", "odometer": "", "estimate_rows": [], "follow_up_days": 0, "follow_up_note": "",
+    "follow_up_done": False, "drive_plan": "",
 }
 for _k, _v in DEFAULTS.items():
     ss.setdefault(_k, copy.deepcopy(_v))
@@ -789,8 +809,8 @@ def find_vin(img_bytes: bytes) -> dict:
 @st.cache_data(show_spinner=False, max_entries=20)
 def extract_customer(img_bytes: bytes) -> dict:
   img = ImageOps.exif_transpose(Image.open(io.BytesIO(img_bytes)))
-  ask = ("Read this work order / invoice. Extract ONLY the customer name, address and phone number."
-         " Return a JSON object with keys 'customer_name', 'address', 'phone' (empty string if missing).")
+  ask = ("Read this work order / invoice. Extract ONLY the customer name, address, phone number, email and odometer/mileage."
+         " Return a JSON object with keys 'customer_name', 'address', 'phone', 'email', 'odometer' (empty string if missing).")
   try:
     return json.loads(gemini([{"text": ask}, img_part(img)], json_mode=True, timeout=25))
   except (AIError, ValueError):
@@ -959,6 +979,76 @@ def make_profile() -> str:
   return MAKE_PROFILES.get(ss.vehicle_make, "GENERIC")
 
 
+# --- EMAIL & TEXT (optional; needs the setup in Secrets) ---
+def email_ready() -> bool:
+  return bool(secret("SMTP_USER") and secret("SMTP_PASSWORD"))
+
+
+def send_report_email(to: str, subject: str, body: str, html: str, filename: str) -> str:
+  """Send the report as an email attachment. Returns '' on success, or the error text."""
+  import smtplib
+  from email.message import EmailMessage
+  msg = EmailMessage()
+  shop = secret("SHOP_NAME") or "Your repair shop"
+  msg["Subject"], msg["From"], msg["To"] = subject, f"{shop} <{secret('SMTP_USER')}>", to
+  msg.set_content(body or "Your diagnostic report is attached. Open it on a phone or computer.")
+  msg.add_attachment(html.encode("utf-8"), maintype="text", subtype="html", filename=filename)
+  try:
+    with smtplib.SMTP_SSL(secret("SMTP_HOST") or "smtp.gmail.com", int(secret("SMTP_PORT") or "465"), timeout=20) as srv:
+      srv.login(secret("SMTP_USER"), secret("SMTP_PASSWORD"))
+      srv.send_message(msg)
+    return ""
+  except Exception as e:
+    log_problem("email", "Send report email", str(e))
+    return str(e)
+
+
+def sms_ready() -> bool:
+  return bool(secret("TWILIO_SID") and secret("TWILIO_TOKEN") and secret("TWILIO_FROM"))
+
+
+def send_sms(to: str, body: str) -> str:
+  """Text the customer via Twilio. Returns '' on success, or the error text."""
+  digits = re.sub(r"\D", "", to or "")
+  if len(digits) == 10:
+    digits = "1" + digits
+  if len(digits) < 11:
+    return "That phone number doesn't look complete."
+  sid = secret("TWILIO_SID")
+  try:
+    r = http().post(f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json",
+                    auth=(sid, secret("TWILIO_TOKEN")),
+                    data={"From": secret("TWILIO_FROM"), "To": "+" + digits, "Body": body[:1500]}, timeout=15)
+  except requests.RequestException as e:
+    log_problem("sms", "Send text", str(e))
+    return str(e)
+  if r.status_code >= 300:
+    log_problem("sms", "Send text", f"HTTP {r.status_code}: {r.text[:200]}")
+    return f"HTTP {r.status_code}: {r.text[:200]}"
+  return ""
+
+
+def record_sent(how: str, to: str, what: str):
+  store_put("sent", datetime.now().strftime("%Y%m%d%H%M%S%f"),
+            {"how": how, "to": to, "what": what, "job": ss.get("job_id"), "vehicle": ss.vehicle_info,
+             "tech": ss.get("tech_user") or "", "at": datetime.now().strftime("%Y-%m-%d %I:%M %p")}, local_copy=False)
+
+
+# --- JOB PHOTOS & WAVEFORM LIBRARY ---
+def shrink_to_b64(data: bytes, max_side: int = 1200, quality: int = 80) -> str:
+  img = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
+  img.thumbnail((max_side, max_side))
+  b = io.BytesIO()
+  img.save(b, format="JPEG", quality=quality)
+  return base64.b64encode(b.getvalue()).decode()
+
+
+def job_photos() -> list[dict]:
+  if not ss.get("job_id"):
+    return []
+  return [dict(r.get("data") or {}, _id=r["id"]) for r in store_list("jobphoto", 12, {"job": ss.job_id})]
+
+
 # --- RECALLS (NHTSA, free) ---
 @st.cache_data(ttl=86400, show_spinner=False, max_entries=300)
 def nhtsa_recalls(make: str, model: str, year: str) -> list[dict]:
@@ -982,7 +1072,8 @@ def vehicle_recalls() -> list[dict]:
 # --- JOBS (each car in the shop is a job, saved automatically) ---
 JOB_FIELDS = ["customer_name", "customer_phone", "customer_address", "vin_input", "active_vin", "vehicle_info", "vehicle_make",
               "vehicle_details", "sel_codes", "manual_dtc", "symptoms", "ble_dtcs", "scan_data", "test_results", "dtc_result",
-              "scope_result", "chat_history", "tech_notes", "customer_summary", "fix_part", "fix_test", "fix_notes"]
+              "scope_result", "chat_history", "tech_notes", "customer_summary", "fix_part", "fix_test", "fix_notes",
+              "customer_email", "odometer", "estimate_rows", "follow_up_days", "follow_up_note", "follow_up_done"]
 
 
 def job_snapshot() -> dict:
@@ -1016,6 +1107,7 @@ def autosave_job(force: bool = False):
     ss.job_status = "open"
     st.query_params["job"] = ss.job_id
   snap.update(id=ss.job_id, status=ss.get("job_status") or "open", created=ss.get("job_created") or "",
+              tech=ss.get("tech_user") or "",
               updated=datetime.now().strftime("%Y-%m-%d %I:%M %p"), codes=job_codes(snap))
   store_put("job", ss.job_id, snap)
   ss._job_hash = h
@@ -1056,7 +1148,8 @@ def vin_history(vin: str) -> list[dict]:
       continue
     d = r.get("data") or {}
     f = fixes.get(r["id"]) or {}
-    out.append({"date": d.get("created") or d.get("updated", ""), "complaint": d.get("symptoms", ""), "codes": d.get("codes", ""),
+    out.append({"date": d.get("created") or d.get("updated", ""), "miles": d.get("odometer", ""),
+                "complaint": d.get("symptoms", ""), "codes": d.get("codes", ""),
                 "fix": f.get("fix", ""), "proved by": f.get("confirmed_by", ""), "notes": d.get("tech_notes", "")})
   return out
 
@@ -1104,6 +1197,7 @@ def save_fix():
   rec = {"date": datetime.now().strftime("%Y-%m-%d"), "job": ss.job_id, "vin": ss.active_vin, "vehicle": ss.vehicle_info,
          "make": str(vd.get("Make", "")).upper(), "model": str(vd.get("Model", "")).upper(), "year": str(vd.get("Model Year", "")),
          "engine": str(vd.get("Displacement (L)") or vd.get("Engine") or ""), "codes": current_codes(),
+         "odometer": ss.odometer.strip(), "tech": ss.get("tech_user") or "",
          "complaint": ss.symptoms.strip(), "fix": ss.fix_part.strip(), "confirmed_by": ss.fix_test.strip(), "notes": ss.fix_notes.strip()}
   store_put("fix", ss.job_id, rec)
   return True
@@ -1112,7 +1206,7 @@ def save_fix():
 # --- LOG ---
 def append_to_log(vin: str, vehicle: str, dtc: str, customer: str = "", phone: str = ""):
   row = dict(zip(LOG_COLUMNS, [datetime.now().strftime("%Y-%m-%d %I:%M %p"), customer or "N/A", phone or "N/A",
-                               vin or "N/A", vehicle or "Unknown Vehicle", dtc or "N/A"]))
+                               vin or "N/A", vehicle or "Unknown Vehicle", dtc or "N/A", ss.get("tech_user") or ""]))
   store_put("log", datetime.now().strftime("%Y%m%d%H%M%S%f"), row)
 
 
@@ -1138,29 +1232,53 @@ def context_bar():
 # ========================================================
 # --- SHOP LOGIN (only when APP_PASSWORD is set in Streamlit Secrets) ---
 # ========================================================
+def shop_users() -> dict:
+  """password -> name. APP_USERS = "Ricky:pass1, Joe:pass2" in Secrets; or the single APP_PASSWORD."""
+  users = {}
+  for part in (secret("APP_USERS") or "").split(","):
+    if ":" in part:
+      name, _, pw = part.strip().partition(":")
+      if name.strip() and pw.strip():
+        users[pw.strip()] = name.strip()
+  if secret("APP_PASSWORD"):
+    users.setdefault(secret("APP_PASSWORD"), "Shop")
+  return users
+
+
 def require_password():
-  pw = secret("APP_PASSWORD")
-  if not pw:
+  users = shop_users()
+  if not users:
     return
-  token = hashlib.sha256(("tdg-login:" + pw).encode()).hexdigest()[:24]
-  if ss.get("_authed") == token or st.query_params.get("k") == token:
-    ss._authed = token
-    if st.query_params.get("k") != token:
-      st.query_params["k"] = token   # keeps this phone/computer logged in after a refresh (bookmark the page)
+  tokens = {hashlib.sha256(("tdg-login:" + pw).encode()).hexdigest()[:24]: name for pw, name in users.items()}
+  seen = ss.get("_authed") or st.query_params.get("k")
+  if seen in tokens:
+    ss._authed = seen
+    ss.tech_user = tokens[seen]
+    if st.query_params.get("k") != seen:
+      st.query_params["k"] = seen   # keeps this phone/computer logged in after a refresh (bookmark the page)
     return
   st.markdown("### 🔒 Shop login")
   with st.form("login"):
     entered = st.text_input("Password", type="password")
     if st.form_submit_button("Log in", type="primary"):
-      if hashlib.sha256(entered.encode()).digest() == hashlib.sha256(pw.encode()).digest():
-        ss._authed = token
-        st.query_params["k"] = token
+      match = next((pw for pw in users if hashlib.sha256(entered.encode()).digest() == hashlib.sha256(pw.encode()).digest()), None)
+      if match:
+        tok = hashlib.sha256(("tdg-login:" + match).encode()).hexdigest()[:24]
+        ss._authed, ss.tech_user = tok, users[match]
+        st.query_params["k"] = tok
         st.rerun()
       st.error("Wrong password.")
   st.stop()
 
 
 require_password()
+
+if ss.get("_seen_version") != APP_VERSION:
+  ss._seen_version = APP_VERSION
+  st.toast(f"✅ Running version {APP_VERSION} — see 🆕 What's new at the top")
+
+with st.expander(f"🆕 What's new — version {APP_VERSION}"):
+  st.markdown("\n".join(f"- {w}" for w in WHATS_NEW))
 
 # Legacy links from the old "Sync" button (?ble_vin=...&ble_dtc=...): use once, then clear
 if "ble_vin" in st.query_params or "ble_dtc" in st.query_params:
@@ -1260,9 +1378,11 @@ with tab1, guard("VIN & Customer tab"):
   with col_c1:
     st.text_input("Customer Name:", key="customer_name", placeholder="e.g. ROTAE LLC")
     st.text_input("Phone Number:", key="customer_phone", placeholder="e.g. 678-365-2146")
+    st.text_input("Email (for sending the report):", key="customer_email", placeholder="e.g. name@gmail.com")
   with col_c2:
     st.text_area("Address:", key="customer_address", height=108,
                  placeholder="e.g. 6428 DAWSON BLVD, STE 1730, NORCROSS, GA, 30093")
+    st.text_input("Odometer (miles):", key="odometer", placeholder="e.g. 163,420")
 
   st.write("---")
   st.markdown("#### 📸 VIN from a photo")
@@ -1324,7 +1444,8 @@ with tab1, guard("VIN & Customer tab"):
         st.error(f"Couldn't read customer details: {e}")
       else:
         upd = {k: str(info.get(j, "")).strip() for k, j in
-               (("customer_name", "customer_name"), ("customer_address", "address"), ("customer_phone", "phone"))
+               (("customer_name", "customer_name"), ("customer_address", "address"), ("customer_phone", "phone"),
+                ("customer_email", "email"), ("odometer", "odometer"))
                if str(info.get(j, "")).strip()}
         if upd:
           queue_update(toast="Customer info updated", **upd)
@@ -1451,6 +1572,10 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
   .tsteps { color:var(--muted); font-size:.85rem; line-height:1.5; margin:4px 0 8px; }
   .tnum { font-size:1.6rem; font-weight:700; }
   canvas.tplot { width:100%; height:180px; display:block; background:var(--card); border:1px solid var(--line); border-radius:6px; }
+  .tile.warn { border-color: var(--r) !important; animation: plpulse 1.2s ease-in-out infinite; }
+  @keyframes plpulse { 0%,100% { box-shadow: 0 0 0 0 rgba(255,70,70,.0); } 50% { box-shadow: 0 0 8px 1px rgba(255,70,70,.55); } }
+  #plausBox { display:none; margin:6px 0 10px; padding:8px 10px; border:1px solid var(--r); border-radius:6px; background:rgba(255,60,60,.07); font-size:.84rem; line-height:1.45; }
+  #plausBox b { color: var(--r); }
   #graphs { margin-bottom:12px; }
   .gbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px; font-size:.8rem; color:var(--muted); }
   .gbar button { padding:4px 10px; font-size:.78rem; background:var(--card); color:var(--w); border:1px solid var(--line); }
@@ -1471,6 +1596,7 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
     <button id="driveBtn" disabled>🚗 Test Drive Audio</button>
     <button id="readBtn" disabled>🔎 Re-read Codes</button>
     <button id="clearBtn" disabled>🗑️ Clear Codes</button>
+    <button id="evapBtn" disabled title="Commands the ECM to seal the EVAP system for a smoke test (Mode $08)">💨 Seal EVAP</button>
     <button id="aiBtn" disabled>🤖 AI Check</button>
     <button id="modBtn" disabled>🧭 Scan All Modules</button>
     <button id="syncBtn" disabled>📋 Send VIN &amp; Codes to App</button>
@@ -1497,6 +1623,7 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
   <div id="modBox" class="box">Not scanned yet.</div>
 
   <h3 style="color:var(--g)">📈 LIVE DATA (MODE 01) <span id="rate" class="note"></span></h3>
+  <div id="plausBox"></div>
   <div id="graphs">
     <div class="gbar" id="gbar">📈 Tap any reading to graph it live (up to 4 at once).</div>
     <div id="charts"></div>
@@ -2626,13 +2753,31 @@ function oemTile(sig) {
   sig.tile = id; oemFound++;
   return id;
 }
-async function readOem(cmd) {
+// Factory (enhanced) request to one module.
+//  - A real answer wins even if a "busy" (7F xx 78) came with it.
+//  - 7F xx 78 = "busy, answer coming": wait longer instead of giving up.
+//  - 7F 22 7E / 7F = "not allowed in this session": open the extended diagnostic session (10 03) on that
+//    module once and try again. 7F xx 31 (not supported) and 7F xx 33 (security locked) are left alone.
+const extSession = {};   // header -> true (opened OK) / false (module refused it, don't try again)
+async function readOem(cmd, retry = true) {
   await setAddr(cmd.hdr, cmd.rax);
-  const msgs = messages(await sendCmd(cmd.req, 500));
-  if (msgs.some((m) => m.startsWith("7F"))) return { bytes: null, replied: true };   // module there, request refused
   const pre = respCode(cmd.req.slice(0, 2)) + cmd.req.slice(2);
+  const nrc = (ms) => { const m = ms.find((x) => x.startsWith("7F")); return m ? m.slice(4, 6) : ""; };
+  let msgs = messages(await sendCmd(cmd.req, 500));
+  if (!msgs.some((m) => m.startsWith(pre)) && nrc(msgs) === "78") msgs = messages(await sendCmd(cmd.req, 2500));
   for (const m of msgs) if (m.startsWith(pre)) return { bytes: bytesOf(m.slice(pre.length)), replied: true };
-  return { bytes: null, replied: msgs.length > 0 };
+  const code = nrc(msgs);
+  if (retry && cmd.req.startsWith("22") && (code === "7E" || code === "7F") && extSession[cmd.hdr] !== false) {
+    const r = messages(await sendCmd("1003", 1500));
+    const ok = r.some((m) => m.startsWith("5003"));
+    if (!ok && extSession[cmd.hdr] !== true) extSession[cmd.hdr] = false;
+    if (ok) {   // (sessions time out after a few seconds, so this can repeat on later passes; only log the first)
+      if (extSession[cmd.hdr] !== true) logEvent("scanner", "Extended session", `Opened 10 03 on module ${cmd.hdr} for ${cmd.req}`);
+      extSession[cmd.hdr] = true;
+      return readOem(cmd, false);
+    }
+  }
+  return { bytes: null, replied: msgs.length > 0 };   // any reply (even a refusal) means the module is there
 }
 async function pollEnhanced() {
   const fresh = oemCmds.filter((c) => c.state === "new").slice(0, 6);      // discovery: probe a few new requests
@@ -2749,6 +2894,21 @@ function moduleList() {
     return m;
   });
 }
+const FTB_TEXT = {
+  "01": "general electrical failure", "02": "general signal failure", "04": "internal system failure", "07": "mechanical failure",
+  "11": "circuit short to ground", "12": "circuit short to battery", "13": "circuit open",
+  "14": "short to ground or open", "15": "short to battery or open", "16": "voltage below threshold", "17": "voltage above threshold",
+  "1C": "voltage out of range", "1F": "circuit intermittent",
+  "23": "signal stuck low", "24": "signal stuck high", "29": "signal invalid", "2F": "signal erratic", "31": "no signal",
+  "41": "checksum failure", "42": "memory failure", "49": "internal electronic failure", "4B": "over temperature",
+  "64": "signal plausibility failure (reading doesn't match the others)",
+  "71": "actuator stuck", "72": "actuator stuck open", "73": "actuator stuck closed", "77": "commanded position not reachable",
+  "78": "alignment or adjustment incorrect", "7A": "fluid leak or seal failure", "7B": "fluid level low",
+  "81": "invalid serial data received", "87": "missing message (lost communication)", "88": "bus off (module quit talking)",
+  "92": "performance / incorrect operation", "93": "no operation", "94": "unexpected operation",
+  "96": "component internal failure", "97": "operation obstructed or blocked", "98": "component over temperature",
+};
+function ftbText(code) { const m = /-([0-9A-F]{2})$/.exec(code || ""); return m ? FTB_TEXT[m[1]] || "" : ""; }
 function decodeDtc3(h) {   // 2-byte DTC + optional failure-type byte
   const base = decodeDtc(h.slice(0, 4)), ftb = h.slice(4, 6);
   return ftb && ftb !== "00" ? base + "-" + ftb : base;
@@ -2762,7 +2922,8 @@ function udsStatus(st) {
 async function askModule(mod, req, timeout) {
   await setAddr(mod.hdr, mod.rax);
   let msgs = messages(await sendCmd(req, timeout));
-  if (msgs.some((m) => /^7F..78/.test(m))) msgs = messages(await sendCmd(req, 2000));   // "busy, wait" -> ask again
+  // "busy, wait" (7F xx 78) with no real answer yet -> ask again with a longer wait
+  if (msgs.some((m) => /^7F..78/.test(m)) && !msgs.some((m) => !m.startsWith("7F"))) msgs = messages(await sendCmd(req, 2000));
   return msgs;
 }
 async function readModuleCodes(mod) {
@@ -2831,7 +2992,7 @@ function renderModules(done, total) {
   if (!modResults.length) { $("modBox").textContent = total ? "Scanning…" : "No modules answered."; return; }
   $("modBox").innerHTML = modResults.map((m, i) => {
     const chips = m.codes.length
-      ? m.codes.map((c) => `<span class="chip" title="${c.status}" style="color:var(--${color[c.status]});border-color:var(--${color[c.status]})">${esc(c.code)}<span style="font-weight:400;font-size:.7rem"> ${c.status}</span></span>`).join("")
+      ? m.codes.map((c) => `<span class="chip" title="${c.status}${ftbText(c.code) ? " · " + ftbText(c.code) : ""}" style="color:var(--${color[c.status]});border-color:var(--${color[c.status]})">${esc(c.code)}<span style="font-weight:400;font-size:.7rem"> ${c.status}${ftbText(c.code) ? " · " + ftbText(c.code) : ""}</span></span>`).join("")
       : `<span style="color:var(--g)">${m.unsupported ? "answered, but codes not readable with generic commands" : "no codes"}</span>`;
     const clr = m.codes.length && m.proto ? `<button data-clrmod="${i}" style="padding:3px 8px;font-size:.72rem;background:var(--card);color:var(--r);border:1px solid var(--r)">Clear</button>` : "";
     return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:5px 0;border-bottom:1px solid var(--line)">
@@ -2997,7 +3158,105 @@ function inDecel() {
 }
 function trimsTrustworthy() { return closedLoop() && !inDecel(); }
 
+// ===================== Plausibility engine: flags readings that can't be right =====================
+// Each rule must hold for 5 s straight to appear and stays listed 30 s, so nothing flickers.
+const PL = {};   // rule id -> { since, until, text, tiles }
+function plRule(id, active, text, tiles) {
+  const t = nowS();
+  if (active) {
+    PL[id] = PL[id] || { since: t };
+    PL[id].text = text; PL[id].tiles = tiles || [];
+    if (t - PL[id].since >= 5) PL[id].until = t + 30;
+  } else if (PL[id] && !PL[id].until) delete PL[id];
+  else if (PL[id] && t > PL[id].until) delete PL[id];
+}
+const frsh = (k, maxAge = 8) => num[k] != null && numT[k] != null && nowS() - numT[k] < maxAge;
+function plausibility() {
+  const rpm = frsh("rpm") ? num.rpm : null, spd = num.spd ?? 0;
+  const L = engineLiters();
+  // --- Key on, engine off ---
+  const koeo = rpm === 0;
+  const coldish = (num.ect ?? 999) < 125 && (num.iat ?? 999) < 125;   // sensors should agree only on a cool engine
+  plRule("tempskew", koeo && coldish && frsh("ect", 20) && frsh("iat", 20) && Math.abs(num.ect - num.iat) > 15,
+         `<b>Temperature sensors disagree</b>: coolant ${Math.round(num.ect ?? 0)}°F vs intake air ${Math.round(num.iat ?? 0)}°F with the engine off and cool — ` +
+         `one is skewed (ignore if the engine ran in the last few hours).`, ["ect", "iat"]);
+  plRule("aatskew", koeo && coldish && frsh("aat", 20) && frsh("iat", 20) && Math.abs(num.aat - num.iat) > 20,
+         `<b>Ambient vs intake air temp</b> differ by ${Math.round(Math.abs(num.aat - num.iat))}°F on a cool engine — one sensor is likely skewed.`, ["aat", "iat"]);
+  plRule("mapskew", koeo && frsh("map", 20) && frsh("baro", 20) && Math.abs(num.map - num.baro * 0.4912) > 0.8,
+         `<b>MAP vs barometric pressure</b>: engine off, MAP should equal BARO. MAP ${(num.map ?? 0).toFixed(1)} PSI vs BARO ` +
+         `${((num.baro ?? 0) * 0.4912).toFixed(1)} PSI — the MAP sensor (or BARO) is skewed.`, ["map", "baro"]);
+  // --- Hot idle ---
+  const hotIdle = rpm != null && rpm >= 550 && rpm <= 950 && (num.ect ?? 0) >= 175 && spd < 1;
+  plRule("mafidle", hotIdle && L && frsh("maf") && num.maf > 0 && num.maf < 0.6 * L,
+         `<b>MAF reads low</b>: ${(num.maf ?? 0).toFixed(1)} g/s at hot idle on a ${L.toFixed(1)}L engine (expect roughly ${(0.9 * L).toFixed(1)}–${(1.4 * L).toFixed(1)}). ` +
+         `Dirty/under-reporting MAF or unmetered air after the sensor — check it against the fuel trims.`, ["maf"]);
+  plRule("trimidle", hotIdle && trimsTrustworthy() && frsh("stft1") && Math.abs((num.stft1 ?? 0) + (num.ltft1 ?? 0)) > 10,
+         `<b>Fuel trim off at idle</b>: Bank 1 total ${(((num.stft1 ?? 0) + (num.ltft1 ?? 0))).toFixed(0)}% ` +
+         `(${(num.stft1 ?? 0) + (num.ltft1 ?? 0) > 0 ? "lean — vacuum leak, low fuel delivery, under-reporting MAF" : "rich — leaking injector, fuel pressure high, MAF over-reporting"}).`,
+         ["stft1", "ltft1"]);
+  plRule("trimidle2", hotIdle && trimsTrustworthy() && frsh("stft2") && Math.abs((num.stft2 ?? 0) + (num.ltft2 ?? 0)) > 10,
+         `<b>Fuel trim off at idle</b>: Bank 2 total ${(((num.stft2 ?? 0) + (num.ltft2 ?? 0))).toFixed(0)}%.`, ["stft2", "ltft2"]);
+  // --- Any time the engine is running ---
+  plRule("pcmdrop", rpm != null && rpm > 500 && frsh("volt") && frsh("cmv") && Math.abs(num.volt - num.cmv) > 0.5,
+         `<b>Voltage drop to the PCM</b>: adapter sees ${(num.volt ?? 0).toFixed(1)} V but the PCM reports ${(num.cmv ?? 0).toFixed(1)} V — ` +
+         `check PCM power and ground circuits (voltage-drop test them).`, ["volt", "cmv"]);
+  // render
+  const act = Object.values(PL).filter((r) => r.until);
+  const box = $("plausBox");
+  const flagged = new Set(act.flatMap((r) => r.tiles || []));
+  for (const el of document.querySelectorAll(".tile.warn")) if (!flagged.has(el.id.slice(2))) el.classList.remove("warn");
+  for (const id of flagged) { const el = $("t_" + id); if (el) el.classList.add("warn"); }
+  if (!act.length) { box.style.display = "none"; return; }
+  box.style.display = "block";
+  box.innerHTML = "⚠️ <b>Doesn't add up:</b><br>" + act.map((r) => "• " + r.text).join("<br>");
+}
+function plausNow() { return Object.values(PL).filter((r) => r.until).map((r) => r.text.replace(/<[^>]+>/g, "")); }
+
+// ===================== Glitch catcher: hi-res window around a stumble =====================
+const GB = [];   // ring buffer, ~1 entry per live-data pass, last 25 s
+const GB_KEYS = ["rpm", "spd", "tps", "load", "stft1", "ltft1", "map", "maf", "frp", "volt"];
+let glitchCool = {};
+function glitchTick() {
+  const t = nowS();
+  GB.push([t, ...GB_KEYS.map((k) => (frsh(k, 6) ? r2(num[k]) : null))]);
+  while (GB.length && t - GB[0][0] > 25) GB.shift();
+  if (!driveOn) return;
+  const back = (secs, key) => {
+    const i = GB_KEYS.indexOf(key) + 1;
+    for (let j = GB.length - 1; j >= 0; j--) if (t - GB[j][0] >= secs) return GB[j][i];
+    return null;
+  };
+  const fire = (kind, text) => {
+    if (glitchCool[kind] && t - glitchCool[kind] < 30) return;
+    glitchCool[kind] = t;
+    lastSpeak = 0; speak(text);
+    logEvent("glitch", "Glitch catcher", text);
+    setTimeout(() => {   // give it 5 more seconds, then attach the hi-res window to the saved alert
+      if (REC && REC.status === "recording") {
+        const a = [...REC.alerts].reverse().find((x) => x.text === text && !x.win);
+        if (a) a.win = glitchWindow();
+      }
+    }, 5200);
+  };
+  const rpm = num.rpm, rpm1 = back(1.2, "rpm");
+  if (rpm != null && rpm1 != null && rpm1 - rpm > 250 && (num.tps ?? 0) > 3 && (num.spd ?? 0) > 2 && !inDecel())
+    fire("stumble", `Stumble caught. RPM dropped ${Math.round(rpm1 - rpm)} with your foot on the throttle.`);
+  const st = num.stft1, st2 = back(2, "stft1");
+  if (st != null && st2 != null && trimsTrustworthy() && Math.abs(st - st2) > 15 && Math.abs(st) > 20)
+    fire("trimspike", `Fuel trim spike, bank 1 short term ${Math.round(st)} percent.`);
+  const frp = num.frp, frp5 = back(5, "frp");
+  if (frp != null && frp5 != null && frp5 > 20 && frp < frp5 * 0.72 && (num.rpm ?? 0) > 500)
+    fire("frpdrop", `Fuel pressure dropped from ${Math.round(frp5)} to ${Math.round(frp)} PSI.`);
+}
+function glitchWindow() {   // the last 15 s, full resolution, as a small CSV table
+  const t = nowS();
+  const rows = GB.filter((g) => t - g[0] <= 15);
+  return ["sec_ago," + GB_KEYS.join(",")].concat(rows.map((g) => (t - g[0]).toFixed(1) + "," + g.slice(1).map((v) => v == null ? "" : v).join(","))).join("\n");
+}
+
 function driveChecks() {
+  plausibility();
+  glitchTick();
   if (!driveOn) return;
   const t1 = (num.stft1 ?? 0) + (num.ltft1 ?? 0);
   const hasB2 = num.stft2 !== undefined;
@@ -3033,7 +3292,7 @@ function requestAi(mode) {
   if (aiPendingId) return;
   aiPendingId = "ai-" + Date.now();
   if (mode === "full") $("aiBox").innerHTML = `<span style="color:var(--o)">🤖 The AI team is analyzing live data, codes, monitors, Mode $06 and test results… (about 30–60 s)</span>`;
-  sendValue({ type: "ai", id: aiPendingId, mode, at: new Date().toLocaleTimeString(), pids: snapshot(), dtcs, readiness: readinessSummary, mode6: mode6Summary, tests: T.results || {} });
+  sendValue({ type: "ai", id: aiPendingId, mode, at: new Date().toLocaleTimeString(), pids: snapshot(), dtcs, readiness: readinessSummary, mode6: mode6Summary, tests: T.results || {}, flags: plausNow() });
   const id = aiPendingId;
   setTimeout(() => { if (aiPendingId === id) { aiPendingId = null; if (mode === "full") $("aiBox").textContent = "AI request timed out. Try again."; logEvent("ai", "AI check (" + mode + ")", "No answer from the app within 3 min"); } }, 180000);
 }
@@ -3047,7 +3306,7 @@ function showAi(text, label) {
 }
 
 // ===================== Connect / setup =====================
-const BTN_IDS = ["pauseBtn", "driveBtn", "readBtn", "clearBtn", "aiBtn", "syncBtn", "modBtn"];
+const BTN_IDS = ["pauseBtn", "driveBtn", "readBtn", "clearBtn", "aiBtn", "syncBtn", "modBtn", "evapBtn"];
 const enableBtns = (on) => BTN_IDS.forEach((id) => { $(id).disabled = !on; });
 
 // If the adapter drops (bumps, ignition flicker, phone hiccup), reconnect on our own and keep the test drive going.
@@ -3177,7 +3436,7 @@ $("bleBtn").addEventListener("click", async () => {
 function sendSync(auto) {
   const modules = modResults.filter((m) => m.codes.length).map((m) => ({ name: m.name, addr: m.hdr, codes: m.codes }));
   sendValue({ type: "sync", id: "sync-" + Date.now(), vin: vinRead, dtcs: Object.assign({}, dtcs, { modules, freeze: freezeFrame }), auto: !!auto,
-    pids: snapshot(), readiness: readinessSummary, mode6: mode6Summary, at: new Date().toLocaleTimeString() });
+    pids: snapshot(), readiness: readinessSummary, mode6: mode6Summary, flags: plausNow(), at: new Date().toLocaleTimeString() });
   log(`Sent to app → VIN ${vinRead || "not reported"} · ${dtcs.stored.length} stored / ${dtcs.pending.length} pending code(s)`);
 }
 
@@ -3199,6 +3458,20 @@ $("dbgBtn").addEventListener("click", () => {
   log("Debug info sent — see the 📋 Log tab → 🐞 Problem log.");
 });
 $("modBtn").addEventListener("click", async () => { await scanModules(); sendSync(false); });
+$("evapBtn").addEventListener("click", async () => {
+  if (!confirm("Command the ECM to SEAL the EVAP system (close the vent valve) for a smoke test?\n\n" +
+               "Key ON, engine OFF. This is the standardized OBD Mode $08 request — many vehicles support it, some don't. " +
+               "Cycling the key releases it.")) return;
+  log("Sending EVAP seal request (Mode $08)…");
+  const ok = await txn(async () => {
+    await setHeader("7DF");
+    const raw = await sendCmd("0801", 4000);
+    await setHeader(baseHeader);
+    return messages(raw).some((m) => m.startsWith("4801"));
+  });
+  if (ok) { log("✅ EVAP system commanded sealed — smoke test it now. Cycle the key when done to release it."); }
+  else { log("This vehicle did not accept the EVAP seal command (not all do)."); logEvent("scanner", "EVAP seal", "No 48 01 reply to Mode 08"); }
+});
 $("readBtn").addEventListener("click", async () => {
   log("Re-reading codes, readiness and Mode $06…");
   await txn(async () => { await readDtcs(); await loadReadiness(); });
@@ -3860,7 +4133,15 @@ async function pollMisfires() {
 }
 async function pollMonitors41() {
   const m = messages(await sendCmd("0141", 800)).find((x) => x.startsWith("4141") && x.length >= 12);
-  if (m) { const [, B, C, D] = bytesOf(m.slice(4, 12)); r41 = { B, C, D, at: new Date().toLocaleTimeString() }; }
+  if (!m) return;
+  const [, B, C, D] = bytesOf(m.slice(4, 12));
+  const prev = r41;
+  r41 = { B, C, D, at: new Date().toLocaleTimeString() };
+  // Drive cycle coach: announce each monitor the moment it completes on this drive
+  if (driveOn && prev) {
+    const was = new Set(readinessRows(prev.B, prev.C, prev.D, true).filter((r) => !r.done).map((r) => r.n));
+    for (const r of readinessRows(B, C, D, true)) if (r.done && was.has(r.n)) speak(`${r.n} monitor completed.`);
+  }
 }
 
 // ---------- 🔥 Misfire monitor ----------
@@ -4053,15 +4334,20 @@ async function crankTest() {
     const minV = Math.min(...during.map((p) => p[1]).filter((x) => x != null));
     const crRpm = during.map((p) => p[2]).filter((x) => x != null && x > 30 && x < 450);
     const after = startT ? T.crank.pts.filter((p) => p[0] > startT + 1).map((p) => p[1]).filter((x) => x != null) : [];
+    const steadyR = crRpm.slice(1);   // skip the first hit while the starter spins up
+    const steadyV = during.slice(1).map((p) => p[1]).filter((x) => x != null);
     T.crank.result = !crankT ? { error: "No cranking detected (voltage never dipped). Arm the test, then crank within 20 s." } : {
       base, minV: isFinite(minV) ? minV : null, crankTime: startT ? startT - crankT : null, started: !!startT,
       crankRpm: crRpm.length ? avg(crRpm) : null, afterV: after.length ? avg(after) : null,
+      rpmSpread: steadyR.length >= 4 ? Math.max(...steadyR) - Math.min(...steadyR) : null,
+      vSpread: steadyV.length >= 4 ? Math.max(...steadyV) - Math.min(...steadyV) : null,
     };
     T.crank.phase = "done";
   });
   const R = T.crank.result;
   if (R && !R.error) reportTest("Cranking / starting", { resting_V: R.base && +R.base.toFixed(2), min_crank_V: R.minV && +R.minV.toFixed(2), crank_s: R.crankTime && +R.crankTime.toFixed(1),
-    crank_rpm: R.crankRpm && Math.round(R.crankRpm), started: R.started, verdict: crankVerdict(R).text.replace(/<[^>]+>/g, "") });
+    crank_rpm: R.crankRpm && Math.round(R.crankRpm), rpm_spread: R.rpmSpread && Math.round(R.rpmSpread), started: R.started,
+    verdict: crankVerdict(R).text.replace(/<[^>]+>/g, "") });
   if (wasStreaming && connected) startStream();
   renderTests();
 }
@@ -4083,6 +4369,13 @@ function crankVerdict(R) {
     else out.push(`Started in ${R.crankTime.toFixed(1)} s.`);
   }
   if (R.afterV != null && R.afterV < 13.2) out.push(`Charging voltage right after start only ${R.afterV.toFixed(1)} V.`);
+  // Compression screen: an engine with one weak cylinder cranks unevenly (RPM surges and voltage ripples)
+  if ((R.rpmSpread != null && R.rpmSpread >= 50) || (R.vSpread != null && R.vSpread >= 0.6)) {
+    out.push(`<b>Uneven cranking</b> (RPM varied ${R.rpmSpread != null ? Math.round(R.rpmSpread) : "?"} / voltage rippled ` +
+             `${R.vSpread != null ? R.vSpread.toFixed(1) : "?"} V) → possible low compression in a cylinder or a dragging spot. ` +
+             `This Bluetooth sampling is too slow to name the cylinder — confirm with a relative-compression scope test.`);
+    if (g === "g") g = "y";
+  } else if (R.rpmSpread != null) out.push(`Cranking was smooth (RPM spread ${Math.round(R.rpmSpread)}) → no gross compression difference.`);
   return { g, text: out.join("<br>") };
 }
 function crankHtml() {
@@ -4586,10 +4879,33 @@ def _ble_component_dir() -> str:
 _ble_dashboard = components.declare_component("ble_dashboard", path=_ble_component_dir())
 
 
+FTB_MEANINGS = {
+    "01": "general electrical failure", "02": "general signal failure", "04": "internal system failure", "07": "mechanical failure",
+    "11": "circuit short to ground", "12": "circuit short to battery", "13": "circuit open",
+    "14": "short to ground or open", "15": "short to battery or open", "16": "voltage below threshold", "17": "voltage above threshold",
+    "1C": "voltage out of range", "1F": "circuit intermittent",
+    "23": "signal stuck low", "24": "signal stuck high", "29": "signal invalid", "2F": "signal erratic", "31": "no signal",
+    "41": "checksum failure", "42": "memory failure", "49": "internal electronic failure", "4B": "over temperature",
+    "64": "signal plausibility failure", "71": "actuator stuck", "72": "actuator stuck open", "73": "actuator stuck closed",
+    "77": "commanded position not reachable", "78": "alignment or adjustment incorrect", "7A": "fluid leak or seal failure",
+    "7B": "fluid level low", "81": "invalid serial data received", "87": "missing message (lost communication)",
+    "88": "bus off (module quit talking)", "92": "performance / incorrect operation", "93": "no operation",
+    "94": "unexpected operation", "96": "component internal failure", "97": "operation obstructed or blocked",
+    "98": "component over temperature",
+}
+
+
+def with_ftb(code: str) -> str:
+  """P0171 -> P0171; C0031-11 -> 'C0031-11 (circuit short to ground)'."""
+  m = re.search(r"-([0-9A-F]{2})$", str(code or ""))
+  t = FTB_MEANINGS.get(m.group(1)) if m else None
+  return f"{code} ({t})" if t else str(code)
+
+
 def _fmt_dtcs(d: dict) -> str:
   out = (f"Engine/emissions (OBD-II) stored: {', '.join(d.get('stored') or []) or 'none'} | pending: "
          f"{', '.join(d.get('pending') or []) or 'none'} | permanent: {', '.join(d.get('permanent') or []) or 'none'}")
-  mods = [f"{m.get('name')} [{m.get('addr')}]: " + ", ".join(f"{c.get('code')} ({c.get('status')})" for c in m.get("codes", []))
+  mods = [f"{m.get('name')} [{m.get('addr')}]: " + ", ".join(f"{with_ftb(c.get('code'))} ({c.get('status')})" for c in m.get("codes", []))
           for m in d.get("modules") or [] if m.get("codes")]
   ff = d.get("freeze") or {}
   ffs = (f" | Freeze frame for {ff.get('dtc')}: " + ", ".join(f"{k} {v}" for k, v in (ff.get("vals") or {}).items())) if ff.get("dtc") else ""
@@ -4606,7 +4922,7 @@ def handle_ble_event(ev: dict):
   if ev.get("type") == "sync":
     d = ev.get("dtcs") or {}
     ss.ble_dtcs = d
-    ss.scan_data = {k: ev.get(k) for k in ("pids", "readiness", "mode6", "at")}
+    ss.scan_data = {k: ev.get(k) for k in ("pids", "readiness", "mode6", "at", "flags")}
     codes = list(dict.fromkeys((d.get("stored") or []) + (d.get("pending") or [])))
     for m in d.get("modules") or []:   # ABS, airbag, body, HVAC... (skip old "history" codes)
       codes += [c["code"] for c in m.get("codes", []) if c.get("status") != "history" and c["code"] not in codes]
@@ -4667,6 +4983,9 @@ LIVE DATA (Mode 01 + OEM enhanced PIDs; enhanced values are unverified beta, tre
 
 I/M READINESS: {ev.get('readiness') or 'Not read'}
 
+PLAUSIBILITY ALERTS the dashboard flagged (readings that don't add up; weigh these heavily):
+{chr(10).join('- ' + f for f in (ev.get('flags') or [])) or 'none'}
+
 MODE $06 RESULTS (value [min..max]):
 {ev.get('mode6') or 'Not read'}
 
@@ -4711,6 +5030,28 @@ with tab2, guard("Live Telemetry tab"):
     ss.ble_last_event = event["id"]
     handle_ble_event(event)
 
+  # ---- Drive cycle coach: a concrete plan to finish the incomplete monitors ----
+  _rdy = (ss.scan_data or {}).get("readiness") or ""
+  if "NOT READY" in _rdy:
+    _left = [p.split(":")[0].strip() for p in _rdy.split(";") if "NOT READY" in p]
+    st.markdown(f"**🧭 Drive cycle coach** — monitors not finished yet: **{', '.join(_left)}**")
+    st.caption("During a test drive the app watches these and says it out loud when one completes. "
+               "Tap below for a drive plan to set the rest.")
+    if st.button("📋 Build a drive cycle plan for this vehicle"):
+      with st.spinner("Writing the drive plan..."):
+        _plan, _who = quick_ai(f"""You are an ASE master technician. Vehicle: {ss.vehicle_info or 'OBD-II vehicle'}.
+These I/M readiness monitors are incomplete: {', '.join(_left)}.
+Full readiness status: {_rdy}
+
+Write a single practical drive cycle plan to complete them, in order, as a numbered checklist a technician follows
+while driving. For each step give: starting conditions (cold engine / coolant temp / fuel level if it matters),
+exact speeds, times and throttle behavior, and WHICH monitor that step completes. Mention this make's known quirks
+for setting these monitors if you are sure of them. Keep it under 300 words.""", max_tokens=900)
+      ss.drive_plan = ("" if _plan.startswith("⚠️") else f"_{_who}_\n\n") + _plan
+    if ss.drive_plan:
+      with st.expander("📋 Drive cycle plan", expanded=True):
+        st.markdown(ss.drive_plan)
+
 # ========================================================
 # --- TAB 3: DIAGNOSE (STRATEGY + SCOPE LAB + COPILOT) ---
 # ========================================================
@@ -4723,8 +5064,9 @@ def scan_context() -> str:
   pids = json.dumps(sd.get("pids") or {}, indent=0) if sd.get("pids") else "not captured"
   return (f"Scanner codes: {_fmt_dtcs(ss.ble_dtcs)}\n"
           f"I/M readiness: {sd.get('readiness') or 'not read'}\n"
-          f"Mode $06 results: {sd.get('mode6') or 'not read'}\n"
-          f"Live data snapshot at sync ({sd.get('at') or '?'}): {pids}" + tests + shop_context())
+          + ("".join("PLAUSIBILITY ALERT (reading that doesn't add up): " + f + "\n" for f in (sd.get("flags") or [])))
+          + f"Mode $06 results: {sd.get('mode6') or 'not read'}\n"
+          + f"Live data snapshot at sync ({sd.get('at') or '?'}): {pids}" + tests + shop_context())
 
 
 with tab3, guard("Diagnose tab"):
@@ -4750,6 +5092,17 @@ with tab3, guard("Diagnose tab"):
   st.text_input("Add codes by hand (optional):", key="manual_dtc", placeholder="e.g. P0171, P0174")
   st.text_area("Symptoms / customer complaint (optional — works with or without codes):", key="symptoms", height=80,
                placeholder="e.g. Rough idle when cold, stumbles on hard acceleration, no check engine light")
+
+  # ❄️ Freeze frame vs the live readings captured at sync: what changed since the code set?
+  _ff = (ss.ble_dtcs or {}).get("freeze") or {}
+  if _ff.get("dtc") and _ff.get("vals"):
+    _live = (ss.scan_data or {}).get("pids") or {}
+    _lv = {str(k).strip().upper(): v for k, v in _live.items()}
+    with st.expander(f"❄️ Freeze frame vs. now — conditions when {_ff['dtc']} set"):
+      st.caption("Left: the moment the code set. Right: the live snapshot from the last scanner sync. "
+                 "A big difference (coolant temp, load, trims) tells you the conditions to recreate.")
+      st.dataframe([{"Reading": k, f"When {_ff['dtc']} set": v, "At last sync": _lv.get(str(k).strip().upper(), "—")}
+                    for k, v in _ff["vals"].items()], use_container_width=True, hide_index=True)
 
   codes = current_codes()
   code_str = ", ".join(codes)
@@ -4882,6 +5235,43 @@ Format strictly using these Markdown sections:
     if active_img:
       st.image(active_img.getvalue(), caption="Captured Scope / Meter Display")
       pil_scope_image = ImageOps.exif_transpose(Image.open(active_img))
+      with st.form("save_wave", clear_on_submit=True):
+        _wl1, _wl2 = st.columns([3, 1])
+        _wave_label = _wl1.text_input("Save this capture to your waveform library as:",
+                                      placeholder="e.g. Known-good CKP — 2014 Accord 2.4 hot idle")
+        _wl2.write("")
+        if st.form_submit_button("💾 Save waveform") and _wave_label.strip():
+          store_put("wave", datetime.now().strftime("%Y%m%d%H%M%S"),
+                    {"label": _wave_label.strip(), "vehicle": ss.vehicle_info, "tech": ss.get("tech_user") or "",
+                     "date": datetime.now().strftime("%Y-%m-%d"), "b64": shrink_to_b64(active_img.getvalue(), 1000, 75)})
+          st.toast("Waveform saved to the library")
+
+    _waves = store_list("wave", 80)
+    _wave_pick = None
+    if _waves:
+      _wopts = {r["id"]: (r.get("data") or {}) for r in _waves}
+      _wave_pick = st.selectbox("Compare against a saved waveform (optional):", [None] + list(_wopts), index=0,
+                                format_func=lambda i: "No comparison" if i is None else
+                                f"{_wopts[i].get('label', '?')} · {_wopts[i].get('vehicle') or ''} · {_wopts[i].get('date', '')}")
+      if _wave_pick:
+        try:
+          st.image(base64.b64decode(_wopts[_wave_pick].get("b64", "")), caption=f"Reference: {_wopts[_wave_pick].get('label', '')}", width=320)
+        except Exception:
+          st.warning("Couldn't show that saved waveform.")
+      with st.expander(f"📚 Waveform library ({len(_waves)} saved)"):
+        _wq = st.text_input("Filter:", key="wave_filter", placeholder="e.g. CKP, Accord, injector")
+        for _wid, _wd in _wopts.items():
+          if _wq.strip() and _wq.strip().lower() not in (_wd.get("label", "") + " " + (_wd.get("vehicle") or "")).lower():
+            continue
+          _wc1, _wc2 = st.columns([5, 1])
+          with _wc1:
+            try:
+              st.image(base64.b64decode(_wd.get("b64", "")), caption=f"{_wd.get('label', '')} · {_wd.get('vehicle') or ''} · {_wd.get('date', '')}", width=300)
+            except Exception:
+              st.caption(f"{_wd.get('label', '')} (image unreadable)")
+          if _wc2.button("🗑️", key=f"delw_{_wid}", help="Delete this saved waveform"):
+            store_delete("wave", _wid)
+            st.rerun()
 
   with col_scratch:
     comp_data = st.text_input("Compression / Leakdown (psi / % drop):",
@@ -4916,13 +5306,16 @@ TASK:
 - Identify the signal type (secondary/primary ignition, injector voltage/current, CKP/CMP correlation, relative compression, PWM, sensor drop).
 - Evaluate key signatures: firing/inductive kV, dwell, burn line slope & turbulence, coil oscillations, ground bounce, attenuation, missing-tooth spacing.
 - Correlate waveform abnormalities with the physical readings, the fault codes and the scan data.
+{"- A SECOND image is attached: a KNOWN-GOOD reference waveform from this shop's library (" + _wopts[_wave_pick].get("label", "") + "). Compare the capture against it and call out every meaningful difference." if _wave_pick and pil_scope_image else ""}
 
 FORMAT STRICTLY AS:
 ### 1. Scope Waveform & Electrical Findings
 ### 2. Component Condemnation & Defect Root Cause
 ### 3. Immediate Pinpoint Verification Step
 """
-    img_b64 = img_part(pil_scope_image)["inline_data"]["data"] if pil_scope_image else ""
+    img_b64 = [img_part(pil_scope_image)["inline_data"]["data"]] if pil_scope_image else []
+    if _wave_pick and pil_scope_image:
+      img_b64.append(_wopts[_wave_pick].get("b64", ""))
     with st.status("Working on it...", expanded=False) as status:
       text, _r, draft, ds_draft = team_answer(prompt, ss.vehicle_info or "vehicle", code_str, ss.symptoms.strip(), False, status,
                                               image_b64=img_b64)
@@ -5075,7 +5468,10 @@ def drive_text(rec: dict) -> str:
       "", "DRIVE REPORT:", rec.get("report") or "(none)",
       "", "TEST RESULTS:", json.dumps(rec.get("results") or {}, indent=0)[:4000],
       "", f"SPOKEN ALERTS ({len(alerts)}), with readings at that moment:",
-      *[f"- {a.get('at')} (+{a.get('t')}s): {a.get('text')} | {json.dumps(a.get('snap'))}" for a in alerts],
+      *[f"- {a.get('at')} (+{a.get('t')}s): {a.get('text')} | {json.dumps(a.get('snap'))}"
+        + (f"\n  HI-RES WINDOW around this alert (one row per live-data pass, 15 s before to 5 s after — find the first reading that moved):\n  "
+           + str(a.get('win')).replace(chr(10), chr(10) + "  ") if a.get("win") else "")
+        for a in alerts],
       "", f"MISFIRE EVENTS: {json.dumps((rec.get('misfires') or [])[-30:])}",
       "", f"TIMELINE every {step} s (fuel_system CL=closed loop; decel=Y means fuel cut/closed throttle):",
       *lines,
@@ -5085,6 +5481,9 @@ def drive_text(rec: dict) -> str:
 # ========================================================
 # --- CUSTOMER / SHOP REPORT (shown at the bottom of the Diagnose tab) ---
 # ========================================================
+FOLLOW_UP_LABELS = {0: "No follow-up", 7: "In about 1 week", 14: "In about 2 weeks", 30: "In about 1 month",
+                    60: "In about 2 months", 90: "In about 3 months", 180: "In about 6 months"}
+
 CUSTOMER_SUMMARY_PROMPT = """Write a short summary of this diagnosis for the CAR OWNER (not a mechanic).
 Vehicle: {vehicle}
 Customer's complaint: {complaint}
@@ -5100,6 +5499,30 @@ RULES:
 - Use ONLY the facts above. Do not invent findings, test results, prices or time estimates.
 - If the technician's notes give a recommendation, that is the recommendation. If nothing is confirmed yet, say more testing is needed.
 - No headings, no bullet points, no sign-off."""
+
+
+def battery_slip_html() -> str:
+  e = html_lib.escape
+  t = ss.test_results or {}
+  picked = {k: v for k, v in t.items() if re.search(r"charg|crank|battery|power", k, re.I)}
+  def rows(v):
+    if not isinstance(v, dict):
+      return f"<tr><td>Result</td><td>{e(str(v))}</td></tr>"
+    return "".join(f"<tr><td>{e(str(k).replace('_', ' ').title())}</td><td>{e(str(x))}</td></tr>" for k, x in v.items() if x not in (None, ""))
+  body = "".join(f"<h2>{e(k)}</h2><table>{rows(v)}</table>" for k, v in picked.items())
+  shop = secret("SHOP_NAME") or "Test Don't Guess"
+  return f"""<!doctype html><html><head><meta charset="utf-8"><title>Battery & charging test - {e(ss.vehicle_info or 'Vehicle')}</title>
+<style>body{{font-family:Arial,sans-serif;color:#222;max-width:680px;margin:24px auto;padding:0 16px}}h1{{font-size:22px;margin:0}}
+h2{{font-size:15px;border-bottom:2px solid #222;padding-bottom:3px;margin-top:20px}}table{{width:100%;border-collapse:collapse;font-size:13px}}
+td{{border:1px solid #ccc;padding:5px 7px}}.muted{{color:#666;font-size:12px}}@media print{{button{{display:none}}}}</style></head><body>
+<button onclick="window.print()" style="float:right;padding:8px 14px">Print / Save as PDF</button>
+<h1>🔋 {e(shop)} — Battery & Charging Test</h1>
+<div class="muted">{e(datetime.now().strftime("%B %d, %Y %I:%M %p"))}{(" · Technician: " + e(ss.get("tech_user") or "")) if ss.get("tech_user") else ""}</div>
+<h2>Vehicle</h2><table><tr><td>Customer</td><td>{e(ss.customer_name or '')}</td></tr><tr><td>Vehicle</td><td>{e(ss.vehicle_info or '')}</td></tr>
+<tr><td>VIN</td><td>{e(ss.active_vin or '')}</td></tr><tr><td>Odometer</td><td>{e(ss.odometer or '')}</td></tr></table>
+{body}
+<p class="muted">Guide: rest voltage ≥ 12.4 V, cranking ≥ 9.6 V, charging at idle 13.5–15.0 V. Results from on-vehicle testing.</p>
+</body></html>"""
 
 
 def build_report_html(notes: str) -> str:
@@ -5125,6 +5548,27 @@ def build_report_html(notes: str) -> str:
   eng = str(vd.get("Displacement (L)") or vd.get("Engine") or "")
   if re.fullmatch(r"\d+(\.\d+)?", eng):
     eng += " L"
+  def _money(v):
+    try:
+      return float(str(v).replace("$", "").replace(",", "") or 0)
+    except ValueError:
+      return 0.0
+  est_rows = [r for r in (ss.estimate_rows or []) if isinstance(r, dict) and str(r.get("Item") or "").strip()]
+  est_html = ""
+  if est_rows:
+    tp = sum(_money(r.get("Parts $")) for r in est_rows)
+    tl = sum(_money(r.get("Labor $")) for r in est_rows)
+    est_html = ("<h2>Estimate</h2><table><tr><th>Item</th><th>Parts</th><th>Labor</th></tr>" +
+                "".join(f"<tr><td>{e(str(r.get('Item', '')))}</td><td>${_money(r.get('Parts $')):,.2f}</td>"
+                        f"<td>${_money(r.get('Labor $')):,.2f}</td></tr>" for r in est_rows) +
+                f"<tr><th>Total</th><th>${tp:,.2f}</th><th>${tl:,.2f}</th></tr></table>"
+                f"<p><b>Estimate total: ${tp + tl:,.2f}</b> <span class=muted>(parts availability and final pricing may adjust this)</span></p>")
+  photo_html = ""
+  phs = job_photos()
+  if phs:
+    photo_html = ("<h2>Photos</h2><div>" +
+                  "".join(f'<img src="data:image/jpeg;base64,{p_.get("b64", "")}" style="max-width:48%;margin:4px;border:1px solid #ccc">'
+                          for p_ in phs[:8]) + "</div>")
   rows_codes = "".join(f"<tr><td>{e(str(a))}</td><td><b>{e(str(b))}</b></td><td>{e(str(c))}</td></tr>" for a, b, c in code_rows) or \
       "<tr><td colspan=3>No trouble codes found</td></tr>"
   rows_tests = "".join(
@@ -5143,13 +5587,17 @@ pre{{white-space:pre-wrap;font-family:inherit;font-size:13px;background:#fafafa;
 <h2>Customer & vehicle</h2><table>
 <tr><th>Customer</th><td>{e(ss.customer_name or '')}</td><th>Phone</th><td>{e(ss.customer_phone or '')}</td></tr>
 <tr><th>Vehicle</th><td>{e(ss.vehicle_info or '')}</td><th>VIN</th><td>{e(ss.active_vin or 'not provided')}</td></tr>
-<tr><th>Engine</th><td>{e(eng)}</td><th>Complaint</th><td>{e(ss.symptoms or '')}</td></tr></table>
+<tr><th>Engine</th><td>{e(eng)}</td><th>Complaint</th><td>{e(ss.symptoms or '')}</td></tr>
+<tr><th>Odometer</th><td>{e(ss.odometer or '')}</td><th>Technician</th><td>{e(ss.get('tech_user') or '')}</td></tr></table>
 {"<h2>What we found</h2><p style='font-size:15px;line-height:1.5'>" + e(ss.customer_summary).replace(chr(10), "<br>") + "</p>" if (ss.customer_summary or "").strip() else ""}
 {"<h2>Repair performed</h2><p><b>" + e(ss.fix_part) + "</b>" + ("<br>Verified by: " + e(ss.fix_test) if (ss.fix_test or "").strip() else "") + "</p>" if (ss.fix_part or "").strip() else ""}
 <h2>Trouble codes</h2><table><tr><th>Module</th><th>Code</th><th>Status</th></tr>{rows_codes}</table>
 {ff_html}
 <h2>Test results</h2><table><tr><th>Test</th><th>Result</th><th>Details</th></tr>{rows_tests}</table>
+{est_html}
+{photo_html}
 {"<h2>Technician notes & recommendation</h2><pre>" + e(notes) + "</pre>" if notes.strip() else ""}
+{"<h2>Recommended follow-up</h2><p>" + e(FOLLOW_UP_LABELS.get(ss.follow_up_days, "")) + ((": " + e(ss.follow_up_note)) if (ss.follow_up_note or "").strip() else "") + "</p>" if ss.get("follow_up_days") else ""}
 {"<h2>Diagnostic plan</h2><pre>" + e(plan) + "</pre>" if plan else ""}
 <p class="muted">Results from on-board diagnostic data and road/bay tests. Further pinpoint testing may be required before parts replacement.</p>
 </body></html>"""
@@ -5157,7 +5605,59 @@ pre{{white-space:pre-wrap;font-family:inherit;font-size:13px;background:#fafafa;
 
 with tab3, guard("Diagnose tab"):
   st.write("---")
-  st.markdown("#### 4 · Customer / shop report")
+  st.markdown("#### 4 · Job photos & estimate")
+  st.caption("Photos save with the job and go on the customer report — the leaky gasket or chafed wire sells the repair "
+             "better than words. The estimate prints on the report with a total.")
+  _pc1, _pc2 = st.columns(2)
+  with _pc1:
+    _new_photos = st.file_uploader("📸 Add photos to this job", type=["png", "jpg", "jpeg", "webp"],
+                                   accept_multiple_files=True, key=f"job_photos_{ss.get('photo_n', 0)}_{ss.get('job_n', 0)}")
+    if _new_photos and st.button(f"💾 Attach {len(_new_photos)} photo(s) to the job"):
+      autosave_job(force=True)
+      if not ss.get("job_id"):
+        st.warning("Add a customer, vehicle or code first so there's a job to attach them to.")
+      else:
+        _have = len(job_photos())
+        for _i, _f in enumerate(_new_photos[: max(0, 12 - _have)]):
+          try:
+            store_put("jobphoto", f"{ss.job_id}-{datetime.now().strftime('%H%M%S%f')}{_i}",
+                      {"job": ss.job_id, "b64": shrink_to_b64(_f.getvalue()), "name": getattr(_f, "name", ""),
+                       "at": datetime.now().strftime("%Y-%m-%d %I:%M %p")})
+          except Exception as _e:
+            st.warning(f"Couldn't save {getattr(_f, 'name', 'a photo')}: {_e}")
+        ss.photo_n = ss.get("photo_n", 0) + 1   # empty the picker
+        queue_update(toast="Photo(s) attached to the job")
+    _jp = job_photos()
+    if _jp:
+      st.caption(f"{len(_jp)} photo(s) on this job (12 max):")
+      for _ph in _jp:
+        _jc1, _jc2 = st.columns([5, 1])
+        with _jc1:
+          try:
+            st.image(base64.b64decode(_ph.get("b64", "")), width=260, caption=_ph.get("at", ""))
+          except Exception:
+            st.caption("(photo unreadable)")
+        if _jc2.button("🗑️", key=f"delp_{_ph['_id']}", help="Remove this photo"):
+          store_delete("jobphoto", _ph["_id"])
+          st.rerun()
+  with _pc2:
+    st.markdown("**🧾 Estimate** (tap a cell to edit; ➕ at the bottom adds a line)")
+    _est_in = ss.estimate_rows if isinstance(ss.estimate_rows, list) and ss.estimate_rows else         [{"Item": "", "Parts $": 0.0, "Labor $": 0.0}]
+    _est = st.data_editor(_est_in, num_rows="dynamic", use_container_width=True,
+                          key=f"est_{ss.get('job_n', 0)}_{ss.get('job_id') or 'new'}")
+    ss.estimate_rows = [r for r in (_est or []) if isinstance(r, dict)]
+    def _money(v):
+      try:
+        return float(str(v).replace("$", "").replace(",", "") or 0)
+      except ValueError:
+        return 0.0
+    _parts = sum(_money(r.get("Parts $")) for r in ss.estimate_rows)
+    _labor = sum(_money(r.get("Labor $")) for r in ss.estimate_rows)
+    if _parts or _labor:
+      st.markdown(f"Parts **${_parts:,.2f}** · Labor **${_labor:,.2f}** · **Total ${_parts + _labor:,.2f}**")
+
+  st.write("---")
+  st.markdown("#### 5 · Customer / shop report")
   st.caption("One page with the vehicle, all codes, freeze frame, every test result (green / yellow / red) and the plan. "
              "Open it on your phone and use Print → Save as PDF, or text it to the customer.")
   notes = st.text_area("Technician notes / recommendation (goes on the report):", key="tech_notes", height=80,
@@ -5177,12 +5677,56 @@ with tab3, guard("Diagnose tab"):
   st.text_area("Customer summary (edit it as you like — it goes at the top of the report):", key="customer_summary", height=130,
                placeholder="Tap the button above, or type your own summary for the customer.")
   _rep_name = re.sub(r"\W+", "_", ss.vehicle_info or "vehicle")
-  st.download_button("🧾 Download report", data=build_report_html(notes).encode("utf-8"), mime="text/html",
-                     file_name=f"report_{_rep_name}_{datetime.now():%Y%m%d}.html")
+  _report_html = build_report_html(notes)
+  _bat = battery_slip_html() if any(re.search(r"charg|crank|battery|power", k, re.I) for k in (ss.test_results or {})) else ""
+  _sc1, _sc2, _sc3, _sc4 = st.columns(4)
+  with _sc1:
+    st.download_button("🧾 Download report", data=_report_html.encode("utf-8"), mime="text/html",
+                       file_name=f"report_{_rep_name}_{datetime.now():%Y%m%d}.html", use_container_width=True)
+  with _sc2:
+    if st.button("📧 Email it to the customer", use_container_width=True,
+                 disabled=not (email_ready() and (ss.customer_email or "").strip())):
+      with st.spinner("Sending the email..."):
+        _err = send_report_email(ss.customer_email.strip(), f"Diagnostic report — {ss.vehicle_info or 'your vehicle'}",
+                                 (ss.customer_summary or "").strip() or "Your diagnostic report is attached.",
+                                 _report_html, f"report_{_rep_name}_{datetime.now():%Y%m%d}.html")
+      if _err:
+        st.error(f"Couldn't send it: {_err}")
+      else:
+        record_sent("email", ss.customer_email.strip(), "report")
+        st.success(f"Report emailed to {ss.customer_email.strip()} ✓")
+  with _sc3:
+    if st.button("💬 Text the summary", use_container_width=True,
+                 disabled=not (sms_ready() and (ss.customer_phone or "").strip() and (ss.customer_summary or "").strip())):
+      _shop = secret("SHOP_NAME") or "the shop"
+      with st.spinner("Sending the text..."):
+        _err = send_sms(ss.customer_phone, f"{_shop} — {ss.vehicle_info or 'your vehicle'}:\n{ss.customer_summary.strip()}")
+      if _err:
+        st.error(f"Couldn't send it: {_err}")
+      else:
+        record_sent("text", ss.customer_phone.strip(), "summary")
+        st.success("Summary texted ✓")
+  with _sc4:
+    if _bat:
+      st.download_button("🔋 Battery/charging slip", data=_bat.encode("utf-8"), mime="text/html",
+                         file_name=f"battery_{_rep_name}_{datetime.now():%Y%m%d}.html", use_container_width=True)
+    else:
+      st.caption("🔋 Run the Charging or Cranking guided test to get a battery slip here.")
+  if not email_ready():
+    st.caption("📧 To email reports: add SMTP_USER and SMTP_PASSWORD to Streamlit Secrets (for Gmail, make an "
+               "\"App password\" under Google Account → Security → 2-Step Verification, and use that, not your normal password).")
+  elif not (ss.customer_email or "").strip():
+    st.caption("📧 Add the customer's email on the VIN tab to enable emailing.")
+  if not sms_ready():
+    st.caption("💬 To text customers: make a free trial account at twilio.com, buy a texting number (~$1/mo), and add "
+               "TWILIO_SID, TWILIO_TOKEN and TWILIO_FROM (the number, like +16785551234) to Secrets.")
+  _sent = [r.get("data") or {} for r in store_list("sent", 3, {"job": ss.get("job_id")})] if ss.get("job_id") else []
+  if _sent:
+    st.caption("Sent: " + " · ".join(f"{x.get('what')} by {x.get('how')} to {x.get('to')} ({x.get('at')})" for x in _sent))
 
   # ---------- 5. Confirmed fix ----------
   st.write("---")
-  st.markdown("#### 5 · Confirmed fix (teaches the app)")
+  st.markdown("#### 6 · Confirmed fix & follow-up (teaches the app)")
   st.caption("When the car is fixed, write down what actually fixed it and the test that proved it. Next time a car like this "
              "comes in, the AI sees your shop's real fixes first.")
   f1, f2 = st.columns(2)
@@ -5196,6 +5740,17 @@ with tab3, guard("Diagnose tab"):
       st.error("Couldn't save the fix — add the vehicle or customer first.")
   if not ss.vehicle_info:
     st.caption("Set the vehicle on the VIN tab first.")
+
+  st.markdown("**📅 Follow up with this customer?**")
+  _fu1, _fu2 = st.columns(2)
+  _fu_opts = list(FOLLOW_UP_LABELS)
+  _cur_fu = ss.follow_up_days if ss.follow_up_days in FOLLOW_UP_LABELS else 0
+  _fu_pick = _fu1.selectbox("Call them back", _fu_opts, index=_fu_opts.index(_cur_fu),
+                            format_func=lambda d: FOLLOW_UP_LABELS[d], key=f"fu_{ss.get('job_n', 0)}")
+  ss.follow_up_days = _fu_pick
+  _fu2.text_input("About what:", key="follow_up_note", placeholder="e.g. Rear brakes at 4mm — due soon")
+  if _fu_pick:
+    st.caption("It'll show under 📅 Callbacks due on the Log tab when the time comes (counted from the job's last update).")
 
 # ========================================================
 # --- TAB 5: VEHICLE & DTC LOG ---
@@ -5252,6 +5807,89 @@ with tab5, guard("Log tab"):
         queue_update(toast="Log cleared")
   else:
     st.info("No vehicles or DTCs logged yet. Connect the scanner (Live Telemetry tab) or run a diagnostic tree (Diagnose tab) to start logging.")
+
+  # ---------- 📅 Callbacks due ----------
+  st.write("---")
+  st.subheader("📅 Callbacks due")
+  _today = datetime.now()
+  def _jdate(d):
+    for k in ("updated", "created"):
+      try:
+        return datetime.strptime(str(d.get(k, "")), "%Y-%m-%d %I:%M %p")
+      except ValueError:
+        continue
+    return None
+  _due = []
+  for _r in store_list("job", 300, {"status": "closed"}):
+    _d = _r.get("data") or {}
+    _days, _dt = _d.get("follow_up_days") or 0, _jdate(_d)
+    if not _days or _d.get("follow_up_done") or not _dt:
+      continue
+    _when = _dt + __import__("datetime").timedelta(days=int(_days))
+    if _when <= _today + __import__("datetime").timedelta(days=7):
+      _due.append((_when, _r["id"], _d))
+  if not _due:
+    st.caption("Nothing due. Set a follow-up when you close a job (Diagnose tab → section 6) and it shows up here on time.")
+  else:
+    for _when, _jid, _d in sorted(_due):
+      _cb1, _cb2 = st.columns([5, 1])
+      _late = "🔴 overdue" if _when < _today else "🟡 this week"
+      _cb1.markdown(f"{_late} · **{_d.get('customer_name') or 'No name'}** ({_d.get('customer_phone') or 'no phone'}) · "
+                    f"{_d.get('vehicle_info') or 'vehicle'}  \n<small>Due {_when:%b %d}: "
+                    f"{_d.get('follow_up_note') or FOLLOW_UP_LABELS.get(_d.get('follow_up_days'), '')}</small>", unsafe_allow_html=True)
+      if _cb2.button("✔️ Called", key=f"fu_done_{_jid}", use_container_width=True):
+        _rec = store_get("job", _jid) or {}
+        _rec["follow_up_done"] = True
+        store_put("job", _jid, _rec)
+        st.rerun()
+
+  # ---------- 📈 Shop summary ----------
+  st.write("---")
+  with st.expander("📈 Shop summary — cars, top codes, top fixes and comebacks"):
+    _all_jobs = [dict(_r.get("data") or {}, _id=_r["id"]) for _r in store_list("job", 500)]
+    _all_fixes = [_r.get("data") or {} for _r in store_list("fix", 500)]
+    _months = sorted({_jdate(j).strftime("%Y-%m") for j in _all_jobs if _jdate(j)}, reverse=True)
+    if not _months:
+      st.caption("No jobs recorded yet.")
+    else:
+      _mo = st.selectbox("Month", _months, format_func=lambda m: datetime.strptime(m, "%Y-%m").strftime("%B %Y"))
+      _mo_jobs = [j for j in _all_jobs if _jdate(j) and _jdate(j).strftime("%Y-%m") == _mo]
+      _mo_fixes = [f for f in _all_fixes if str(f.get("date", "")).startswith(_mo)]
+      _m1, _m2, _m3 = st.columns(3)
+      _m1.metric("Cars worked", len(_mo_jobs))
+      _m2.metric("Confirmed fixes", len(_mo_fixes))
+      _code_count = {}
+      for _j in _mo_jobs:
+        for _c in re.split(r"[,\s]+", str(_j.get("codes") or "")):
+          if DTC_RE.fullmatch(_c):
+            _code_count[_c] = _code_count.get(_c, 0) + 1
+      # comebacks across ALL jobs: same VIN, same code, two different jobs within 60 days
+      _byvin = {}
+      for _j in _all_jobs:
+        if _j.get("active_vin") and _jdate(_j):
+          _byvin.setdefault(_j["active_vin"], []).append(_j)
+      _comebacks = []
+      for _vin, _js in _byvin.items():
+        _js.sort(key=_jdate)
+        for _i in range(1, len(_js)):
+          _gap = (_jdate(_js[_i]) - _jdate(_js[_i - 1])).days
+          _shared = set(re.split(r"[,\s]+", str(_js[_i].get("codes") or ""))) &                     set(re.split(r"[,\s]+", str(_js[_i - 1].get("codes") or ""))) - {""}
+          if 0 < _gap <= 60 and _shared:
+            _comebacks.append({"vehicle": _js[_i].get("vehicle_info", ""), "customer": _js[_i].get("customer_name", ""),
+                               "code(s)": ", ".join(sorted(_shared)), "days apart": _gap,
+                               "first": _jdate(_js[_i - 1]).strftime("%b %d"), "back": _jdate(_js[_i]).strftime("%b %d")})
+      _m3.metric("Comebacks (60 days)", len(_comebacks))
+      if _code_count:
+        st.markdown("**Most common codes this month**")
+        st.dataframe([{"Code": c, "Cars": n} for c, n in sorted(_code_count.items(), key=lambda x: -x[1])[:10]],
+                     use_container_width=True, hide_index=True)
+      if _mo_fixes:
+        st.markdown("**Fixes this month**")
+        st.dataframe([{"Vehicle": f.get("vehicle", ""), "Codes": ", ".join(f.get("codes") or []), "Fix": f.get("fix", ""),
+                       "Tech": f.get("tech", "")} for f in _mo_fixes], use_container_width=True, hide_index=True)
+      if _comebacks:
+        st.markdown("**⚠️ Comebacks** — same car, same code, within 60 days (all time)")
+        st.dataframe(_comebacks, use_container_width=True, hide_index=True)
 
   # ---------- 🚗 Test drive review ----------
   st.write("---")
@@ -5340,6 +5978,23 @@ with tab5, guard("Log tab"):
         pass
       store_delete("problem")
       queue_update(toast="Problem log cleared")
+
+  # ---------- 💾 Backup ----------
+  st.write("---")
+  st.subheader("💾 Backup")
+  st.caption("Downloads everything — jobs, fixes, scan log, test drives, photos, waveforms — as one file. "
+             "Keep a copy somewhere safe now and then.")
+  if st.button("📦 Prepare backup file"):
+    with st.spinner("Gathering everything..."):
+      _bk = {"app_version": APP_VERSION, "made": datetime.now().isoformat(),
+             **{k: store_list(k, 1000) for k in ("job", "fix", "log", "drive", "jobphoto", "wave", "sent", "problem")}}
+      ss._backup = json.dumps(_bk)
+      ss._backup_counts = " · ".join(f"{k}: {len(_bk.get(k) or [])}" for k in ("job", "fix", "log", "drive", "jobphoto", "wave"))
+    st.toast("Backup ready — tap Download")
+  if ss.get("_backup"):
+    st.download_button("⬇️ Download backup", data=ss._backup, mime="application/json",
+                       file_name=f"tdg_backup_{datetime.now():%Y%m%d}.json")
+    st.caption(f"Backup size: {len(ss._backup) / 1e6:.1f} MB · " + ss.get("_backup_counts", ""))
 
 
 # ========================================================
