@@ -20,7 +20,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-10-20b"
+APP_VERSION = "2026-10-21"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -41,6 +41,8 @@ WHATS_NEW = [
     "REDESIGN: cleaner look throughout — one green accent, steadier gauge digits, pill tabs, status bar with a Next-step guide on every tab",
     "FLOW: vehicle first on the intake tab (customer below), photo scanner collapses once the vehicle is set, Diagnose sections 4-6 fold away until needed",
     "FLOW: Setup checklist at the top shows what's connected and exactly which Secret turns each feature on",
+    "FIX: live data no longer freezes after connecting when the engine size isn't known yet",
+    "FIX: Claude and DeepSeek no longer come back with empty answers on big jobs",
 ]
 
 st.markdown(
@@ -48,7 +50,7 @@ st.markdown(
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap');
 .stApp {{ font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }}
-.block-container {{ padding-top: 1.4rem !important; padding-bottom: 3rem !important; max-width: 1440px !important; }}
+.block-container {{ padding-top: 4.5rem !important; padding-bottom: 3rem !important; max-width: 1440px !important; }}
 #MainMenu, footer {{ visibility: hidden; }}
 /* segmented pill tabs */
 div[data-baseweb="tab-list"] {{ background: rgba(17,24,39,.55); border: 1px solid rgba(255,255,255,.08); border-radius: 12px;
@@ -58,7 +60,18 @@ button[data-baseweb="tab"] {{ border-radius: 8px !important; padding: 9px 16px !
 button[data-baseweb="tab"]:hover {{ background: rgba(255,255,255,.05) !important; }}
 button[data-baseweb="tab"][aria-selected="true"] {{ background: linear-gradient(180deg, rgba(16,185,129,.18) 0%, rgba(16,185,129,.06) 100%) !important;
   color: #10B981 !important; box-shadow: inset 0 0 0 1px rgba(16,185,129,.35), 0 2px 8px rgba(0,0,0,.25) !important; }}
-div[data-baseweb="tab-highlight"] {{ display: none !important; }}
+div[data-baseweb="tab-highlight"], div[data-baseweb="tab-border"] {{ display: none !important; }}
+[data-testid="stTabs"] [role="tablist"] {{ background: rgba(17,24,39,.55); border: 1px solid rgba(255,255,255,.08) !important; border-radius: 12px;
+  padding: 5px; gap: 6px; margin-bottom: .6rem; overflow-x: auto; }}
+[data-testid="stTabs"] [role="tablist"]::after {{ display: none !important; content: none !important; }}
+[data-testid="stTabs"] [role="tab"] {{ border-radius: 8px !important; padding: 8px 16px !important; border: none !important;
+  background: transparent !important; transition: all .18s ease; height: auto !important; }}
+[data-testid="stTabs"] [role="tab"] p {{ font-size: .92rem !important; font-weight: 600 !important; }}
+[data-testid="stTabs"] [role="tab"]:hover {{ background: rgba(255,255,255,.05) !important; }}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] {{ background: linear-gradient(180deg, rgba(16,185,129,.18) 0%, rgba(16,185,129,.06) 100%) !important;
+  box-shadow: inset 0 0 0 1px rgba(16,185,129,.35), 0 2px 8px rgba(0,0,0,.25) !important; }}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] p {{ color: #10B981 !important; }}
+[data-testid="stTabs"] .react-aria-SelectionIndicator {{ display: none !important; }}
 /* dark-glass expanders & inputs */
 div[data-testid="stExpander"] {{ border: 1px solid rgba(255,255,255,.08) !important; border-radius: 10px !important; overflow: hidden; }}
 div[data-baseweb="input"] > div, div[data-baseweb="select"] > div, div[data-baseweb="textarea"] > div {{ border-radius: 8px !important; }}
@@ -535,26 +548,45 @@ def _img_list(image_b64) -> list:
 
 
 def claude(prompt: str, *, max_tokens: int = 4000, timeout: int = 120, image_b64="") -> str:
+  """Ask Claude. Newer Claude models can spend part of max_tokens "thinking" before they write; if the
+  budget runs out mid-thought the answer comes back EMPTY (stop_reason = max_tokens). When that happens,
+  ask once more with a much bigger budget instead of giving up."""
   key = secret("ANTHROPIC_API_KEY")
   if not key:
     raise AIError("ANTHROPIC_API_KEY is missing from Streamlit Secrets.")
-  try:
-    res = http().post(CLAUDE_URL, timeout=timeout, json={
-        "model": secret("CLAUDE_MODEL") or CLAUDE_DEFAULT_MODEL, "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b}}
-                                                  for b in _img_list(image_b64)] + [{"type": "text", "text": prompt}]}]},
-        headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
-  except requests.RequestException as e:
-    raise AIError(f"Claude connection error: {e}") from e
-  if res.status_code != 200:
-    raise AIError(f"Claude API error ({res.status_code}): {res.text[:300]}")
-  try:
-    text = "".join(b.get("text", "") for b in res.json().get("content", []) if b.get("type") == "text")
-  except ValueError as e:
-    raise AIError("Claude returned an unreadable answer.") from e
-  if not text.strip():
-    raise AIError("Claude returned an empty answer.")
-  return text
+  content = [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b}}
+             for b in _img_list(image_b64)] + [{"type": "text", "text": prompt}]
+  budgets = [max_tokens, min(max(max_tokens * 3, 12000), 32000)]
+  why = ""
+  for attempt, budget in enumerate(budgets):
+    try:
+      res = http().post(CLAUDE_URL, timeout=timeout if attempt == 0 else max(timeout, 240), json={
+          "model": secret("CLAUDE_MODEL") or CLAUDE_DEFAULT_MODEL, "max_tokens": budget,
+          "messages": [{"role": "user", "content": content}]},
+          headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
+    except requests.RequestException as e:
+      raise AIError(f"Claude connection error: {e}") from e
+    if res.status_code != 200:
+      raise AIError(f"Claude API error ({res.status_code}): {res.text[:300]}")
+    try:
+      data = res.json()
+      blocks = data.get("content") or []
+      text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+    except (ValueError, AttributeError) as e:
+      raise AIError("Claude returned an unreadable answer.") from e
+    stop = data.get("stop_reason")
+    if text.strip():
+      if stop == "max_tokens":
+        text += "\n\n_(Claude's answer hit the length limit and may be cut off.)_"
+      return text
+    kinds = sorted({b.get("type", "?") for b in blocks}) or ["none"]
+    why = f"stop_reason={stop}, blocks={','.join(kinds)}, max_tokens={budget}"
+    if stop == "refusal":
+      raise AIError(f"Claude declined to answer this request ({why}).")
+    if stop != "max_tokens" or attempt == len(budgets) - 1:
+      break
+    log_problem("ai", "Claude", f"Empty answer — budget used up before writing ({why}). Retrying with {budgets[attempt + 1]}.")
+  raise AIError(f"Claude returned an empty answer ({why}).")
 
 
 # --- DeepSeek (second independent draft) ---
@@ -572,20 +604,42 @@ def deepseek_label() -> str:
 
 
 def _deepseek_raw(key: str, model: str, session: requests.Session, prompt: str, max_tokens: int, timeout: int) -> str:
-  """No Streamlit calls in here, so it is safe to run in a background thread."""
-  try:
-    res = session.post(DEEPSEEK_URL, timeout=timeout, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                       json={"model": model, "max_tokens": max_tokens, "messages": [{"role": "user", "content": prompt}]})
-  except requests.RequestException as e:
-    raise RuntimeError(f"DeepSeek connection error: {e}") from e
+  """No Streamlit calls in here, so it is safe to run in a background thread.
+  DeepSeek "thinks" by default, and the thinking counts against max_tokens — on a big job it could use the
+  whole budget and return an EMPTY answer. Its job here is a fast second-opinion draft (Claude does the deep
+  review), so thinking is switched off. If an empty answer still comes back, one retry with a bigger budget."""
+  def call(think_off: bool, budget: int):
+    body = {"model": model, "max_tokens": budget, "messages": [{"role": "user", "content": prompt}]}
+    if think_off:
+      body["thinking"] = {"type": "disabled"}
+    try:
+      res = session.post(DEEPSEEK_URL, timeout=timeout, json=body,
+                         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+    except requests.RequestException as e:
+      raise RuntimeError(f"DeepSeek connection error: {e}") from e
+    return res
+  res = call(True, max_tokens)
+  if res.status_code == 400 and "think" in res.text.lower():   # this model doesn't take the switch: ask normally
+    res = call(False, max(max_tokens, 12000))
   if res.status_code != 200:
     raise RuntimeError(f"DeepSeek API error ({res.status_code}, {model}): {res.text[:300]}")
   try:
-    text = res.json()["choices"][0]["message"].get("content") or ""
+    choice = res.json()["choices"][0]
+    msg = choice["message"]
   except (KeyError, IndexError, ValueError) as e:
     raise RuntimeError("DeepSeek returned an unreadable answer.") from e
+  text = msg.get("content") or ""
+  if not text.strip() and choice.get("finish_reason") == "length":
+    res = call(False, max(max_tokens * 3, 12000))
+    try:
+      choice = res.json()["choices"][0]
+      msg = choice["message"]
+      text = msg.get("content") or ""
+    except (KeyError, IndexError, ValueError):
+      text = ""
   if not text.strip():
-    raise RuntimeError("DeepSeek returned an empty answer.")
+    raise RuntimeError(f"DeepSeek returned an empty answer (finish_reason={choice.get('finish_reason')}, "
+                       f"thinking={'yes' if msg.get('reasoning_content') else 'no'}).")
   return text
 
 
@@ -655,7 +709,7 @@ def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: b
     gem_err = str(e)
   if ds_job:
     try:
-      ds_draft = ds_job.result(timeout=150)
+      ds_draft = ds_job.result(timeout=90 if fast else 200)
     except Exception as e:
       log_problem("ai", "DeepSeek draft", str(e))
       ds_draft = ""
@@ -668,7 +722,7 @@ def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: b
                                           draft=draft or "(Gemini draft unavailable)",
                                           ds_draft=ds_draft or "(DeepSeek draft unavailable)")
                      + ("\n\nKeep the final answer SHORT (the tech is driving): under 120 words, then 1-2 Team Notes bullets." if fast else ""),
-                     max_tokens=tokens + 300, timeout=60 if fast else 150, image_b64=image_b64)
+                     max_tokens=1500 if fast else 8000, timeout=60 if fast else 150, image_b64=image_b64)
       return final, research, draft, ds_draft
     except AIError as e:
       best = draft or ds_draft
@@ -1440,12 +1494,13 @@ def setup_panel():
 
 
 with guard("Cars in the shop"):
-  _topL, _topR = st.columns([2.6, 1.4])
+  _topL, _topM, _topR = st.columns([2.4, 1.2, 1.2])
   with _topL:
     jobs_panel()
-  with _topR:
+  with _topM:
     setup_panel()
-    with st.expander(f"🆕 What's new — v{APP_VERSION}"):
+  with _topR:
+    with st.expander("🆕 What's new"):
       st.markdown("\n".join(f"- {w}" for w in WHATS_NEW))
 
 
@@ -3266,8 +3321,8 @@ async function liveLoop(token) {
       const secs = (performance.now() - t0) / 1000;
       $("rate").textContent = `· ${(cycle / secs).toFixed(1)} refresh/s${batchOK ? " · multi-PID" : ""}`;
     }
-    driveChecks();
-    testsTick();
+    safely("Drive checks", driveChecks);
+    safely("Guided tests", testsTick);
   }
 }
 function startStream() { streaming = true; loopToken++; liveLoop(loopToken); $("pauseBtn").textContent = "⏸️ Pause"; log("Streaming live data…"); }
@@ -3320,7 +3375,7 @@ function plausibility() {
   // --- Hot idle ---
   const hotIdle = rpm != null && rpm >= 550 && rpm <= 950 && (num.ect ?? 0) >= 175 && spd < 1;
   plRule("mafidle", hotIdle && L && frsh("maf") && num.maf > 0 && num.maf < 0.6 * L,
-         `<b>MAF reads low</b>: ${(num.maf ?? 0).toFixed(1)} g/s at hot idle on a ${L.toFixed(1)}L engine (expect roughly ${(0.9 * L).toFixed(1)}–${(1.4 * L).toFixed(1)}). ` +
+         `<b>MAF reads low</b>: ${(num.maf ?? 0).toFixed(1)} g/s at hot idle on a ${L ? L.toFixed(1) : "?"}L engine (expect roughly ${(0.9 * L).toFixed(1)}–${(1.4 * L).toFixed(1)}). ` +
          `Dirty/under-reporting MAF or unmetered air after the sensor — check it against the fuel trims.`, ["maf"]);
   plRule("trimidle", hotIdle && trimsTrustworthy() && frsh("stft1") && Math.abs((num.stft1 ?? 0) + (num.ltft1 ?? 0)) > 10,
          `<b>Fuel trim off at idle</b>: Bank 1 total ${(((num.stft1 ?? 0) + (num.ltft1 ?? 0))).toFixed(0)}% ` +
@@ -3386,9 +3441,15 @@ function glitchWindow() {   // the last 15 s, full resolution, as a small CSV ta
   return ["sec_ago," + GB_KEYS.join(",")].concat(rows.map((g) => (t - g[0]).toFixed(1) + "," + g.slice(1).map((v) => v == null ? "" : v).join(","))).join("\n");
 }
 
+const SAFE_SEEN = {};
+function safely(name, fn) {   // a bug in one check must never freeze the live data
+  try { fn(); } catch (e) {
+    if (!SAFE_SEEN[name + e.message]) { SAFE_SEEN[name + e.message] = 1; logEvent("scanner-crash", name, e.message, e.stack); }
+  }
+}
 function driveChecks() {
-  plausibility();
-  glitchTick();
+  safely("Plausibility check", plausibility);
+  safely("Glitch catcher", glitchTick);
   if (!driveOn) return;
   const t1 = (num.stft1 ?? 0) + (num.ltft1 ?? 0);
   const hasB2 = num.stft2 !== undefined;
@@ -5146,7 +5207,7 @@ Use clean bold section headers and direct shop-floor language. Skip sections wit
 
 
 with tab2, guard("Live Telemetry tab"):
-  st.subheader("📊 Live Telemetry, OEM Enhanced PIDs & Monitors")
+  st.subheader("📊 Scanner & Live Data")
   context_bar()
   st.caption("Works in Chrome (Android, Windows, macOS, ChromeOS). Connecting reads the VIN and codes and fills them"
              " into the other tabs automatically. The Bluetooth link stays up while you use the rest of the app.")
@@ -5202,7 +5263,7 @@ def scan_context() -> str:
 
 
 with tab3, guard("Diagnose tab"):
-  st.subheader("🔧 Diagnose: Strategy, Scope Lab & Copilot")
+  st.subheader("🔧 Diagnose")
   context_bar()
 
   # ---------- 1. Codes ----------
@@ -5220,7 +5281,7 @@ with tab3, guard("Diagnose tab"):
         format_func=lambda c: f"{c} · {kinds.get(c, 'added')}",
     )
   else:
-    st.caption("Connect the scanner on the Live Telemetry tab — the codes it reads show up here automatically.")
+    st.caption("Connect the scanner on the 📊 Scanner tab — the codes it reads show up here automatically.")
   st.text_input("Add codes by hand (optional):", key="manual_dtc", placeholder="e.g. P0171, P0174")
   st.text_area("Symptoms / customer complaint (optional — works with or without codes):", key="symptoms", height=80,
                placeholder="e.g. Rough idle when cold, stumbles on hard acceleration, no check engine light")
@@ -5920,7 +5981,7 @@ if ss.get("drive_review_pending"):
 
 
 with tab5, guard("Log tab"):
-  st.subheader("📋 Vehicle Diagnostic Scan History")
+  st.subheader("📋 Scan history")
   st.caption("Logged automatically when the scanner syncs or you run a diagnostic tree. " +
              ("Saved permanently." if store_on() else "⚠️ Permanent storage isn't set up yet, so this resets when the app "
                                                        "restarts — export it regularly."))
@@ -5939,7 +6000,7 @@ with tab5, guard("Log tab"):
         store_delete("log")
         queue_update(toast="Log cleared")
   else:
-    st.info("No vehicles or DTCs logged yet. Connect the scanner (Live Telemetry tab) or run a diagnostic tree (Diagnose tab) to start logging.")
+    st.info("No vehicles or DTCs logged yet. Connect the scanner (📊 Scanner tab) or run a diagnostic tree (🔧 Diagnose tab) to start logging.")
 
   # ---------- 📅 Callbacks due ----------
   st.write("---")
@@ -6030,7 +6091,7 @@ with tab5, guard("Log tab"):
   drives = load_drives()
   if not drives:
     st.caption("Every test drive is saved automatically when you tap Stop Test Drive (and on your phone, even if the page "
-               "reloads mid-drive). Older drives on your phone: Live Telemetry tab → 🎯 Guided Tests → 📁 Saved test drives → Send to app.")
+               "reloads mid-drive). Older drives on your phone: 📊 Scanner tab → 🎯 Guided Tests → 📁 Saved test drives → Send to app.")
   else:
     ids = list(drives)
     if ss.get("drive_pick") not in ids:
@@ -6094,7 +6155,7 @@ with tab5, guard("Log tab"):
       *[f"- [{p.get('time')}] {p.get('kind')} in {p.get('where')}: {p.get('message')}"
         + (f"\n    {p.get('details', '').strip()[-1500:]}" if p.get("details") else "") for p in recent],
       "",
-      "SCANNER STATE: " + (json.dumps({k: v for k, v in dbg.items() if k != "trace"}) if dbg else "not sent (tap 🐞 Send debug info on the Live Telemetry tab)"),
+      "SCANNER STATE: " + (json.dumps({k: v for k, v in dbg.items() if k != "trace"}) if dbg else "not sent (tap 🐞 Send debug info on the 📊 Scanner tab)"),
       *(["LAST ADAPTER EXCHANGES:", *dbg.get("trace", [])[-60:]] if dbg.get("trace") else []),
   ])
   st.markdown("**Report to send Claude** — tap the copy icon in the top-right corner of the box:")
