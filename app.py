@@ -13,6 +13,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image, ImageEnhance, ImageOps
+import numpy as np
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
@@ -20,7 +21,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-10-21"
+APP_VERSION = "2026-10-25"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -43,6 +44,10 @@ WHATS_NEW = [
     "FLOW: Setup checklist at the top shows what's connected and exactly which Secret turns each feature on",
     "FIX: live data no longer freezes after connecting when the engine size isn't known yet",
     "FIX: Claude and DeepSeek no longer come back with empty answers on big jobs",
+    "NEW: Scope data files — load the CSV your scope saves and the app MEASURES it: burn time, firing kV, injector "
+    "pulse width & kick, pintle bump, crank pattern & bad teeth, relative compression by cylinder, cylinder pressure",
+    "NEW: Scope setup form (engine condition, what's on each channel, probe scale) and a known-good library "
+    "compared number by number",
 ]
 
 st.markdown(
@@ -145,7 +150,7 @@ DEFAULTS = {
     "ble_ai": None, "ble_last_event": None, "ble_dtcs": {}, "test_results": {},
     "tech_notes": "", "customer_summary": "", "fix_part": "", "fix_test": "", "fix_notes": "",
     "customer_email": "", "odometer": "", "estimate_rows": [], "follow_up_days": 0, "follow_up_note": "",
-    "follow_up_done": False, "drive_plan": "",
+    "follow_up_done": False, "drive_plan": "", "wave_result": None,
 }
 for _k, _v in DEFAULTS.items():
     ss.setdefault(_k, copy.deepcopy(_v))
@@ -1145,6 +1150,674 @@ def job_photos() -> list[dict]:
   return [dict(r.get("data") or {}, _id=r["id"]) for r in store_list("jobphoto", 12, {"job": ss.job_id})]
 
 
+# ========================================================
+# --- SCOPE DATA FILES: read a scope's CSV export and MEASURE it (no guessing from a photo) ---
+# ========================================================
+
+WAVE_TYPES = {
+    "volts": "Voltage signal (general)",
+    "sec_ign": "Secondary ignition (kV)",
+    "pri_ign": "Primary ignition (coil −, volts)",
+    "coil_amp": "Ignition coil current (amps)",
+    "inj_v": "Injector voltage (low side)",
+    "inj_amp": "Injector current (amps)",
+    "crank_sig": "Crank / cam sensor signal",
+    "rel_comp": "Relative compression (starter current, cranking)",
+    "px_cyl": "Pressure transducer — in cylinder",
+    "px_intake": "Pressure transducer — intake / vacuum",
+    "px_exhaust": "Pressure transducer — exhaust / tailpipe",
+}
+WAVE_UNITS = {"sec_ign": "kV", "pri_ign": "V", "coil_amp": "A", "inj_v": "V", "inj_amp": "A", "crank_sig": "V",
+              "rel_comp": "A", "px_cyl": "psi", "px_intake": "inHg/psi", "px_exhaust": "psi", "volts": "V"}
+_TIME_SCALE = {"s": 1.0, "sec": 1.0, "ms": 1e-3, "us": 1e-6, "µs": 1e-6, "μs": 1e-6, "ns": 1e-9}
+
+
+def _num(tok: str) -> float:
+  t = tok.strip().strip('"').replace("∞", "inf").replace("−", "-")
+  if t in ("", "-", "NaN", "nan"):
+    return np.nan
+  if t in ("inf", "+inf", "-inf"):
+    return np.nan   # PicoScope writes ∞ when a channel goes off scale
+  return float(t)
+
+
+def _is_num_row(fields: list[str]) -> bool:
+  ok = 0
+  for f in fields:
+    try:
+      _num(f)
+      ok += 1
+    except ValueError:
+      return False
+  return ok >= 1
+
+
+def parse_scope_csv(raw: bytes) -> dict:
+  """Read the CSV a scope saves (PicoScope, Hantek, Owon, Autel/Snap-on exports...).
+  Returns {"t": seconds array, "chans": [{"name", "unit", "y"}], "dt": sample spacing (s), "n": samples}."""
+  if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+    text = raw.decode("utf-16", errors="replace")
+  else:
+    text = raw.decode("utf-8-sig", errors="replace")
+  lines = [ln.strip() for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+  sample = [ln for ln in lines if ln][:80]
+  def split(ln, delim):
+    parts = [p.strip() for p in ln.split(delim)]
+    if delim != ",":   # ; or tab files often write 1,23 for 1.23
+      parts = [p.replace(",", ".") for p in parts]
+    while parts and parts[-1] == "":
+      parts.pop()
+    return parts
+  def find_start(rows):   # first line of real data = 3 numeric rows in a row, same width
+    for i in range(len(rows) - 3):
+      w = len(rows[i])
+      if w >= 1 and all(len(rows[i + k]) == w and _is_num_row(rows[i + k]) for k in range(3)):
+        return i
+    return None
+  # try the separators in a sensible order; use the first one that gives clean numeric rows with the most columns
+  start, rows, best_w = None, None, 0
+  for delim in [d for d in (";", "\t", ",") if any(d in ln for ln in sample)] or [","]:
+    rr = [split(ln, delim) for ln in lines[:4000]]
+    st0 = find_start(rr)
+    if st0 is not None and len(rr[st0]) > best_w:
+      best_w, start, chosen = len(rr[st0]), st0, delim
+  if start is not None:
+    rows = [split(ln, chosen) for ln in lines]
+  if start is None:
+    raise ValueError("Couldn't find the data rows in this file. Save the capture from your scope as CSV (text), not as its own format.")
+  width = len(rows[start])
+  # header: names + units from the lines just above the data
+  names, units, meta = [""] * width, [""] * width, {}
+  for ln in rows[:start]:
+    if len(ln) == 2 and not _is_num_row(ln[:1]):
+      meta[ln[0].lower()] = ln[1]
+  for ln in rows[max(0, start - 4):start]:
+    if len(ln) != width or _is_num_row(ln):
+      continue
+    if all(re.fullmatch(r"\(?\[?\s*[^\w]?\w{0,4}\s*\]?\)?", c or "") for c in ln) and any("(" in c or "[" in c for c in ln):
+      units = [re.sub(r"[()\[\]\s]", "", c) for c in ln]   # PicoScope's second line: (ms),(V),(V)
+    else:
+      names = ln
+  for k, nm in enumerate(names):   # "Time (ms)" / "CH1[V]" style
+    m = re.search(r"[(\[]\s*([^)\]]+?)\s*[)\]]", nm or "")
+    if m and not units[k]:
+      units[k] = m.group(1)
+    names[k] = re.sub(r"\s*[(\[][^)\]]*[)\]]", "", nm or "").strip()
+  data = None
+  try:
+    import pandas as pd
+    body = "\n".join(lines[start:])
+    df = pd.read_csv(io.StringIO(body), sep=chosen, header=None, decimal="," if chosen != "," else ".",
+                     na_values=["∞", "-∞", "+∞", "inf", "-inf", "NaN", ""], keep_default_na=True, engine="c")
+    df = df.iloc[:, :width].apply(pd.to_numeric, errors="coerce")
+    if df.shape[1] == width and len(df) >= 20:
+      data = df.to_numpy(dtype=float)
+  except Exception:
+    data = None
+  if data is None:
+    data = np.array([[_num(v) for v in r] for r in rows[start:] if len(r) == width and _is_num_row(r)], dtype=float)
+  if len(data) < 20:
+    raise ValueError("The file has too few samples to measure.")
+  first_is_time = bool(re.search(r"time|^t$|sec", (names[0] or "").lower())) or units[0].lower() in _TIME_SCALE
+  if width >= 2 and (first_is_time or np.all(np.diff(data[: min(200, len(data)), 0]) > 0)):
+    tu = units[0].lower().replace("μ", "µ") if units[0] else ""
+    scale = _TIME_SCALE.get(tu)
+    if scale is None:
+      span = np.nanmax(data[:, 0]) - np.nanmin(data[:, 0])
+      scale = 1.0 if span < 20 else 1e-3   # no unit given: seconds, unless that would be an absurdly long capture
+    t = data[:, 0] * scale
+    cols = list(range(1, width))
+  else:   # value-only export: needs the sample interval from the header
+    iv = next((v for k, v in meta.items() if "interval" in k or "sample period" in k), None)
+    rate = next((v for k, v in meta.items() if "sample rate" in k or "samplerate" in k), None)
+    try:
+      dt = _num(re.sub(r"[^0-9eE.+-]", "", iv)) if iv else 1.0 / _num(re.sub(r"[^0-9eE.+-]", "", rate))
+    except (ValueError, TypeError, ZeroDivisionError):
+      raise ValueError("This file has values but no time column or sample rate, so it can't be measured. "
+                       "Export with the time column included.")
+    t = np.arange(len(data)) * dt
+    cols = list(range(width))
+  chans = []
+  for c in cols:
+    y = data[:, c].copy()
+    u = (units[c] or "").strip()
+    if u.lower() == "mv":
+      y, u = y / 1000.0, "V"
+    elif u.lower() == "ma":
+      y, u = y / 1000.0, "A"
+    nm = names[c] or f"Channel {chr(64 + c) if cols[0] == 1 else c + 1}"
+    if np.isfinite(y).sum() >= 20:
+      chans.append({"name": nm, "unit": u or "V", "y": y})
+  if not chans:
+    raise ValueError("No usable channels in this file.")
+  dt = float(np.nanmedian(np.diff(t)))
+  return {"t": t, "chans": chans, "dt": dt, "n": len(t)}
+
+
+def envelope(t, y, n: int = 1200):
+  """Shrink to ~n points but keep every spike (min and max of each slice) — a firing line must not vanish."""
+  if len(t) <= n:
+    return t, y
+  k = int(np.ceil(len(t) / (n / 2)))
+  m = len(t) // k * k
+  tt, yy = t[:m].reshape(-1, k), y[:m].reshape(-1, k)
+  with np.errstate(all="ignore"):
+    i_min, i_max = np.nanargmin(np.where(np.isfinite(yy), yy, np.inf), axis=1), np.nanargmax(np.where(np.isfinite(yy), yy, -np.inf), axis=1)
+  rows = np.arange(len(tt))
+  first = np.minimum(i_min, i_max)
+  second = np.maximum(i_min, i_max)
+  t_out = np.column_stack([tt[rows, first], tt[rows, second]]).ravel()
+  y_out = np.column_stack([yy[rows, first], yy[rows, second]]).ravel()
+  return t_out, y_out
+
+
+def guess_type(ch: dict) -> str:
+  y, u = ch["y"], ch["unit"].lower()
+  hi, lo = np.nanmax(y), np.nanmin(y)   # use the true extremes: a firing line or injector kick is only a few samples
+  big = max(abs(hi), abs(lo))
+  if u == "kv":
+    return "sec_ign"
+  if u == "a":
+    return "rel_comp" if big > 40 else "coil_amp" if big > 3 else "inj_amp"
+  if big > 1000:
+    return "sec_ign"
+  if big > 120:
+    return "pri_ign"
+  if 25 < hi < 120 and np.nanmedian(y) > 9:
+    return "inj_v"
+  return "volts"
+
+
+# ---------- small helpers ----------
+def _smooth(y, n):
+  n = max(1, int(n))
+  if n <= 1:
+    return y
+  k = np.ones(n) / n
+  yy = np.where(np.isfinite(y), y, np.nanmedian(y))
+  return np.convolve(yy, k, mode="same")
+
+
+def _edges(y, hi, lo):
+  """Indices where the signal goes up through `hi` (after having been below `lo`) — hysteresis, so noise can't double-count."""
+  st_ = np.zeros(len(y), dtype=np.int8)
+  with np.errstate(invalid="ignore"):
+    st_[y > hi] = 1
+    st_[y < lo] = -1
+  idx = np.nonzero(st_)[0]
+  if len(idx) < 2:
+    return np.array([], dtype=int)
+  v = st_[idx]
+  return idx[np.nonzero((v[1:] == 1) & (v[:-1] == -1))[0] + 1]
+
+
+def _peaks(y, height, min_gap):
+  """Tallest point of each burst above `height`, at least `min_gap` samples apart."""
+  above = np.where(np.isfinite(y) & (y > height))[0]
+  if not len(above):
+    return np.array([], dtype=int)
+  groups, cur = [], [above[0]]
+  for i in above[1:]:
+    if i - cur[-1] <= max(2, min_gap // 4):
+      cur.append(i)
+    else:
+      groups.append(cur)
+      cur = [i]
+  groups.append(cur)
+  pk = [g[int(np.nanargmax(y[g]))] for g in groups]
+  out = []
+  for p in pk:
+    if out and p - out[-1] < min_gap:
+      if y[p] > y[out[-1]]:
+        out[-1] = p
+    else:
+      out.append(p)
+  return np.array(out, dtype=int)
+
+
+def _stats(vals):
+  v = np.array([x for x in vals if x is not None and np.isfinite(x)], dtype=float)
+  if not len(v):
+    return None
+  return {"avg": float(np.mean(v)), "min": float(np.min(v)), "max": float(np.max(v)),
+          "spread_pct": float((np.max(v) - np.min(v)) / abs(np.mean(v)) * 100) if np.mean(v) else 0.0}
+
+
+def _r(x, d=2):
+  return None if x is None or not np.isfinite(x) else round(float(x), d)
+
+
+# ---------- per-type measurements ----------
+def _general(t, y):
+  ok = np.isfinite(y)
+  yy = y[ok]
+  hi, lo = float(np.percentile(yy, 99)), float(np.percentile(yy, 1))
+  mid = (hi + lo) / 2
+  e = _edges(y, mid + (hi - lo) * 0.1, mid - (hi - lo) * 0.1)
+  per = float(np.median(np.diff(t[e]))) if len(e) >= 3 else None
+  return {"min": _r(float(np.min(yy))), "max": _r(float(np.max(yy))), "average": _r(float(np.mean(yy))),
+          "peak_to_peak": _r(hi - lo), "frequency_hz": _r(1 / per, 1) if per else None,
+          "duty_cycle_pct": _r(float(np.mean(yy > mid) * 100), 1) if (hi - lo) > 0.2 else None}
+
+
+def _sec_ign(t, y, dt):
+  if abs(np.nanmin(y)) > abs(np.nanmax(y)):
+    y = -y   # inverted probe or negative-fire coil
+  peak = float(np.nanpercentile(y, 99.95))
+  pk = _peaks(y, max(0.45 * peak, 2.5), int(0.004 / dt))   # firings at least 4 ms apart
+  ev, notes = [], []
+  for p in pk:
+    w = int(0.0045 / dt)
+    seg = y[p: p + w]
+    if len(seg) < 10:
+      continue
+    s = next((i for i in range(1, len(seg)) if seg[i] < 0.35 * y[p]), None)
+    if s is None:
+      continue
+    first = seg[s: s + max(3, int(0.0004 / dt))]
+    level = float(np.median(first))
+    if level <= 0.2:
+      continue
+    e = next((i for i in range(s + max(2, int(0.0002 / dt)), len(seg)) if seg[i] < 0.35 * level), None)
+    if e is None:
+      continue
+    line = seg[s:e]
+    slope = float(np.polyfit(np.arange(len(line)) * dt * 1000, line, 1)[0]) if len(line) > 5 else None
+    after = seg[e: e + int(0.002 / dt)] - np.median(seg[-max(5, int(0.0005 / dt)):])
+    osc = int(np.sum(np.diff(np.sign(after[np.abs(after) > 0.08 * level])) != 0) // 2) if len(after) > 5 else 0
+    ev.append({"time_ms": _r(t[p] * 1000, 2), "firing_kv": _r(y[p], 1), "spark_line_kv": _r(level, 2),
+               "burn_ms": _r((e - s) * dt * 1000, 2), "spark_slope_kv_per_ms": _r(slope, 2), "coil_oscillations": osc})
+  m = {"events": len(ev)}
+  if ev:
+    for k in ("firing_kv", "spark_line_kv", "burn_ms", "coil_oscillations"):
+      st_ = _stats([x[k] for x in ev])
+      if st_:
+        m[k] = _r(st_["avg"], 2)
+        m[k + "_range"] = f"{_r(st_['min'], 2)}–{_r(st_['max'], 2)}"
+    if len(ev) >= 2:
+      m["firing_kv_spread_pct"] = _r(_stats([x["firing_kv"] for x in ev])["spread_pct"], 0)
+    b, f = m.get("burn_ms"), m.get("firing_kv")
+    if b is not None and b < 0.8:
+      notes.append(f"Short burn time ({b} ms; ~1.0–2.0 ms is typical): the spark ran out of energy early — wide gap, lean, "
+                   "high secondary resistance, or a weak coil.")
+    if b is not None and b > 2.5:
+      notes.append(f"Long burn time ({b} ms): low resistance in the spark path — fouled/shorted plug, rich mixture, or low compression.")
+    if f is not None and f > 20:
+      notes.append(f"High firing voltage ({f} kV): big gap, open/high-resistance plug wire or boot, lean, or high cylinder pressure.")
+    if f is not None and f < 4:
+      notes.append(f"Low firing voltage ({f} kV): fouled plug, narrow gap, rich, low compression — or a secondary leak to ground.")
+    sl = m.get("spark_line_kv")
+    sl_slope = _stats([x["spark_slope_kv_per_ms"] for x in ev])
+    if sl_slope and sl_slope["avg"] > 1.0:
+      notes.append("Spark line slopes UP: resistance rising during the burn — lean cylinder or high-resistance secondary.")
+    if m.get("firing_kv_spread_pct") and m["firing_kv_spread_pct"] > 35:
+      notes.append(f"Firing voltage varies {m['firing_kv_spread_pct']}% between events — compare cylinders, or look for an intermittent fault.")
+    if sl is not None and sl > 4:
+      notes.append(f"High spark line ({sl} kV): high resistance in the secondary or a lean cylinder.")
+  return m, ev, notes
+
+
+def _pri_ign(t, y, dt):
+  peak = float(np.nanpercentile(y, 99.95))
+  pk = _peaks(y, max(0.5 * peak, 80), int(0.004 / dt))
+  ev, notes = [], []
+  for p in pk:
+    back = y[max(0, p - int(0.012 / dt)): p][::-1]
+    d = 0
+    while d < len(back) and back[d] < 2.5:
+      d += 1
+    seg = y[p: p + int(0.004 / dt)]
+    s = next((i for i in range(1, len(seg)) if seg[i] < 0.5 * y[p]), None)
+    burn = None
+    if s is not None:
+      level = float(np.median(seg[s: s + max(3, int(0.0003 / dt))]))
+      e = next((i for i in range(s + 2, len(seg)) if seg[i] < 0.6 * level), None)
+      burn = (e - s) * dt * 1000 if e else None
+    ev.append({"time_ms": _r(t[p] * 1000, 2), "peak_v": _r(y[p], 0), "dwell_ms": _r(d * dt * 1000, 2) if d > 2 else None,
+               "burn_ms": _r(burn, 2)})
+  m = {"events": len(ev)}
+  for k in ("peak_v", "dwell_ms", "burn_ms"):
+    st_ = _stats([x[k] for x in ev])
+    if st_:
+      m[k] = _r(st_["avg"], 2)
+  if m.get("peak_v") and m["peak_v"] < 200:
+    notes.append(f"Low primary inductive peak ({m['peak_v']} V; 250–400 V is common): weak coil, low current, or a primary circuit problem.")
+  if m.get("dwell_ms") and m["dwell_ms"] < 1.0:
+    notes.append(f"Very short dwell ({m['dwell_ms']} ms): the coil may not be reaching full current.")
+  return m, ev, notes
+
+
+def _ramp_events(t, y, dt, min_gap_s):
+  peak = float(np.nanpercentile(y, 99.9))
+  pk = _peaks(y, 0.5 * peak, int(min_gap_s / dt))
+  out = []
+  for p in pk:
+    back = y[max(0, p - int(0.02 / dt)): p + 1][::-1]
+    start = next((i for i in range(len(back)) if back[i] < 0.08 * y[p]), len(back) - 1)
+    out.append((p, p - start))
+  return out
+
+
+def _coil_amp(t, y, dt):
+  ev, notes = [], []
+  for p, s in _ramp_events(t, y, dt, 0.004):
+    seg = y[s: p + 1]
+    top = seg[seg > 0.9 * y[p]]
+    ev.append({"time_ms": _r(t[p] * 1000, 2), "peak_a": _r(y[p], 2), "ramp_ms": _r((p - s) * dt * 1000, 2),
+               "current_limited": bool(len(top) * dt > 0.0003)})
+  m = {"events": len(ev)}
+  for k in ("peak_a", "ramp_ms"):
+    st_ = _stats([x[k] for x in ev])
+    if st_:
+      m[k] = _r(st_["avg"], 2)
+      m[k + "_spread_pct"] = _r(st_["spread_pct"], 0)
+  if m.get("peak_a_spread_pct", 0) > 20:
+    notes.append(f"Peak coil current varies {m['peak_a_spread_pct']}% — if this is several coils, the low or fast-ramping one is suspect.")
+  return m, ev, notes
+
+
+def _inj_v(t, y, dt):
+  supply = float(np.nanpercentile(y, 60))
+  lo_thr = min(3.0, supply * 0.3)
+  ev, notes = [], []
+  down = _edges(-y, -lo_thr, -(supply * 0.7))   # falling through the low threshold = driver turns on
+  for d in down:
+    k = d
+    while k < len(y) and y[k] < supply * 0.7:
+      k += 1
+    if k >= len(y):
+      break
+    seg = y[k: k + int(0.003 / dt)]
+    kick = float(np.nanmax(seg)) if len(seg) else None
+    kick_i = int(np.nanargmax(seg)) if len(seg) else 0
+    tail = seg[kick_i:]
+    settle = next((i for i in range(len(tail)) if tail[i] < supply + 1.0), None)
+    bump = False
+    if settle is not None and settle + 5 < len(tail):
+      rest = tail[settle: settle + int(0.0015 / dt)] - supply
+      bump = bool(len(rest) > 5 and np.nanmax(_smooth(rest, max(1, int(0.00005 / dt)))) > 0.35)
+    ev.append({"time_ms": _r(t[d] * 1000, 2), "pulse_width_ms": _r((k - d) * dt * 1000, 2), "kick_v": _r(kick, 1),
+               "pintle_bump": bump})
+  m = {"events": len(ev), "supply_v": _r(supply, 2)}
+  for k in ("pulse_width_ms", "kick_v"):
+    st_ = _stats([x[k] for x in ev])
+    if st_:
+      m[k] = _r(st_["avg"], 2)
+      m[k + "_spread_pct"] = _r(st_["spread_pct"], 0)
+  if ev:
+    m["pintle_bump_seen"] = f"{sum(x['pintle_bump'] for x in ev)} of {len(ev)}"
+  if m.get("kick_v") is not None and m["kick_v"] < 35:
+    notes.append(f"Low inductive kick ({m['kick_v']} V; port injectors usually spike ~45–80 V): shorted injector winding or a "
+                 "clamped/suppressed driver — compare with a known-good injector on this engine.")
+  if ev and sum(x["pintle_bump"] for x in ev) == 0 and dt < 0.00005:
+    notes.append("No pintle bump found after the kick: possible sticking injector — compare with the other injectors "
+                 "(some designs and slow sample rates won't show it).")
+  if m.get("supply_v") is not None and m["supply_v"] < 11.5:
+    notes.append(f"Injector supply only {m['supply_v']} V while off: check the feed circuit and fuse for voltage drop.")
+  return m, ev, notes
+
+
+def _inj_amp(t, y, dt):
+  ev, notes = [], []
+  for p, s in _ramp_events(t, y, dt, 0.004):
+    seg = _smooth(y[s: p + 1], max(1, int(0.00004 / dt)))
+    hook = None
+    if len(seg) > 20:
+      dy = np.diff(seg)
+      body = dy[int(len(dy) * 0.15): int(len(dy) * 0.95)]
+      if len(body) and np.min(body) < 0.15 * np.max(dy):
+        hook = (int(np.argmin(body)) + int(len(dy) * 0.15)) * dt * 1000
+    ev.append({"time_ms": _r(t[p] * 1000, 2), "peak_a": _r(y[p], 2), "ramp_ms": _r((p - s) * dt * 1000, 2),
+               "pintle_hook_ms": _r(hook, 2)})
+  m = {"events": len(ev)}
+  for k in ("peak_a", "ramp_ms", "pintle_hook_ms"):
+    st_ = _stats([x[k] for x in ev])
+    if st_:
+      m[k] = _r(st_["avg"], 2)
+      m[k + "_spread_pct"] = _r(st_["spread_pct"], 0)
+  if ev and not any(x["pintle_hook_ms"] for x in ev):
+    notes.append("No pintle 'hook' (dip in the current ramp) found — the injector may not be opening cleanly; "
+                 "compare against a known-good injector.")
+  return m, ev, notes
+
+
+def _crank_sig(t, y, dt):
+  hi, lo = float(np.nanpercentile(y, 98)), float(np.nanpercentile(y, 2))
+  mid, h = (hi + lo) / 2, (hi - lo) * 0.15
+  e = _edges(y, mid + h, mid - h)
+  m, notes, ev = {"amplitude_pp": _r(hi - lo), "low_level_v": _r(lo), "high_level_v": _r(hi)}, [], []
+  if len(e) < 6:
+    m["teeth_seen"] = int(len(e))
+    notes.append("Too few teeth in this capture to analyze the pattern — capture at least one full revolution.")
+    return m, ev, notes
+  iv = np.diff(t[e])
+  # local reference = median of the neighbors, so normal speed changes while cranking don't count as defects
+  ref = np.array([np.median(iv[max(0, i - 6): i + 7]) for i in range(len(iv))])
+  ratio = iv / ref
+  gaps = np.where(ratio > 1.6)[0]
+  odd = np.where((np.abs(ratio - 1) > 0.18) & (ratio <= 1.6))[0]
+  m["teeth_seen"] = int(len(e))
+  m["frequency_hz"] = _r(1 / float(np.median(iv)), 1)
+  if len(gaps):
+    missing = int(round(float(np.median(ratio[gaps]))) - 1)
+    m["missing_teeth_at_gap"] = missing
+    if len(gaps) >= 2:
+      between = np.diff(gaps)
+      teeth = int(np.median(between))
+      m["pattern"] = f"{teeth + missing}-{missing}"
+      rev_s = float(np.median([t[e[gaps[i + 1]]] - t[e[gaps[i]]] for i in range(len(gaps) - 1)]))
+      m["rpm_from_wheel"] = _r(60 / rev_s, 0) if rev_s > 0 else None
+  m["irregular_intervals"] = int(len(odd))
+  if len(odd):
+    m["irregular_tooth_times_ms"] = ", ".join(str(_r(t[e[i]] * 1000, 1)) for i in odd[:8])
+    repeats = False
+    if len(gaps) >= 2 and len(odd) >= 2:
+      # position of each odd tooth counted from the gap before it: same count every turn = the same physical tooth
+      pos = [int(i - gaps[gaps < i].max()) for i in odd if np.any(gaps < i)]
+      repeats = len(pos) >= 2 and len(set(pos)) <= max(1, len(pos) // 3)
+    if repeats:
+      m["odd_tooth_repeats_every_rev"] = True
+      notes.append(f"An odd tooth interval repeats at the SAME tooth every revolution ({len(odd)} times) → a physical problem on "
+                   "the reluctor/tone wheel (damaged, bent or chipped tooth, debris), not wiring. Inspect the wheel.")
+    else:
+      notes.append(f"{len(odd)} tooth interval(s) more than 18% off their neighbors at random spots → more like a dropout: "
+                   "wiring/connector, air gap, or electrical noise. Wiggle-test the harness while watching.")
+  if lo > 0.8 and hi < 15:
+    notes.append(f"Signal never goes fully low (lowest {_r(lo)} V): bad sensor ground, pull-down problem, or a shorted sensor output.")
+  if abs(np.nanpercentile(y, 2)) > 0.5 and np.nanpercentile(y, 2) < 0 < np.nanpercentile(y, 98):
+    m["signal_kind"] = "AC (magnetic / variable reluctance)"
+    if hi - lo < 0.5:
+      notes.append(f"Weak AC signal ({_r(hi - lo)} V peak-to-peak): check air gap, the reluctor, and the sensor itself "
+                   "(amplitude rises with speed — compare at the same RPM).")
+  else:
+    m["signal_kind"] = "Digital (square wave)"
+  return m, ev, notes
+
+
+def _rel_comp(t, y, dt, cyl):
+  ys = _smooth(y, max(1, int(0.004 / dt)))
+  steady = ys[int(len(ys) * 0.15):]   # skip the starter's inrush at the start of the crank
+  off = int(len(ys) * 0.15)
+  base, top = float(np.nanpercentile(steady, 20)), float(np.nanpercentile(steady, 98))
+  pk = _peaks(ys, base + (top - base) * 0.45, int(0.03 / dt))
+  pk = pk[pk >= off]
+  m, notes, ev = {}, [], []
+  if len(pk) < 4:
+    notes.append("Couldn't find enough compression humps. Disable fuel/ignition, clamp the starter cable, and crank 4–5 s.")
+    return {"humps": int(len(pk))}, ev, notes
+  amps = ys[pk] - base
+  avg = float(np.mean(amps))
+  for i, p in enumerate(pk):
+    ev.append({"hump": i + 1, "time_ms": _r(t[p] * 1000, 1), "peak_a": _r(ys[p], 1), "relative_pct": _r(amps[i] / avg * 100, 0)})
+  m["humps"] = len(pk)
+  m["average_cranking_a"] = _r(float(np.nanmean(steady)), 0)
+  per = float(np.median(np.diff(t[pk])))
+  if cyl:
+    m["cranking_rpm"] = _r(120 / (per * cyl), 0)
+    m["cylinders"] = cyl
+    # group humps into the same cylinder position each engine cycle
+    pos = {}
+    for i, a in enumerate(amps):
+      pos.setdefault(i % cyl, []).append(a / avg * 100)
+    m["relative_by_position_pct"] = {f"hump {k + 1} of {cyl}": _r(float(np.mean(v)), 0) for k, v in sorted(pos.items())}
+    weakest = min(pos.items(), key=lambda kv: np.mean(kv[1]))
+    if np.mean(weakest[1]) < 85:
+      notes.append(f"Hump {weakest[0] + 1} of every {cyl} is only {_r(float(np.mean(weakest[1])), 0)}% of average — a low-compression "
+                   "cylinder. Put a sync on cylinder 1's ignition (fuel disabled, spark on) to name it by firing order, then confirm with "
+                   "a compression or leak-down test.")
+  low = [x for x in ev if x["relative_pct"] is not None and x["relative_pct"] < 85]
+  if low and not cyl:
+    notes.append(f"{len(low)} hump(s) under 85% of average — possible low compression. Enter the cylinder count to group them.")
+  if not low:
+    notes.append("Humps are even (all within 15% of average) → no big compression difference between cylinders.")
+  return m, ev, notes
+
+
+def _px_cyl(t, y, dt):
+  top = float(np.nanpercentile(y, 99.9))
+  pk = _peaks(y, top * 0.55, int(0.02 / dt))
+  m, ev, notes = {}, [], []
+  if len(pk) < 2:
+    notes.append("Capture at least two full engine cycles (two compression peaks) so the app can map crank degrees.")
+    m["compression_peaks"] = int(len(pk))
+    if len(pk):
+      m["peak_pressure"] = _r(float(y[pk[0]]), 1)
+    return m, ev, notes
+  cyc = float(np.median(np.diff(t[pk])))   # one compression peak per 720° (4-stroke)
+  m["engine_rpm_from_cycle"] = _r(120 / cyc, 0)
+  peaks = y[pk]
+  m["peak_pressure"] = _r(float(np.mean(peaks)), 1)
+  m["peak_pressure_spread_pct"] = _r(float((peaks.max() - peaks.min()) / peaks.mean() * 100), 0)
+  deg = 720.0 / cyc
+  samples = []
+  for a, b in zip(pk[:-1], pk[1:]):
+    seg_t = (t[a:b] - t[a]) * deg   # 0° = compression TDC (the peak)
+    seg_y = y[a:b]
+    def at(lo_d, hi_d, fn):
+      sel = (seg_t >= lo_d) & (seg_t < hi_d)
+      return float(fn(seg_y[sel])) if np.any(sel) else np.nan
+    samples.append({"exh_stroke_avg": at(200, 340, np.mean), "intake_stroke_min": at(380, 520, np.min),
+                    "overlap_tdc": at(350, 370, np.mean), "bdc_power": at(170, 190, np.mean)})
+  for k in ("exh_stroke_avg", "intake_stroke_min", "overlap_tdc", "bdc_power"):
+    v = np.nanmean([s[k] for s in samples])
+    m[k] = _r(float(v), 2)
+  for i, p in enumerate(pk):
+    ev.append({"cycle": i + 1, "time_ms": _r(t[p] * 1000, 1), "peak": _r(float(y[p]), 1)})
+  notes.append("Degrees are measured from the compression peak (= TDC) assuming a 4-stroke 720° cycle; for exact valve "
+               "timing, add a cam/crank or ignition sync channel.")
+  if m["peak_pressure_spread_pct"] and m["peak_pressure_spread_pct"] > 8:
+    notes.append(f"Compression peaks vary {m['peak_pressure_spread_pct']}% cycle to cycle — leaking valve, sticking valve, or a ring problem.")
+  return m, ev, notes
+
+
+def _px_pulses(t, y, dt, cyl, kind):
+  ys = _smooth(y, max(1, int(0.002 / dt)))
+  base = float(np.nanmedian(ys))
+  sig = -(ys - base) if kind == "px_intake" else (ys - base)
+  top = float(np.nanpercentile(sig, 99))
+  pk = _peaks(sig, top * 0.4, int(0.008 / dt))
+  m, ev, notes = {"pulses": int(len(pk)), "average_level": _r(base, 2)}, [], []
+  if len(pk) < 3:
+    notes.append("Too few pulses to compare — capture at least two engine cycles.")
+    return m, ev, notes
+  amps = sig[pk]
+  avg = float(np.mean(amps))
+  for i, p in enumerate(pk):
+    ev.append({"pulse": i + 1, "time_ms": _r(t[p] * 1000, 1), "relative_pct": _r(float(amps[i] / avg * 100), 0)})
+  if cyl:
+    pos = {}
+    for i, a in enumerate(amps):
+      pos.setdefault(i % cyl, []).append(a / avg * 100)
+    m["relative_by_position_pct"] = {f"pulse {k + 1} of {cyl}": _r(float(np.mean(v)), 0) for k, v in sorted(pos.items())}
+    weak = min(pos.items(), key=lambda kv: np.mean(kv[1]))
+    if np.mean(weak[1]) < 80:
+      what = "intake pulse (possible intake valve not opening fully / cam lobe)" if kind == "px_intake" else \
+          "exhaust pulse (misfire, low compression, or an exhaust valve problem in that cylinder)"
+      notes.append(f"Pulse {weak[0] + 1} of every {cyl} is weak ({_r(float(np.mean(weak[1])), 0)}% of average): {what}. "
+                   "Add a cylinder 1 sync to name the cylinder by firing order.")
+  m["pulse_spread_pct"] = _r(float((amps.max() - amps.min()) / avg * 100), 0)
+  return m, ev, notes
+
+
+def measure_channel(t, y, dt, wtype: str, cyl: int | None = None) -> dict:
+  """Measure one channel as the given type. Returns {"type", "measurements", "events", "notes"}."""
+  ok = np.isfinite(y)
+  if ok.sum() < 20:
+    return {"type": wtype, "measurements": {}, "events": [], "notes": ["Channel has no usable data (off scale?)."]}
+  try:
+    if wtype == "sec_ign":
+      m, ev, notes = _sec_ign(t, y, dt)
+    elif wtype == "pri_ign":
+      m, ev, notes = _pri_ign(t, y, dt)
+    elif wtype == "coil_amp":
+      m, ev, notes = _coil_amp(t, y, dt)
+    elif wtype == "inj_v":
+      m, ev, notes = _inj_v(t, y, dt)
+    elif wtype == "inj_amp":
+      m, ev, notes = _inj_amp(t, y, dt)
+    elif wtype == "crank_sig":
+      m, ev, notes = _crank_sig(t, y, dt)
+    elif wtype == "rel_comp":
+      m, ev, notes = _rel_comp(t, y, dt, cyl)
+    elif wtype == "px_cyl":
+      m, ev, notes = _px_cyl(t, y, dt)
+    elif wtype in ("px_intake", "px_exhaust"):
+      m, ev, notes = _px_pulses(t, y, dt, cyl, wtype)
+    else:
+      m, ev, notes = {}, [], []
+  except Exception as e:   # a measuring problem must never stop the rest of the analysis
+    m, ev, notes = {}, [], [f"Couldn't measure this as {WAVE_TYPES.get(wtype, wtype)}: {e}"]
+  gen = _general(t, y)
+  for k, v in gen.items():
+    m.setdefault(k, v)
+  return {"type": wtype, "measurements": m, "events": ev, "notes": notes}
+
+
+def capture_summary(cap: dict, setup: dict, results: list[dict]) -> str:
+  """Compact text for the AI: the setup, every measurement and a small trace per channel."""
+  lines = [f"SCOPE CAPTURE (raw data file, {cap['n']} samples, {(cap['t'][-1] - cap['t'][0]) * 1000:.1f} ms long, "
+           f"sample interval {cap['dt'] * 1e6:.1f} µs)",
+           f"Engine condition: {setup.get('condition') or 'not given'} · RPM: {setup.get('rpm') or 'not given'} · "
+           f"Cylinders: {setup.get('cyl') or '?'} · Firing order: {setup.get('fo') or 'not given'}"]
+  for ch, r, s in zip(cap["chans"], results, setup.get("chans", [])):
+    lines.append(f"\n--- {ch['name']}: {WAVE_TYPES.get(r['type'], r['type'])}"
+                 + (f", cylinder {s.get('cyl_no')}" if s.get("cyl_no") else "") + f" ({s.get('unit') or ch['unit']}) ---")
+    lines.append("MEASURED: " + json.dumps(r["measurements"]))
+    if r["events"]:
+      lines.append(f"EVENTS (first 12 of {len(r['events'])}): " + json.dumps(r["events"][:12]))
+    if r["notes"]:
+      lines.append("APP FLAGS: " + " | ".join(r["notes"]))
+    tt, yy = envelope(cap["t"], s.get("_y", ch["y"]), 160)
+    lines.append("TRACE (ms:value, min/max per slice): " + " ".join(f"{a * 1000:.2f}:{b:.3g}" for a, b in zip(tt, yy) if np.isfinite(b)))
+  return "\n".join(lines)
+
+
+def name_cylinders(humps: list[dict], sync_ms: list[float], cyl: int, firing_order: str, sync_cyl: int) -> dict | None:
+  """Relative compression + an ignition sync on one cylinder: the hump that lines up with that cylinder's spark is
+  that cylinder (peak cranking current = compression TDC), and the humps after it follow the firing order."""
+  fo = [int(x) for x in re.findall(r"\d+", firing_order or "")]
+  if not humps or not sync_ms or not cyl or len(fo) != cyl or sync_cyl not in fo:
+    return None
+  ht = np.array([h["time_ms"] for h in humps], dtype=float)
+  per = float(np.median(np.diff(ht))) if len(ht) > 2 else None
+  if not per:
+    return None
+  anchor = None
+  for s_ in sync_ms:
+    j = int(np.argmin(np.abs(ht - s_)))
+    if abs(ht[j] - s_) < 0.35 * per:
+      anchor = j
+      break
+  if anchor is None:
+    return None
+  start = fo.index(sync_cyl)
+  by = {}
+  for j, h in enumerate(humps):
+    c = fo[(start + (j - anchor)) % cyl]
+    by.setdefault(c, []).append(h["relative_pct"])
+  return {f"cyl {c}": _r(float(np.mean(v)), 0) for c, v in sorted(by.items())}
+
+
 # --- RECALLS (NHTSA, free) ---
 @st.cache_data(ttl=86400, show_spinner=False, max_entries=300)
 def nhtsa_recalls(make: str, model: str, year: str) -> list[dict]:
@@ -1169,7 +1842,8 @@ def vehicle_recalls() -> list[dict]:
 JOB_FIELDS = ["customer_name", "customer_phone", "customer_address", "vin_input", "active_vin", "vehicle_info", "vehicle_make",
               "vehicle_details", "sel_codes", "manual_dtc", "symptoms", "ble_dtcs", "scan_data", "test_results", "dtc_result",
               "scope_result", "chat_history", "tech_notes", "customer_summary", "fix_part", "fix_test", "fix_notes",
-              "customer_email", "odometer", "estimate_rows", "follow_up_days", "follow_up_note", "follow_up_done"]
+              "customer_email", "odometer", "estimate_rows", "follow_up_days", "follow_up_note", "follow_up_done",
+              "wave_result"]
 
 
 def job_snapshot() -> dict:
@@ -5262,6 +5936,221 @@ def scan_context() -> str:
           + f"Live data snapshot at sync ({sd.get('at') or '?'}): {pids}" + tests + shop_context())
 
 
+# ========================================================
+# --- SCOPE DATA FILE SCREEN (Diagnose tab, section 2) ---
+# ========================================================
+WAVE_CONDITIONS = ["Hot idle", "Cold idle", "Cranking (no start)", "2500 RPM steady", "Snap throttle",
+                   "Road test / under load", "Key on, engine off"]
+WAVE_PROMPT = """You are a master automotive scope diagnostician (ignition, injectors, sensors, current ramps, pressure transducers).
+The app measured this capture from the scope's RAW DATA FILE — the numbers below are exact measurements, not guesses
+from a photo. Base your analysis on them. Never invent a measurement that isn't here.
+The typical ranges in APP FLAGS are general guides; this engine's own specs can differ — say so when it matters.
+
+Vehicle: {vehicle}
+Fault codes: {codes}
+Symptoms / complaint: {symptoms}
+{scan}
+
+{capture}
+{compare}
+
+FORMAT STRICTLY AS:
+### 1. What the measurements show
+(Per channel: the key numbers and what each one means, in shop terms.)
+### 2. Normal vs. abnormal
+(Which numbers are out of line and why; cross-check the channels against each other and against the codes/scan data.)
+### 3. Most likely cause(s), ranked
+### 4. Next test to confirm
+(Exactly what to hook up where, what to look for, and what result proves it.)"""
+
+
+@st.cache_data(show_spinner=False, max_entries=6)
+def load_capture(raw: bytes) -> dict:
+  return parse_scope_csv(raw)
+
+
+@st.cache_data(show_spinner=False, max_entries=48)
+def measure_cached(raw: bytes, idx: int, wtype: str, factor: float, cyl: int) -> dict:
+  cap = load_capture(raw)
+  return measure_channel(cap["t"], cap["chans"][idx]["y"] * factor, cap["dt"], wtype, cyl or None)
+
+
+def _pretty_key(k: str) -> str:
+  out = k
+  for suf, lab in (("_kv_per_ms", " (kV/ms)"), ("_kv", " (kV)"), ("_ms", " (ms)"), ("_pct", " (%)"), ("_hz", " (Hz)"),
+                   ("_pp", " (peak-to-peak)"), ("_a", " (A)"), ("_v", " (V)")):
+    if out.endswith(suf):
+      out = out[: -len(suf)] + lab
+      break
+  return out.replace("_", " ").capitalize()
+
+
+def _pretty_val(v):
+  if isinstance(v, dict):
+    return " · ".join(f"{k}: {x}%" if k.startswith(("hump", "pulse", "cyl")) else f"{k}: {x}" for k, x in v.items())
+  if isinstance(v, bool):
+    return "yes" if v else "no"
+  return "—" if v is None else str(v)
+
+
+def scope_data_section():
+  st.markdown("**📈 Scope data file — the app measures it exactly (best)**")
+  st.caption("On the scope, save the capture as **CSV**: PicoScope → File → Save As → CSV · Hantek / Owon → Save → CSV · "
+             "most others: Export → CSV or text. A photo of the screen (further down) still works, but a data file "
+             "gives real numbers instead of the AI's best read of a picture.")
+  wf = st.file_uploader("Scope CSV file", type=["csv", "txt"], key=f"wave_csv_{ss.get('job_n', 0)}")
+  if not wf:
+    if ss.get("wave_result"):
+      with st.expander(f"🔬 Last scope data analysis · {ss.wave_result.get('team', '')}", expanded=False):
+        st.markdown(ss.wave_result["text"])
+    return
+  raw = wf.getvalue()
+  try:
+    with st.spinner("Reading the capture..."):
+      cap = load_capture(raw)
+  except ValueError as e:
+    st.error(str(e))
+    return
+  except Exception as e:
+    log_problem("scope", "Scope CSV", f"{type(e).__name__}: {e}")
+    st.error("Couldn't read that file. Make sure it's the CSV/text export from the scope.")
+    return
+  fid = hashlib.md5(raw).hexdigest()[:10]
+  st.caption(f"✅ {len(cap['chans'])} channel(s) · {cap['n']:,} samples · {(cap['t'][-1] - cap['t'][0]) * 1000:.1f} ms long · "
+             f"one sample every {cap['dt'] * 1e6:.1f} µs")
+
+  # ---- setup: what was going on, and what's on each channel ----
+  vd = ss.vehicle_details or {}
+  try:
+    def_cyl = int(str(vd.get("Engine Number of Cylinders") or "0").split(".")[0])
+  except ValueError:
+    def_cyl = 0
+  c1, c2, c3, c4 = st.columns(4)
+  cond = c1.selectbox("Engine condition", WAVE_CONDITIONS, key=f"wv_cond_{fid}")
+  rpm = c2.text_input("RPM (optional)", key=f"wv_rpm_{fid}")
+  cyl = int(c3.number_input("Cylinders", 0, 16, value=min(max(def_cyl, 0), 16), key=f"wv_cyl_{fid}", help="0 = unknown"))
+  fo = c4.text_input("Firing order (optional)", key=f"wv_fo_{fid}", placeholder="e.g. 1-3-4-2")
+  setup = {"condition": cond, "rpm": rpm, "cyl": cyl or None, "fo": fo, "chans": []}
+  keys = list(WAVE_TYPES)
+  results = []
+  for i, ch in enumerate(cap["chans"]):
+    a, b, c = st.columns([2.4, 0.8, 1.2])
+    g = guess_type(ch)
+    wtype = a.selectbox(f"{ch['name']} ({ch['unit']}) is:", keys, index=keys.index(g), format_func=lambda k: WAVE_TYPES[k],
+                        key=f"wv_t_{fid}_{i}")
+    cyl_no = int(b.number_input("Cyl #", 0, 16, value=0, key=f"wv_c_{fid}_{i}", help="Cylinder this probe is on (0 = not one cylinder)"))
+    want = WAVE_UNITS.get(wtype, ch["unit"])
+    auto = 0.001 if (wtype == "sec_ign" and ch["unit"].lower() == "v" and np.nanmax(np.abs(ch["y"])) > 400) else 1.0
+    factor = float(c.number_input(f"Scale: 1 {ch['unit']} =", value=auto, format="%g", key=f"wv_f_{fid}_{i}_{wtype}",
+                                  help="Probe/sensor conversion. Current clamp at 10 mV/A → 100. Pressure transducer: "
+                                       "its psi per volt (check its range setting). Leave 1 if the scope already shows real units."))
+    unit = want if factor != 1.0 else ch["unit"]
+    if factor == 1.0 and ch["unit"].lower() == "v" and want not in ("V", "kV") and wtype != "volts":
+      st.caption(f"↳ Showing volts. Enter your probe's scale above to read it in {want}.")
+    if wtype in ("sec_ign",) and unit.lower() == "v":
+      st.caption("↳ Secondary is measured in kV — if the scope recorded volts, set the scale to 0.001.")
+    results.append(measure_cached(raw, i, wtype, factor, cyl))
+    setup["chans"].append({"type": wtype, "cyl_no": cyl_no, "unit": unit, "_y": ch["y"] * factor, "name": ch["name"]})
+
+  # ---- relative compression: name the cylinders from an ignition sync ----
+  sync = next(((r, s_) for r, s_ in zip(results, setup["chans"]) if s_["type"] in ("sec_ign", "pri_ign", "coil_amp")
+               and s_["cyl_no"] and r["events"]), None)
+  for r in results:
+    if r["type"] == "rel_comp" and sync and cyl and fo:
+      named = name_cylinders(r["events"], [e["time_ms"] for e in sync[0]["events"]], cyl, fo, sync[1]["cyl_no"])
+      if named:
+        r = dict(r)
+        r["measurements"]["relative_by_cylinder_pct"] = named
+        weak = min(named.items(), key=lambda kv: kv[1] or 999)
+        if weak[1] is not None and weak[1] < 85:
+          r["notes"].insert(0, f"Weakest: {weak[0]} at {weak[1]}% of average (named from the cylinder {sync[1]['cyl_no']} "
+                               f"spark and firing order {fo}). Confirm with a compression or leak-down test on that cylinder.")
+
+  # ---- show each channel ----
+  for ch, r, s_ in zip(cap["chans"], results, setup["chans"]):
+    with st.container(border=True):
+      st.markdown(f"**{ch['name']} — {WAVE_TYPES.get(r['type'], r['type'])}**" + (f" · cylinder {s_['cyl_no']}" if s_["cyl_no"] else ""))
+      tt, yy = envelope(cap["t"], s_["_y"], 1500)
+      st.line_chart({"ms": tt * 1000, f"{ch['name']} ({s_['unit']})": yy}, x="ms", height=200)
+      st.dataframe([{"Measurement": _pretty_key(k), "Value": _pretty_val(v)} for k, v in r["measurements"].items()],
+                   use_container_width=True, hide_index=True)
+      for n in r["notes"]:
+        st.warning(n)
+      if r["events"]:
+        with st.expander(f"Every event ({len(r['events'])})"):
+          st.dataframe(r["events"], use_container_width=True, hide_index=True)
+
+  # ---- known-good library: save + compare by the numbers ----
+  saved = store_list("csvwave", 80)
+  my_types = {s_["type"] for s_ in setup["chans"]}
+  matches = {r_["id"]: (r_.get("data") or {}) for r_ in saved
+             if my_types & {x.get("type") for x in ((r_.get("data") or {}).get("setup") or {}).get("chans", [])}}
+  compare_txt = ""
+  cs1, cs2 = st.columns([1.4, 1])
+  with cs1:
+    ref_id = st.selectbox("Compare with a saved known-good capture:", [None] + list(matches), index=0,
+                          format_func=lambda k: "No comparison" if k is None else
+                          f"{matches[k].get('label', '?')} · {matches[k].get('vehicle') or ''} · {matches[k].get('date', '')}",
+                          key=f"wv_ref_{fid}")
+  with cs2:
+    with st.form(f"wv_save_{fid}", clear_on_submit=True):
+      lab = st.text_input("Save this capture as:", placeholder="e.g. Known-good secondary, 2014 Traverse 3.6 hot idle")
+      if st.form_submit_button("💾 Save to library") and lab.strip():
+        store_put("csvwave", datetime.now().strftime("%Y%m%d%H%M%S"), {
+            "label": lab.strip(), "vehicle": ss.vehicle_info, "date": datetime.now().strftime("%Y-%m-%d"), "tech": ss.get("tech_user") or "",
+            "setup": {k: v for k, v in setup.items() if k != "chans"} | {"chans": [{k: v for k, v in c.items() if k != "_y"} for c in setup["chans"]]},
+            "results": [{"type": r["type"], "measurements": r["measurements"], "notes": r["notes"]} for r in results],
+            "trace": [dict(zip(("t", "y"), (list(np.round(a_ * 1000, 3)), [None if not np.isfinite(v) else round(float(v), 4) for v in b_])))
+                      for a_, b_ in (envelope(cap["t"], c["_y"], 500) for c in setup["chans"])]})
+        st.toast("Saved to the scope library")
+  if ref_id:
+    ref = matches[ref_id]
+    rows, lines = [], []
+    for r, s_ in zip(results, setup["chans"]):
+      k = next((j for j, c in enumerate(ref["setup"]["chans"]) if c.get("type") == s_["type"]), None)
+      if k is None:
+        continue
+      rm = ref["results"][k]["measurements"]
+      for key, val in r["measurements"].items():
+        rv = rm.get(key)
+        if isinstance(val, (int, float)) and isinstance(rv, (int, float)) and not isinstance(val, bool):
+          diff = round((val - rv) / abs(rv) * 100) if rv else None
+          rows.append({"Channel": s_["name"], "Measurement": _pretty_key(key), "This car": val, "Known-good": rv,
+                       "Difference": f"{diff:+d}%" if diff is not None else "—"})
+          lines.append(f"{s_['name']} {key}: this {val} vs known-good {rv}" + (f" ({diff:+d}%)" if diff is not None else ""))
+      tr = (ref.get("trace") or [])[k] if k < len(ref.get("trace") or []) else None
+      if tr:
+        st.line_chart({"ms": tr["t"], f"Known-good: {ref.get('label', '')}": tr["y"]}, x="ms", height=160)
+    if rows:
+      st.dataframe(rows, use_container_width=True, hide_index=True)
+      compare_txt = (f"KNOWN-GOOD REFERENCE from this shop's library ({ref.get('label')}, {ref.get('vehicle') or ''}):\n"
+                     + "\n".join(lines))
+  with st.expander(f"📚 Scope library ({len(saved)} saved data captures)"):
+    for r_ in saved:
+      d_ = r_.get("data") or {}
+      l1, l2 = st.columns([6, 1])
+      l1.markdown(f"**{d_.get('label', '?')}** · {d_.get('vehicle') or ''} · {d_.get('date', '')} · "
+                  + ", ".join(WAVE_TYPES.get(c.get("type"), "?") for c in (d_.get("setup") or {}).get("chans", [])))
+      if l2.button("🗑️", key=f"delcw_{r_['id']}", help="Delete this saved capture"):
+        store_delete("csvwave", r_["id"])
+        st.rerun()
+
+  # ---- the AI team reads the numbers ----
+  if st.button("🔍 Have the AI team interpret these measurements", type="primary", key=f"wv_ai_{fid}"):
+    prompt = WAVE_PROMPT.format(vehicle=ss.vehicle_info or "not given", codes=", ".join(current_codes()) or "none",
+                                symptoms=(ss.symptoms or "").strip() or "not given", scan=scan_context(),
+                                capture=capture_summary(cap, setup, results), compare=compare_txt)
+    with st.status("The AI team is reading the measurements...", expanded=False) as status:
+      text, _r, draft, ds_draft = team_answer(prompt, ss.vehicle_info or "vehicle", ", ".join(current_codes()),
+                                              (ss.symptoms or "").strip(), False, status)
+      status.update(label="Done", state="complete")
+    ss.wave_result = {"text": text, "team": team_names(draft, ds_draft, ""), "file": wf.name,
+                      "at": datetime.now().strftime("%Y-%m-%d %I:%M %p")}
+  if ss.get("wave_result"):
+    with st.expander(f"🔬 Scope data analysis · {ss.wave_result.get('team', '')}", expanded=True):
+      st.markdown(ss.wave_result["text"])
+
+
 with tab3, guard("Diagnose tab"):
   st.subheader("🔧 Diagnose")
   context_bar()
@@ -5419,6 +6308,9 @@ Format strictly using these Markdown sections:
   # ---------- 2. Scope lab ----------
   st.write("---")
   st.markdown("#### 2 · Scope & test readings")
+  with guard("Scope data file"):
+    scope_data_section()
+  st.markdown("**📸 Or a photo of the scope / meter screen**")
   col_scope, col_scratch = st.columns(2)
   with col_scope:
     scope_capture = st.camera_input("Capture oscilloscope or meter") if st.toggle("📷 Open Camera for Scope / Meter") else None
@@ -5588,6 +6480,7 @@ Symptoms / complaint: {ss.symptoms.strip() or 'not given'}
 {scan_context()}
 Current test plan (if any): {plan or 'none yet'}
 Latest scope/readings evaluation (if any): {((ss.scope_result or {}).get('text', '') if isinstance(ss.scope_result, dict) else (ss.scope_result or ''))[:1500] or 'none'}
+Latest scope DATA FILE analysis (measured from raw data, if any): {((ss.wave_result or {}).get('text', ''))[:2000] or 'none'}
 
 Recent conversation:
 {history}
