@@ -3,6 +3,7 @@ import copy
 import csv
 from datetime import datetime, timezone
 import hashlib
+import hmac
 import html as html_lib
 import io
 import json
@@ -10,6 +11,8 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image, ImageEnhance, ImageOps
@@ -21,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-10-25"
+APP_VERSION = "2026-10-27"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -48,6 +51,13 @@ WHATS_NEW = [
     "pulse width & kick, pintle bump, crank pattern & bad teeth, relative compression by cylinder, cylinder pressure",
     "NEW: Scope setup form (engine condition, what's on each channel, probe scale) and a known-good library "
     "compared number by number",
+    "NEW: 📖 Knowledge tab — photograph book pages and the app keeps only the testing facts as short notes (pages are "
+    "never saved); the AI team applies the notes that fit each car on every diagnosis",
+    "SECURITY: login now expires after 30 days and lives in the browser, not the address bar — a shared job link no "
+    "longer logs someone in. Log out button under ⚙️ Setup. (Everyone logs in once after this update.)",
+    "FIX: crank wheels with several gaps per turn (e.g. 36-2-2-2) read the right pattern and RPM",
+    "FIX: big scope files load ~5x faster with far less memory; AI answers with stray braces no longer break parsing",
+    "FIX: if Anthropic or DeepSeek retires a model name, the app switches to one your key has and tells you",
 ]
 
 st.markdown(
@@ -150,7 +160,7 @@ DEFAULTS = {
     "ble_ai": None, "ble_last_event": None, "ble_dtcs": {}, "test_results": {},
     "tech_notes": "", "customer_summary": "", "fix_part": "", "fix_test": "", "fix_notes": "",
     "customer_email": "", "odometer": "", "estimate_rows": [], "follow_up_days": 0, "follow_up_note": "",
-    "follow_up_done": False, "drive_plan": "", "wave_result": None,
+    "follow_up_done": False, "drive_plan": "", "wave_result": None, "know_pending": None,
 }
 for _k, _v in DEFAULTS.items():
     ss.setdefault(_k, copy.deepcopy(_v))
@@ -255,9 +265,31 @@ def secret(name: str) -> str:
   return val or ""
 
 
-@st.cache_resource
+_TLS = threading.local()
+
+
 def http() -> requests.Session:
-  return requests.Session()  # keep-alive: faster repeat API calls
+  """Keep-alive connection pool (faster repeat API calls) — one per worker thread, so two techs using the app at the
+  same moment never share a connection."""
+  sess = getattr(_TLS, "session", None)
+  if sess is None:
+    sess = _TLS.session = requests.Session()
+  return sess
+
+
+def find_json(text: str, want=dict):
+  """Pull the first real JSON object (or list) out of an AI answer, even if it's wrapped in ```code fences``` or has
+  chatty text with {braces} before or after it."""
+  t = re.sub(r"```(?:json)?", "", text or "")
+  dec = json.JSONDecoder()
+  for mt in re.finditer(r"\{" if want is dict else r"\[", t):
+    try:
+      obj, _ = dec.raw_decode(t[mt.start():])
+    except ValueError:
+      continue
+    if isinstance(obj, want):
+      return obj
+  return None
 
 
 # ========================================================
@@ -369,11 +401,12 @@ def _store_list(kind: str, limit: int, where_json: str, ver: int, online: bool) 
   if online:
     params = {"kind": f"eq.{kind}", "select": "id,data,updated_at", "order": "updated_at.desc", "limit": str(limit)}
     for k, v in where.items():
-      params[f"data->>{k}"] = f"eq.{v}"
+      if re.fullmatch(r"[\w .\-]{1,80}", str(v)):   # plain text only; anything else gets matched below, never sent
+        params[f"data->>{k}"] = f"eq.{v}"
     try:
       r = http().get(_supa_url(), headers=_supa_headers(), params=params, timeout=10)
       if r.status_code == 200:
-        rows = r.json()
+        rows = [x for x in r.json() if all(str((x.get("data") or {}).get(k, "")) == str(v) for k, v in where.items())]
       else:
         _store_error(f"Listing {kind} failed: HTTP {r.status_code} {r.text[:200]}")
     except (requests.RequestException, ValueError) as e:
@@ -531,6 +564,53 @@ TEAM RULES:
 """
 
 
+# --- When a model name is retired: ask the provider which models this key can use and switch to the closest one ---
+@st.cache_resource
+def _model_swaps() -> dict:
+  return {}
+
+
+_MODEL_GONE = re.compile(r"model[^\n]{0,60}(not[ _](exist|found|available|supported)|does ?n[o']t exist|invalid|deprecated|retired)"
+                         r"|(unknown|invalid|unsupported|nonexistent)[ _]model|not_found_error", re.I)
+
+
+def _model_error(res) -> bool:
+  """True only when the provider says the MODEL NAME itself doesn't exist — not for other errors that mention a model."""
+  return res is not None and res.status_code in (400, 404) and bool(_MODEL_GONE.search(res.text or ""))
+
+
+def _pick_model(ids: list[str], wanted: str, prefer: tuple[str, ...]) -> str | None:
+  ids = [i for i in ids if i and i != wanted]
+  if not ids:
+    return None
+  fam = next((w for w in ("opus", "sonnet", "haiku", "flash", "chat", "pro", "reasoner") if w in wanted.lower()), None)
+  for want in ([fam] if fam else []) + list(prefer):
+    hit = [i for i in ids if want in i.lower()]
+    if hit:
+      return hit[0]   # providers list newest first
+  return ids[0]
+
+
+def claude_model() -> str:
+  wanted = secret("CLAUDE_MODEL") or CLAUDE_DEFAULT_MODEL
+  return _model_swaps().get(("claude", wanted), wanted)
+
+
+def _claude_replacement(key: str, wanted: str) -> str | None:
+  try:
+    r = http().get("https://api.anthropic.com/v1/models", params={"limit": 100}, timeout=15,
+                   headers={"x-api-key": key, "anthropic-version": "2023-06-01"})
+    ids = [m.get("id", "") for m in (r.json().get("data") or [])] if r.status_code == 200 else []
+  except (requests.RequestException, ValueError):
+    ids = []
+  pick = _pick_model(ids, wanted, ("sonnet", "opus"))
+  if pick:
+    _model_swaps()[("claude", wanted)] = pick
+    log_problem("ai", "Claude model", f"Model '{wanted}' isn't available on your key any more — switched to '{pick}'. "
+                                      f"Put CLAUDE_MODEL = \"{pick}\" in Secrets to make it permanent.")
+  return pick
+
+
 # --- Claude (Anthropic) ---
 CLAUDE_URL = "https://api.anthropic.com/v1/messages"
 CLAUDE_DEFAULT_MODEL = "claude-sonnet-5-5"   # change with CLAUDE_MODEL in Secrets (e.g. claude-opus-5-5)
@@ -541,7 +621,7 @@ def has_claude() -> bool:
 
 
 def claude_label() -> str:
-  m = secret("CLAUDE_MODEL") or CLAUDE_DEFAULT_MODEL
+  m = claude_model()
   return m.replace("claude-", "Claude ").replace("-", " ").title().replace(" 5 5", " 5.5").replace("Claude Claude", "Claude")
 
 
@@ -563,12 +643,19 @@ def claude(prompt: str, *, max_tokens: int = 4000, timeout: int = 120, image_b64
              for b in _img_list(image_b64)] + [{"type": "text", "text": prompt}]
   budgets = [max_tokens, min(max(max_tokens * 3, 12000), 32000)]
   why = ""
+  model = claude_model()
   for attempt, budget in enumerate(budgets):
-    try:
-      res = http().post(CLAUDE_URL, timeout=timeout if attempt == 0 else max(timeout, 240), json={
-          "model": secret("CLAUDE_MODEL") or CLAUDE_DEFAULT_MODEL, "max_tokens": budget,
-          "messages": [{"role": "user", "content": content}]},
+    def post(mdl):
+      return http().post(CLAUDE_URL, timeout=timeout if attempt == 0 else max(timeout, 240), json={
+          "model": mdl, "max_tokens": budget, "messages": [{"role": "user", "content": content}]},
           headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
+    try:
+      res = post(model)
+      if _model_error(res):   # model name retired -> find what this key can use and try once more
+        alt = _claude_replacement(key, model)
+        if alt:
+          model = alt
+          res = post(model)
     except requests.RequestException as e:
       raise AIError(f"Claude connection error: {e}") from e
     if res.status_code != 200:
@@ -604,11 +691,27 @@ def has_deepseek() -> bool:
 
 
 def deepseek_label() -> str:
-  m = secret("DEEPSEEK_MODEL") or DEEPSEEK_DEFAULT_MODEL
+  m = deepseek_model()
   return m.replace("deepseek-", "DeepSeek ").replace("-", " ").replace("v4", "V4").title().replace("Deepseek", "DeepSeek").replace("V4 ", "V4 ")
 
 
-def _deepseek_raw(key: str, model: str, session: requests.Session, prompt: str, max_tokens: int, timeout: int) -> str:
+def deepseek_model() -> str:
+  wanted = secret("DEEPSEEK_MODEL") or DEEPSEEK_DEFAULT_MODEL
+  return _model_swaps().get(("deepseek", wanted), wanted)
+
+
+def _deepseek_replacement(key: str, session: requests.Session, wanted: str) -> str | None:
+  """Thread-safe (no Streamlit calls): ask DeepSeek which models this key can use."""
+  try:
+    r = session.get("https://api.deepseek.com/models", headers={"Authorization": f"Bearer {key}"}, timeout=15)
+    ids = [m.get("id", "") for m in (r.json().get("data") or [])] if r.status_code == 200 else []
+  except (requests.RequestException, ValueError):
+    ids = []
+  return _pick_model(ids, wanted, ("flash", "chat"))
+
+
+def _deepseek_raw(key: str, model: str, session: requests.Session, prompt: str, max_tokens: int, timeout: int,
+                  swaps: dict | None = None) -> str:
   """No Streamlit calls in here, so it is safe to run in a background thread.
   DeepSeek "thinks" by default, and the thinking counts against max_tokens — on a big job it could use the
   whole budget and return an EMPTY answer. Its job here is a fast second-opinion draft (Claude does the deep
@@ -624,6 +727,14 @@ def _deepseek_raw(key: str, model: str, session: requests.Session, prompt: str, 
       raise RuntimeError(f"DeepSeek connection error: {e}") from e
     return res
   res = call(True, max_tokens)
+  if _model_error(res) and "think" not in res.text.lower():   # model name retired -> switch to one this key has
+    alt = _deepseek_replacement(key, session, model)
+    if alt:
+      if swaps is not None:
+        swaps[("deepseek", model)] = alt
+        swaps["_deepseek_note"] = (model, alt)
+      model = alt
+      res = call(True, max_tokens)
   if res.status_code == 400 and "think" in res.text.lower():   # this model doesn't take the switch: ask normally
     res = call(False, max(max_tokens, 12000))
   if res.status_code != 200:
@@ -653,9 +764,18 @@ def deepseek(prompt: str, *, max_tokens: int = 4000, timeout: int = 120) -> str:
   if not key:
     raise AIError("DEEPSEEK_API_KEY is missing from Streamlit Secrets.")
   try:
-    return _deepseek_raw(key, secret("DEEPSEEK_MODEL") or DEEPSEEK_DEFAULT_MODEL, http(), prompt, max_tokens, timeout)
+    return _deepseek_raw(key, deepseek_model(), http(), prompt, max_tokens, timeout, _model_swaps())
   except RuntimeError as e:
     raise AIError(str(e)) from e
+  finally:
+    _note_deepseek_swap()
+
+
+def _note_deepseek_swap():
+  note = _model_swaps().pop("_deepseek_note", None)
+  if note:
+    log_problem("ai", "DeepSeek model", f"Model '{note[0]}' isn't available on your key any more — switched to '{note[1]}'. "
+                                        f"Put DEEPSEEK_MODEL = \"{note[1]}\" in Secrets to make it permanent.")
 
 
 REVIEW_PROMPT = """You are the senior master technician on a diagnostic team. Perplexity searched the web, and Gemini and DeepSeek each wrote a first-draft plan on their own.
@@ -705,8 +825,8 @@ def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: b
                         "Work from the text; another technician is reading the photos." if _img_list(image_b64) else "")
     pool = ThreadPoolExecutor(max_workers=1)
     # its own connection: the shared one isn't guaranteed safe while Gemini uses it at the same time
-    ds_job = pool.submit(_deepseek_raw, secret("DEEPSEEK_API_KEY"), secret("DEEPSEEK_MODEL") or DEEPSEEK_DEFAULT_MODEL, requests.Session(),
-                         ds_prompt, tokens, 60 if fast else 120)
+    ds_job = pool.submit(_deepseek_raw, secret("DEEPSEEK_API_KEY"), deepseek_model(), requests.Session(),
+                         ds_prompt, tokens, 60 if fast else 120, _model_swaps())
   try:
     parts = [{"text": full}] + [{"inline_data": {"mime_type": "image/jpeg", "data": b}} for b in _img_list(image_b64)]
     draft = gemini(parts, timeout=45 if fast else 60)
@@ -718,6 +838,7 @@ def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: b
     except Exception as e:
       log_problem("ai", "DeepSeek draft", str(e))
       ds_draft = ""
+    _note_deepseek_swap()
     pool.shutdown(wait=False)
   if has_claude():
     if status:
@@ -853,13 +974,13 @@ def _ai_vin_reads(img: Image.Image) -> dict:
     try:
       key = secret("ANTHROPIC_API_KEY")
       res = http().post(CLAUDE_URL, timeout=60, headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                        json={"model": secret("CLAUDE_MODEL") or CLAUDE_DEFAULT_MODEL, "max_tokens": 400, "messages": [{"role": "user", "content": [
+                        json={"model": claude_model(), "max_tokens": 400, "messages": [{"role": "user", "content": [
                             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": _jpeg_b64(img, 1568)}},
                             {"type": "text", "text": VIN_READ_PROMPT}]}]})
       if res.status_code == 200:
         txt = "".join(b.get("text", "") for b in res.json().get("content", []) if b.get("type") == "text")
-        m = re.search(r"\{.*\}", txt, re.S)
-        vins = json.loads(m.group(0)).get("vins", []) if m else []
+        obj = find_json(txt, dict)
+        vins = (obj or {}).get("vins", []) or []
         reads["Claude"] = [c for v in vins for c in clean_vin_text(str(v))]
       else:
         log_problem("ai", "VIN photo read (Claude)", f"HTTP {res.status_code}: {res.text[:200]}")
@@ -919,10 +1040,10 @@ def extract_customer(img_bytes: bytes) -> dict:
       raise
   # Gemini failed (quota, outage, bad answer): let Claude read it instead
   txt = claude(ask + " Reply with the JSON only.", max_tokens=400, timeout=60, image_b64=img_part(img)["inline_data"]["data"])
-  m = re.search(r"\{.*\}", txt, re.S)
-  if not m:
+  obj = find_json(txt, dict)
+  if obj is None:
     raise ValueError("No customer details found in the AI's answer.")
-  return json.loads(m.group(0))
+  return obj
 
 
 @st.cache_data(ttl=7 * 86400, show_spinner=False, max_entries=500)
@@ -1195,11 +1316,14 @@ def _is_num_row(fields: list[str]) -> bool:
 def parse_scope_csv(raw: bytes) -> dict:
   """Read the CSV a scope saves (PicoScope, Hantek, Owon, Autel/Snap-on exports...).
   Returns {"t": seconds array, "chans": [{"name", "unit", "y"}], "dt": sample spacing (s), "n": samples}."""
-  if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
-    text = raw.decode("utf-16", errors="replace")
-  else:
-    text = raw.decode("utf-8-sig", errors="replace")
-  lines = [ln.strip() for ln in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+  enc = "utf-16" if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else "utf-8-sig"
+  # Only the first part of the file is read as text (to find the format and header). The numbers are loaded straight
+  # from the file further down, so a 50 MB PicoScope export isn't copied around in memory several times.
+  HEAD = 600_000
+  head = raw[:HEAD].decode(enc, errors="replace")
+  lines = [ln.strip() for ln in head.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+  if len(raw) > HEAD:
+    lines = lines[:-1]   # the last line of the sample may be cut in half
   sample = [ln for ln in lines if ln][:80]
   def split(ln, delim):
     parts = [p.strip() for p in ln.split(delim)]
@@ -1222,7 +1346,7 @@ def parse_scope_csv(raw: bytes) -> dict:
     if st0 is not None and len(rr[st0]) > best_w:
       best_w, start, chosen = len(rr[st0]), st0, delim
   if start is not None:
-    rows = [split(ln, chosen) for ln in lines]
+    rows = [split(ln, chosen) for ln in lines[:start + 3]]   # header area only
   if start is None:
     raise ValueError("Couldn't find the data rows in this file. Save the capture from your scope as CSV (text), not as its own format.")
   width = len(rows[start])
@@ -1246,16 +1370,19 @@ def parse_scope_csv(raw: bytes) -> dict:
   data = None
   try:
     import pandas as pd
-    body = "\n".join(lines[start:])
-    df = pd.read_csv(io.StringIO(body), sep=chosen, header=None, decimal="," if chosen != "," else ".",
-                     na_values=["∞", "-∞", "+∞", "inf", "-inf", "NaN", ""], keep_default_na=True, engine="c")
-    df = df.iloc[:, :width].apply(pd.to_numeric, errors="coerce")
+    df = pd.read_csv(io.BytesIO(raw), sep=chosen, header=None, skiprows=start, skip_blank_lines=False,
+                     encoding=enc, decimal="," if chosen != "," else ".", usecols=list(range(width)),
+                     na_values=["∞", "-∞", "+∞", "inf", "-inf", "NaN"], keep_default_na=True, engine="c",
+                     on_bad_lines="skip")
+    df = df.apply(pd.to_numeric, errors="coerce").dropna(how="all")
     if df.shape[1] == width and len(df) >= 20:
       data = df.to_numpy(dtype=float)
   except Exception:
     data = None
-  if data is None:
-    data = np.array([[_num(v) for v in r] for r in rows[start:] if len(r) == width and _is_num_row(r)], dtype=float)
+  if data is None:   # fallback: read the whole file the slow, exact way
+    full = raw.decode(enc, errors="replace").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    rr = (split(ln.strip(), chosen) for ln in full[start:])
+    data = np.array([[_num(v) for v in r] for r in rr if len(r) == width and _is_num_row(r)], dtype=float)
   if len(data) < 20:
     raise ValueError("The file has too few samples to measure.")
   first_is_time = bool(re.search(r"time|^t$|sec", (names[0] or "").lower())) or units[0].lower() in _TIME_SCALE
@@ -1581,7 +1708,7 @@ def _inj_amp(t, y, dt):
   return m, ev, notes
 
 
-def _crank_sig(t, y, dt):
+def _crank_sig(t, y, dt, rpm_hint=None):
   hi, lo = float(np.nanpercentile(y, 98)), float(np.nanpercentile(y, 2))
   mid, h = (hi + lo) / 2, (hi - lo) * 0.15
   e = _edges(y, mid + h, mid - h)
@@ -1599,14 +1726,40 @@ def _crank_sig(t, y, dt):
   m["teeth_seen"] = int(len(e))
   m["frequency_hz"] = _r(1 / float(np.median(iv)), 1)
   if len(gaps):
-    missing = int(round(float(np.median(ratio[gaps]))) - 1)
-    m["missing_teeth_at_gap"] = missing
+    miss = [max(1, int(round(float(r))) - 1) for r in ratio[gaps]]
+    m["missing_teeth_at_gap"] = int(np.median(miss))
     if len(gaps) >= 2:
-      between = np.diff(gaps)
-      teeth = int(np.median(between))
-      m["pattern"] = f"{teeth + missing}-{missing}"
-      rev_s = float(np.median([t[e[gaps[i + 1]]] - t[e[gaps[i]]] for i in range(len(gaps) - 1)]))
-      m["rpm_from_wheel"] = _r(60 / rev_s, 0) if rev_s > 0 else None
+      between = [int(x) for x in np.diff(gaps)]   # tooth pitches from one gap to the next
+      # one revolution = the smallest group of gaps that repeats. 36-1 / 60-2: every gap. 36-2-2-2 style: groups of
+      # unevenly spaced gaps. Only trust a group size we actually see repeat in this capture.
+      period = None
+      for p in range(1, 5):
+        if len(between) >= p + 1 and all(abs(between[i] - between[i + p]) <= 1 for i in range(len(between) - p)):
+          period = p
+          break
+      if period is None:
+        notes.append("Gaps are unevenly spaced (a wheel with several gaps per turn). Capture at least two full turns "
+                     "so the app can work out the pattern and RPM.")
+      else:
+        pitches = sum(between[:period]) + sum(miss[:period])
+        per_rev = period
+        rev_s = float(np.median([t[e[gaps[i + period]]] - t[e[gaps[i]]] for i in range(len(gaps) - period)]))
+        rpm_w = 60 / rev_s if rev_s > 0 else None
+        # evenly spaced gaps look exactly like a smaller one-gap wheel: use the RPM the tech entered to tell them apart
+        if rpm_w and rpm_hint and rpm_hint > 0:
+          k = rpm_w / rpm_hint
+          if round(k) >= 2 and abs(k - round(k)) < 0.15 * round(k):
+            per_rev = period * int(round(k))
+            pitches *= int(round(k))
+            rpm_w /= round(k)
+            notes.append(f"Matched to the {int(rpm_hint)} RPM you entered: this wheel has {per_rev} gaps per turn.")
+        gap_list = (miss[:period] * (per_rev // period))[:per_rev]
+        m["pattern"] = f"{pitches}-" + "-".join(str(x) for x in gap_list)
+        m["gaps_per_rev"] = per_rev
+        m["rpm_from_wheel"] = _r(rpm_w, 0) if rpm_w else None
+        if pitches < 30 and per_rev == 1 and not rpm_hint:
+          notes.append(f"Reads as a {m['pattern']} wheel. If this wheel actually has more than one gap per turn, enter "
+                       "the engine RPM above and the app will correct the pattern and RPM.")
   m["irregular_intervals"] = int(len(odd))
   if len(odd):
     m["irregular_tooth_times_ms"] = ", ".join(str(_r(t[e[i]] * 1000, 1)) for i in odd[:8])
@@ -1739,7 +1892,7 @@ def _px_pulses(t, y, dt, cyl, kind):
   return m, ev, notes
 
 
-def measure_channel(t, y, dt, wtype: str, cyl: int | None = None) -> dict:
+def measure_channel(t, y, dt, wtype: str, cyl: int | None = None, rpm_hint: float | None = None) -> dict:
   """Measure one channel as the given type. Returns {"type", "measurements", "events", "notes"}."""
   ok = np.isfinite(y)
   if ok.sum() < 20:
@@ -1756,7 +1909,7 @@ def measure_channel(t, y, dt, wtype: str, cyl: int | None = None) -> dict:
     elif wtype == "inj_amp":
       m, ev, notes = _inj_amp(t, y, dt)
     elif wtype == "crank_sig":
-      m, ev, notes = _crank_sig(t, y, dt)
+      m, ev, notes = _crank_sig(t, y, dt, rpm_hint)
     elif wtype == "rel_comp":
       m, ev, notes = _rel_comp(t, y, dt, cyl)
     elif wtype == "px_cyl":
@@ -1907,6 +2060,64 @@ def new_job():
     del st.query_params["job"]
 
 
+# --- SHOP KNOWLEDGE: testing facts the tech has learned (specs, patterns, test methods), in our own words ---
+KNOW_KINDS = ["Spec / known-good value", "What a pattern means", "Test procedure", "Rule of thumb"]
+# code families -> the systems/words a note about them would mention
+CODE_WORDS = [
+    ("P0300", "misfire ignition coil plug spark injector compression burn secondary"),
+    ("P030", "misfire ignition coil plug spark injector compression burn secondary"),
+    ("P017", "fuel trim lean rich vacuum leak maf injector fuel pressure"),
+    ("P010", "maf map airflow mass air"), ("P011", "intake air temperature iat"), ("P012", "throttle tps pedal"),
+    ("P013", "o2 oxygen sensor heater upstream downstream"), ("P014", "o2 oxygen sensor"), ("P015", "o2 oxygen sensor"),
+    ("P016", "o2 oxygen sensor"), ("P0087", "fuel pressure rail pump"), ("P019", "fuel pressure rail"),
+    ("P020", "injector circuit"), ("P021", "injector"), ("P026", "injector"), ("P032", "knock sensor"),
+    ("P0335", "crank sensor ckp reluctor tooth"), ("P0336", "crank sensor ckp reluctor tooth"),
+    ("P034", "cam sensor cmp timing"), ("P036", "cam timing"), ("P001", "cam timing vvt phaser solenoid"),
+    ("P040", "egr"), ("P042", "catalyst converter o2"), ("P043", "catalyst converter"), ("P044", "evap purge vent smoke leak"),
+    ("P045", "evap purge vent"), ("P050", "idle throttle air"), ("P056", "charging voltage battery alternator"),
+    ("P062", "alternator charging"), ("P07", "transmission shift solenoid pressure"), ("P08", "transmission"),
+    ("P2096", "fuel trim post catalyst o2"), ("P2097", "fuel trim post catalyst o2"), ("P2", "sensor circuit"),
+    ("U", "network can bus communication module"), ("C", "abs wheel speed brake"), ("B", "body airbag"),
+]
+
+
+def knowledge_entries() -> list[dict]:
+  return [dict(r.get("data") or {}, _id=r["id"]) for r in store_list("know", 1000)]
+
+
+def knowledge_for_job(limit: int = 30) -> list[dict]:
+  """The notes that fit THIS job: matching systems (from the codes/symptoms) and this make, never another make's."""
+  entries = knowledge_entries()
+  if not entries:
+    return []
+  vd = ss.vehicle_details or {}
+  make = str(vd.get("Make") or "").lower()
+  words = set()
+  for c in current_codes():
+    for pre, w in CODE_WORDS:
+      if c.startswith(pre):
+        words |= set(w.split())
+        break
+  words |= {w for w in re.findall(r"[a-z0-9]+", ((ss.symptoms or "") + " " + (ss.vehicle_info or "")).lower()) if len(w) >= 3}
+  fam = MAKE_PROFILES.get(make.upper(), make.upper()).lower() if make else ""
+  same_family = ({m.lower() for m, f in MAKE_PROFILES.items() if f.lower() == fam} | {fam, make}) if make else set()
+  all_makes = {m.lower() for m in MAKE_PROFILES} | {f.lower() for f in MAKE_PROFILES.values()} | \
+      {m.lower() for m in MANUAL_MAKES if m != "Other..."}
+  scored = []
+  for e in entries:
+    text = f"{e.get('topic', '')} {e.get('rule', '')} {e.get('applies_to', '')}".lower()
+    applies = str(e.get("applies_to") or "").lower()
+    named = {m for m in all_makes if re.search(rf"\b{re.escape(m)}\b", applies)}
+    if named and make and not (named & same_family):
+      continue   # a note for another make never goes into this car's diagnosis
+    score = sum(1 for w in words if w in text) + (3 if named & same_family else 0)
+    scored.append((score, e))
+  if len(scored) > limit:
+    scored = [x for x in scored if x[0] > 0] or scored
+  scored.sort(key=lambda x: -x[0])
+  return [e for _, e in scored[:limit]]
+
+
 # --- SHOP HISTORY: earlier visits + this shop's confirmed fixes, fed to the AI ---
 def vin_history(vin: str) -> list[dict]:
   if not vin:
@@ -1954,6 +2165,12 @@ def shop_context() -> str:
     if recalls:
       out.append(f"NHTSA RECALLS FOR THIS YEAR/MAKE/MODEL ({len(recalls)}; may or may not be done on this VIN):")
       out += [f"- {r.get('NHTSACampaignNumber', '')} {r.get('Component', '')}: {str(r.get('Summary', ''))[:220]}" for r in recalls[:6]]
+    kn = knowledge_for_job()
+    if kn:
+      out.append("THIS SHOP'S TESTING KNOWLEDGE (the technician's own notes: specs, what patterns mean, test methods). "
+                 "Apply the ones that fit this job and say which you used; if a note conflicts with the measured data, say so:")
+      out += [f"- [{e.get('topic', 'General')}{(' · ' + e['applies_to']) if e.get('applies_to') and str(e['applies_to']).lower() not in ('all', 'any') else ''}] "
+              f"{e.get('rule', '')}" for e in kn]
   except Exception as e:   # history is a bonus; never block a diagnosis over it
     log_problem("storage", "Shop history for AI", str(e))
   return ("\n\n" + "\n".join(out)) if out else ""
@@ -2038,31 +2255,105 @@ def shop_users() -> dict:
   return users
 
 
+LOGIN_DAYS = 30
+COOKIE = "tdg_login"
+
+
+def _sign(name: str, exp: int, pw: str) -> str:
+  key = hashlib.sha256(("tdg-auth|" + pw + "|" + secret("APP_SECRET")).encode()).digest()
+  return hmac.new(key, f"{name}|{exp}".encode(), hashlib.sha256).hexdigest()[:32]
+
+
+def make_login(name: str, pw: str) -> str:
+  """A login pass that EXPIRES (30 days) and stops working the moment that tech's password changes."""
+  exp = int(time.time()) + LOGIN_DAYS * 86400
+  return base64.urlsafe_b64encode(f"{name}|{exp}|{_sign(name, exp, pw)}".encode()).decode().rstrip("=")
+
+
+def check_login(tok: str | None) -> tuple[str, int] | None:
+  if not tok or len(tok) > 300:
+    return None
+  try:
+    name, exp, sig = base64.urlsafe_b64decode(tok + "=" * (-len(tok) % 4)).decode().rsplit("|", 2)
+    exp = int(exp)
+  except (ValueError, UnicodeDecodeError):
+    return None
+  if exp < time.time():
+    return None
+  for pw, nm in shop_users().items():
+    if nm == name and hmac.compare_digest(sig, _sign(name, exp, pw)):
+      return name, exp
+  return None
+
+
+def _cookie_login() -> str | None:
+  try:
+    return st.context.cookies.get(COOKIE)
+  except Exception:   # older Streamlit: no cookie access -> the address-bar fallback is used
+    return None
+
+
+def _set_cookie(tok: str, max_age: int):
+  """Save the login pass in this browser (not in the address bar, so a shared job link never carries it)."""
+  components.html(f"<script>document.cookie = '{COOKIE}={tok}; path=/; max-age={max_age}; SameSite=Lax'"
+                  f" + (location.protocol === 'https:' ? '; Secure' : '');</script>", height=0)
+
+
 def require_password():
   users = shop_users()
   if not users:
     return
-  tokens = {hashlib.sha256(("tdg-login:" + pw).encode()).hexdigest()[:24]: name for pw, name in users.items()}
-  seen = ss.get("_authed") or st.query_params.get("k")
-  if seen in tokens:
-    ss._authed = seen
-    ss.tech_user = tokens[seen]
-    if st.query_params.get("k") != seen:
-      st.query_params["k"] = seen   # keeps this phone/computer logged in after a refresh (bookmark the page)
-    return
-  st.markdown("### 🔒 Shop login")
-  with st.form("login"):
-    entered = st.text_input("Password", type="password")
-    if st.form_submit_button("Log in", type="primary"):
-      match = next((pw for pw in users if hashlib.sha256(entered.encode()).digest() == hashlib.sha256(pw.encode()).digest()), None)
-      if match:
-        tok = hashlib.sha256(("tdg-login:" + match).encode()).hexdigest()[:24]
-        ss._authed, ss.tech_user = tok, users[match]
+  found = None
+  for cand, src in ((ss.get("_auth_tok"), "session"), (_cookie_login(), "cookie"), (st.query_params.get("k"), "url")):
+    ok = check_login(cand)
+    if ok:
+      found = (cand, src, ok)
+      break
+  if found:
+    tok, src, (name, exp) = found
+    ss._auth_tok, ss.tech_user = tok, name
+    if exp - time.time() < 10 * 86400:   # renew quietly when it's getting old
+      pw = next(p_ for p_, n_ in users.items() if n_ == name)
+      tok = ss._auth_tok = make_login(name, pw)
+      _set_cookie(tok, LOGIN_DAYS * 86400)
+      if "k" in st.query_params:
         st.query_params["k"] = tok
-        st.rerun()
-      st.error("Wrong password.")
+    elif src == "cookie" and "k" in st.query_params:
+      del st.query_params["k"]   # the cookie works here, so the address bar no longer needs the pass
+    elif src == "url" and not ss.get("_cookie_sent"):
+      _set_cookie(tok, LOGIN_DAYS * 86400)   # move it into a cookie; the URL copy is dropped once the cookie is seen
+      ss._cookie_sent = True
+    return
+  if "k" in st.query_params:
+    del st.query_params["k"]   # expired or old-style pass: clear it
+  box = st.empty()
+  with box.container():
+    st.markdown("### 🔒 Shop login")
+    with st.form("login"):
+      entered = st.text_input("Password", type="password")
+      submitted = st.form_submit_button("Log in", type="primary")
+    if submitted:
+      match = next((pw for pw in users if hmac.compare_digest(hashlib.sha256(entered.encode()).digest(),
+                                                              hashlib.sha256(pw.encode()).digest())), None)
+      if not match:
+        st.error("Wrong password.")
+  if submitted and match:
+    tok = make_login(users[match], match)
+    ss._auth_tok, ss.tech_user, ss._cookie_sent = tok, users[match], True
+    _set_cookie(tok, LOGIN_DAYS * 86400)
+    st.query_params["k"] = tok   # backup in case this browser blocks cookies; removed on the next visit if not needed
+    box.empty()
+    return   # carry on drawing the app in this same run (so the cookie actually gets written)
   st.stop()
 
+
+def logout():
+  ss._auth_tok, ss.tech_user = None, None
+  if "k" in st.query_params:
+    del st.query_params["k"]
+  _set_cookie("", 0)
+  st.success("Logged out on this device.")
+  st.stop()
 
 require_password()
 
@@ -2157,6 +2448,11 @@ def setup_panel():
   ]
   on = sum(1 for _, ok in checks if ok)
   with st.expander(("⚙️" if on == len(checks) else "🟡") + f" Setup — {on}/{len(checks)} connected"):
+    if ss.get("tech_user"):
+      _lo1, _lo2 = st.columns([3, 1])
+      _lo1.caption(f"Logged in as **{ss.tech_user}** (stays logged in on this device for {LOGIN_DAYS} days)")
+      if _lo2.button("🚪 Log out", key="logout_btn"):
+        logout()
     st.markdown("  \n".join(("✅ " if ok else "⬜ ") + n for n, ok in checks))
     if on < len(checks):
       st.caption("Turn one on by adding its key in **Manage app → Settings → Secrets**:  \n"
@@ -2178,11 +2474,12 @@ with guard("Cars in the shop"):
       st.markdown("\n".join(f"- {w}" for w in WHATS_NEW))
 
 
-tab1, tab2, tab3, tab5 = st.tabs([
+tab1, tab2, tab3, tab5, tab6 = st.tabs([
     "📷 Vehicle & Customer",
     "📊 Scanner & Live Data",
     "🔧 Diagnose",
     "📋 Log & History",
+    "📖 Knowledge",
 ])
 
 # ========================================================
@@ -2255,7 +2552,8 @@ with tab1, guard("VIN & Customer tab"):
                  if str(info.get(j, "")).strip()}
           if upd:
             queue_update(toast="Customer info updated", **upd)
-          st.warning("No customer details found in this image.")
+          else:
+            st.warning("No customer details found in this image.")
 
   vin_typed = st.text_input("Vehicle VIN (17 characters) — decodes automatically:", key="vin_input", max_chars=17)
   vin_clean = vin_typed.strip().upper()
@@ -5970,9 +6268,9 @@ def load_capture(raw: bytes) -> dict:
 
 
 @st.cache_data(show_spinner=False, max_entries=48)
-def measure_cached(raw: bytes, idx: int, wtype: str, factor: float, cyl: int) -> dict:
+def measure_cached(raw: bytes, idx: int, wtype: str, factor: float, cyl: int, rpm_hint: float = 0.0) -> dict:
   cap = load_capture(raw)
-  return measure_channel(cap["t"], cap["chans"][idx]["y"] * factor, cap["dt"], wtype, cyl or None)
+  return measure_channel(cap["t"], cap["chans"][idx]["y"] * factor, cap["dt"], wtype, cyl or None, rpm_hint or None)
 
 
 def _pretty_key(k: str) -> str:
@@ -6049,7 +6347,11 @@ def scope_data_section():
       st.caption(f"↳ Showing volts. Enter your probe's scale above to read it in {want}.")
     if wtype in ("sec_ign",) and unit.lower() == "v":
       st.caption("↳ Secondary is measured in kV — if the scope recorded volts, set the scale to 0.001.")
-    results.append(measure_cached(raw, i, wtype, factor, cyl))
+    try:
+      rpm_hint = float(re.sub(r"[^\d.]", "", rpm or "") or 0)
+    except ValueError:
+      rpm_hint = 0.0
+    results.append(measure_cached(raw, i, wtype, factor, cyl, rpm_hint))
     setup["chans"].append({"type": wtype, "cyl_no": cyl_no, "unit": unit, "_y": ch["y"] * factor, "name": ch["name"]})
 
   # ---- relative compression: name the cylinders from an ignition sync ----
@@ -7074,7 +7376,7 @@ with tab5, guard("Log tab"):
   if st.button("📦 Prepare backup file"):
     with st.spinner("Gathering everything..."):
       _bk = {"app_version": APP_VERSION, "made": datetime.now().isoformat(),
-             **{k: store_list(k, 1000) for k in ("job", "fix", "log", "drive", "jobphoto", "wave", "sent", "problem")}}
+             **{k: store_list(k, 1000) for k in ("job", "fix", "log", "drive", "jobphoto", "wave", "csvwave", "know", "sent", "problem")}}
       ss._backup = json.dumps(_bk)
       ss._backup_counts = " · ".join(f"{k}: {len(_bk.get(k) or [])}" for k in ("job", "fix", "log", "drive", "jobphoto", "wave"))
     st.toast("Backup ready — tap Download")
@@ -7082,6 +7384,158 @@ with tab5, guard("Log tab"):
     st.download_button("⬇️ Download backup", data=ss._backup, mime="application/json",
                        file_name=f"tdg_backup_{datetime.now():%Y%m%d}.json")
     st.caption(f"Backup size: {len(ss._backup) / 1e6:.1f} MB · " + ss.get("_backup_counts", ""))
+
+# ========================================================
+# --- TAB 6: SHOP KNOWLEDGE (testing facts learned from books, classes and experience) ---
+# ========================================================
+KNOW_EXTRACT_PROMPT = """These are photos of pages from an automotive diagnostics book the technician owns. Pull out ONLY the
+testing knowledge a technician would write in their own notebook:
+- specs and known-good values (with the conditions they apply to: engine state, RPM, temperature, system type)
+- what a waveform or reading pattern means (pattern -> likely cause)
+- test procedures (how to hook up and what result proves what) as short steps
+- rules of thumb
+
+RULES:
+- Write every note in YOUR OWN WORDS, short and plain, 1-3 sentences. Never copy sentences from the page.
+- Keep numbers and specs exact — those are facts.
+- Skip stories, introductions, opinions, marketing and anything that isn't testing knowledge.
+- If a note only applies to certain vehicles or systems, say which in applies_to; otherwise "All".
+- If the pages are unreadable or have no testing content, return [].
+
+Return JSON only: a list of objects with keys
+"topic" (short system name, e.g. "Secondary ignition", "Injector current", "Relative compression", "Pressure transducer"),
+"type" (one of: "Spec / known-good value", "What a pattern means", "Test procedure", "Rule of thumb"),
+"applies_to" (e.g. "All", "GM 3.6L", "COP ignition", "Port injection"),
+"rule" (the note itself, in your own words)."""
+
+with tab6, guard("Knowledge tab"):
+  st.subheader("📖 Shop knowledge")
+  context_bar()
+  st.caption("Testing facts you've learned — specs, what patterns mean, test methods — written as short notes in plain words. "
+             "The AI team checks these on every diagnosis, scope analysis and chat question, using the ones that fit "
+             "the car and the codes. Book pages are only read, never saved: only the notes are kept.")
+  entries = knowledge_entries()
+
+  # ---- learn from book pages ----
+  with st.expander("📸 Learn from book pages", expanded=not entries):
+    st.caption("Lay the page flat in good light, whole page in the frame. A few pages at a time works best "
+               "(up to 6 per batch). You'll check every note before it's saved.")
+    kc1, kc2 = st.columns([2, 1])
+    pages = kc1.file_uploader("Page photos", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True,
+                              key=f"know_pages_{ss.get('know_n', 0)}") or []
+    src = kc2.text_input("Source (book, chapter or page)", key="know_src", placeholder="e.g. Steckler scope book, ch. 3")
+    if pages and st.button(f"🧠 Pull the testing info from {min(len(pages), 6)} page(s)", type="primary"):
+      imgs = []
+      for f in pages[:6]:
+        try:
+          imgs.append(shrink_to_b64(f.getvalue(), 1800, 85))
+        except Exception:
+          st.warning(f"Couldn't open {getattr(f, 'name', 'a photo')}.")
+      if imgs:
+        with st.spinner("Reading the pages and writing notes..."):
+          raw_ans, who = quick_ai(KNOW_EXTRACT_PROMPT, image_b64=imgs, max_tokens=6000)
+        found = find_json(raw_ans, list) or []
+        found = [x for x in found if isinstance(x, dict) and str(x.get("rule") or "").strip()]
+        if not found:
+          st.error("No testing info came back. " + (raw_ans[:300] if raw_ans.startswith("⚠️") else
+                                                    "Try sharper photos, or pages with specs and test steps."))
+        else:
+          ss.know_pending = [{"Keep": True, "Topic": str(x.get("topic") or "General")[:60],
+                              "Type": x.get("type") if x.get("type") in KNOW_KINDS else "Rule of thumb",
+                              "Applies to": str(x.get("applies_to") or "All")[:60], "Note": str(x.get("rule")).strip()[:600]}
+                             for x in found]
+          ss.know_pending_src, ss.know_pending_who = src.strip(), who
+    if ss.get("know_pending"):
+      st.markdown(f"**{len(ss.know_pending)} note(s) found** — fix anything that's off, untick what you don't want, then save. "
+                  f"<small>({ss.get('know_pending_who', '')})</small>", unsafe_allow_html=True)
+      edited = st.data_editor(ss.know_pending, use_container_width=True, hide_index=True, num_rows="dynamic",
+                              key=f"know_edit_{ss.get('know_n', 0)}",
+                              column_config={"Note": st.column_config.TextColumn(width="large"),
+                                             "Type": st.column_config.SelectboxColumn(options=KNOW_KINDS)})
+      ks1, ks2 = st.columns(2)
+      if ks1.button("💾 Save these notes", type="primary", use_container_width=True):
+        n_saved = 0
+        for i_, row in enumerate(edited or []):
+          if not row.get("Keep") or not str(row.get("Note") or "").strip():
+            continue
+          store_put("know", datetime.now().strftime("%Y%m%d%H%M%S") + f"{i_:03d}",
+                    {"topic": str(row.get("Topic") or "General").strip(), "type": row.get("Type") or "Rule of thumb",
+                     "applies_to": str(row.get("Applies to") or "All").strip(), "rule": str(row.get("Note")).strip(),
+                     "source": ss.get("know_pending_src") or "", "added": datetime.now().strftime("%Y-%m-%d"),
+                     "tech": ss.get("tech_user") or ""})
+          n_saved += 1
+        ss.know_pending = None
+        ss.know_n = ss.get("know_n", 0) + 1   # empty the photo box
+        queue_update(toast=f"Saved {n_saved} note(s) to shop knowledge")
+      if ks2.button("✖️ Throw these away", use_container_width=True):
+        ss.know_pending = None
+        st.rerun()
+
+  # ---- add one by hand ----
+  with st.expander("✍️ Add a note by hand"):
+    with st.form("know_manual", clear_on_submit=True):
+      h1, h2, h3 = st.columns(3)
+      m_topic = h1.text_input("Topic", placeholder="e.g. Secondary ignition")
+      m_type = h2.selectbox("Type", KNOW_KINDS)
+      m_app = h3.text_input("Applies to", value="All", placeholder="e.g. GM 3.6L, COP, Toyota")
+      m_rule = st.text_area("Note", placeholder="e.g. Burn time at hot idle on COP is usually about 1.2–1.6 ms; "
+                                                "under 1 ms points to a lean cylinder or high secondary resistance.")
+      m_src = st.text_input("Source (optional)", placeholder="e.g. my own experience, a class, a book")
+      if st.form_submit_button("💾 Save note") and m_rule.strip():
+        store_put("know", datetime.now().strftime("%Y%m%d%H%M%S%f"),
+                  {"topic": m_topic.strip() or "General", "type": m_type, "applies_to": m_app.strip() or "All",
+                   "rule": m_rule.strip(), "source": m_src.strip(), "added": datetime.now().strftime("%Y-%m-%d"),
+                   "tech": ss.get("tech_user") or ""})
+        queue_update(toast="Note saved")
+
+  # ---- what the AI will use on THIS car ----
+  if entries and (ss.vehicle_info or current_codes()):
+    used = knowledge_for_job()
+    with st.expander(f"🎯 Notes the AI will use on this job ({len(used)})"):
+      for e in used:
+        st.markdown(f"- **{e.get('topic')}** · {e.get('applies_to') or 'All'} — {e.get('rule')}")
+
+  # ---- browse / search / delete ----
+  st.markdown(f"**All notes ({len(entries)})**")
+  if not entries:
+    st.info("No notes yet. Add some from book pages or by hand above.")
+  else:
+    q = st.text_input("🔎 Search notes", key="know_q", placeholder="e.g. burn time, injector, GM, pressure transducer")
+    shown_e = [e for e in entries if not q.strip() or q.strip().lower() in
+               f"{e.get('topic')} {e.get('rule')} {e.get('applies_to')} {e.get('source')}".lower()]
+    topics = {}
+    for e in shown_e:
+      topics.setdefault(e.get("topic") or "General", []).append(e)
+    for tp, es in sorted(topics.items()):
+      with st.expander(f"{tp} ({len(es)})", expanded=bool(q.strip())):
+        for e in es:
+          r1, r2 = st.columns([8, 1])
+          r1.markdown(f"**{e.get('type', '')}** · {e.get('applies_to') or 'All'} — {e.get('rule', '')}  \n"
+                      f"<small>{e.get('source') or ''}{' · ' if e.get('source') else ''}{e.get('added', '')}"
+                      f"{(' · ' + e['tech']) if e.get('tech') else ''}</small>", unsafe_allow_html=True)
+          if r2.button("🗑️", key=f"delk_{e['_id']}", help="Delete this note"):
+            store_delete("know", e["_id"])
+            st.rerun()
+    kx1, kx2 = st.columns(2)
+    with kx1:
+      st.download_button("⬇️ Export notes", data=json.dumps([{k: v for k, v in e.items() if k != "_id"} for e in entries], indent=1),
+                         file_name=f"shop_knowledge_{datetime.now():%Y%m%d}.json", mime="application/json")
+  with st.expander("⬆️ Import notes from a file"):
+    up = st.file_uploader("Notes file (.json from Export)", type=["json"], key=f"know_imp_{ss.get('know_n', 0)}")
+    if up and st.button("Import"):
+      try:
+        items = json.loads(up.getvalue().decode("utf-8"))
+        n_ = 0
+        for i_, x in enumerate(items if isinstance(items, list) else []):
+          if isinstance(x, dict) and str(x.get("rule") or "").strip():
+            store_put("know", datetime.now().strftime("%Y%m%d%H%M%S") + f"i{i_:04d}",
+                      {k: x.get(k, "") for k in ("topic", "type", "applies_to", "rule", "source", "added", "tech")})
+            n_ += 1
+        ss.know_n = ss.get("know_n", 0) + 1
+        queue_update(toast=f"Imported {n_} note(s)")
+      except (ValueError, UnicodeDecodeError):
+        st.error("That file isn't a notes export.")
+
 
 
 # ========================================================
