@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-10-27"
+APP_VERSION = "2026-10-30"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -58,6 +58,9 @@ WHATS_NEW = [
     "FIX: crank wheels with several gaps per turn (e.g. 36-2-2-2) read the right pattern and RPM",
     "FIX: big scope files load ~5x faster with far less memory; AI answers with stray braces no longer break parsing",
     "FIX: if Anthropic or DeepSeek retires a model name, the app switches to one your key has and tells you",
+    "FIX: AI Check no longer times out — Claude's thinking is kept in check (Anthropic's 'effort' setting), the check "
+    "runs in the background so nothing on the page can cut it off, and the scanner shows a live seconds counter",
+    "FIX: Glitch catcher no longer cries wolf on direct-injection engines when you lift off the throttle",
 ]
 
 st.markdown(
@@ -632,23 +635,27 @@ def _img_list(image_b64) -> list:
   return [x for x in (image_b64 or []) if x]
 
 
-def claude(prompt: str, *, max_tokens: int = 4000, timeout: int = 120, image_b64="") -> str:
-  """Ask Claude. Newer Claude models can spend part of max_tokens "thinking" before they write; if the
-  budget runs out mid-thought the answer comes back EMPTY (stop_reason = max_tokens). When that happens,
-  ask once more with a much bigger budget instead of giving up."""
+def claude(prompt: str, *, max_tokens: int = 4000, timeout: int = 120, image_b64="", effort: str | None = "medium") -> str:
+  """Ask Claude.
+  `effort` (low / medium / high) is Anthropic's setting for how hard the model thinks before answering. Current Claude
+  models default to "high", which can spend the whole budget thinking — slow, and sometimes an EMPTY answer. Most jobs
+  here run at "medium"; time-critical ones at "low". If the budget still runs out mid-thought, ask once more with a
+  bigger budget AND low effort (fast) instead of giving up."""
   key = secret("ANTHROPIC_API_KEY")
   if not key:
     raise AIError("ANTHROPIC_API_KEY is missing from Streamlit Secrets.")
   content = [{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b}}
              for b in _img_list(image_b64)] + [{"type": "text", "text": prompt}]
-  budgets = [max_tokens, min(max(max_tokens * 3, 12000), 32000)]
+  tries = [(max_tokens, effort), (min(max(max_tokens * 2, 12000), 32000), "low")]
   why = ""
   model = claude_model()
-  for attempt, budget in enumerate(budgets):
+  for attempt, (budget, eff) in enumerate(tries):
     def post(mdl):
-      return http().post(CLAUDE_URL, timeout=timeout if attempt == 0 else max(timeout, 240), json={
-          "model": mdl, "max_tokens": budget, "messages": [{"role": "user", "content": content}]},
-          headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
+      body = {"model": mdl, "max_tokens": budget, "messages": [{"role": "user", "content": content}]}
+      if eff and not _model_swaps().get(("no_effort", mdl)):
+        body["output_config"] = {"effort": eff}
+      return http().post(CLAUDE_URL, timeout=timeout if attempt == 0 else max(timeout, 180), json=body,
+                         headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"})
     try:
       res = post(model)
       if _model_error(res):   # model name retired -> find what this key can use and try once more
@@ -656,6 +663,9 @@ def claude(prompt: str, *, max_tokens: int = 4000, timeout: int = 120, image_b64
         if alt:
           model = alt
           res = post(model)
+      if res.status_code == 400 and re.search(r"effort|output_config", res.text or "", re.I):
+        _model_swaps()[("no_effort", model)] = True   # this model doesn't take the effort setting: ask without it
+        res = post(model)
     except requests.RequestException as e:
       raise AIError(f"Claude connection error: {e}") from e
     if res.status_code != 200:
@@ -672,12 +682,13 @@ def claude(prompt: str, *, max_tokens: int = 4000, timeout: int = 120, image_b64
         text += "\n\n_(Claude's answer hit the length limit and may be cut off.)_"
       return text
     kinds = sorted({b.get("type", "?") for b in blocks}) or ["none"]
-    why = f"stop_reason={stop}, blocks={','.join(kinds)}, max_tokens={budget}"
+    why = f"stop_reason={stop}, blocks={','.join(kinds)}, max_tokens={budget}, effort={eff or 'default'}"
     if stop == "refusal":
       raise AIError(f"Claude declined to answer this request ({why}).")
-    if stop != "max_tokens" or attempt == len(budgets) - 1:
+    if stop != "max_tokens" or attempt == len(tries) - 1:
       break
-    log_problem("ai", "Claude", f"Empty answer — budget used up before writing ({why}). Retrying with {budgets[attempt + 1]}.")
+    log_problem("ai", "Claude", f"Empty answer — thinking used the whole budget ({why}). Retrying with "
+                               f"{tries[attempt + 1][0]} tokens at low effort.")
   raise AIError(f"Claude returned an empty answer ({why}).")
 
 
@@ -804,7 +815,8 @@ INSTRUCTIONS:
 
 
 def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: bool, status=None, *,
-                question: str = "", image_b64="", fast: bool = False, research: str = "") -> tuple[str, str, str, str]:
+                question: str = "", image_b64="", fast: bool = False, research: str = "",
+                effort: str | None = None) -> tuple[str, str, str, str]:
   """The whole team on one job: Perplexity researches -> Gemini and DeepSeek draft at the same time
   -> Claude checks both (and the photo, if any) and writes the final answer.
   Steps are skipped if their key isn't set. fast=True = short answers (live test drive checks).
@@ -848,7 +860,8 @@ def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: b
                                           draft=draft or "(Gemini draft unavailable)",
                                           ds_draft=ds_draft or "(DeepSeek draft unavailable)")
                      + ("\n\nKeep the final answer SHORT (the tech is driving): under 120 words, then 1-2 Team Notes bullets." if fast else ""),
-                     max_tokens=1500 if fast else 8000, timeout=60 if fast else 150, image_b64=image_b64)
+                     max_tokens=4000 if fast else 16000, timeout=60 if fast else 150, image_b64=image_b64,
+                     effort=effort or ("low" if fast else "medium"))
       return final, research, draft, ds_draft
     except AIError as e:
       best = draft or ds_draft
@@ -866,11 +879,11 @@ def team_names(draft: str, ds_draft: str, research: str) -> str:
                                 "🐋 " + deepseek_label() if ds_draft else "", "🧠 " + claude_label() if (draft or ds_draft) and has_claude() else ""] if x)
 
 
-def quick_ai(prompt: str, image_b64="", max_tokens: int = 1500) -> tuple[str, str]:
+def quick_ai(prompt: str, image_b64="", max_tokens: int = 4000, effort: str = "low") -> tuple[str, str]:
   """One AI, one answer: Claude if its key is set, otherwise Gemini. Returns (answer, who answered)."""
   if has_claude():
     try:
-      return claude(prompt, max_tokens=max_tokens, timeout=90, image_b64=image_b64), "🧠 " + claude_label()
+      return claude(prompt, max_tokens=max_tokens, timeout=90, image_b64=image_b64, effort=effort), "🧠 " + claude_label()
     except AIError:
       pass   # fall through to Gemini
   try:
@@ -972,20 +985,12 @@ def _ai_vin_reads(img: Image.Image) -> dict:
     pass
   if has_claude():
     try:
-      key = secret("ANTHROPIC_API_KEY")
-      res = http().post(CLAUDE_URL, timeout=60, headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                        json={"model": claude_model(), "max_tokens": 400, "messages": [{"role": "user", "content": [
-                            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": _jpeg_b64(img, 1568)}},
-                            {"type": "text", "text": VIN_READ_PROMPT}]}]})
-      if res.status_code == 200:
-        txt = "".join(b.get("text", "") for b in res.json().get("content", []) if b.get("type") == "text")
-        obj = find_json(txt, dict)
-        vins = (obj or {}).get("vins", []) or []
-        reads["Claude"] = [c for v in vins for c in clean_vin_text(str(v))]
-      else:
-        log_problem("ai", "VIN photo read (Claude)", f"HTTP {res.status_code}: {res.text[:200]}")
-    except (requests.RequestException, ValueError, AttributeError) as e:
-      log_problem("ai", "VIN photo read (Claude)", str(e))
+      txt = claude(VIN_READ_PROMPT, max_tokens=3000, timeout=60, image_b64=_jpeg_b64(img, 1568), effort="low")
+      obj = find_json(txt, dict)
+      vins = (obj or {}).get("vins", []) or []
+      reads["Claude"] = [c for v in vins for c in clean_vin_text(str(v))]
+    except AIError:
+      pass   # already in the problem log
   return reads
 
 
@@ -1039,7 +1044,8 @@ def extract_customer(img_bytes: bytes) -> dict:
     if not has_claude():
       raise
   # Gemini failed (quota, outage, bad answer): let Claude read it instead
-  txt = claude(ask + " Reply with the JSON only.", max_tokens=400, timeout=60, image_b64=img_part(img)["inline_data"]["data"])
+  txt = claude(ask + " Reply with the JSON only.", max_tokens=3000, timeout=60, image_b64=img_part(img)["inline_data"]["data"],
+               effort="low")
   obj = find_json(txt, dict)
   if obj is None:
     raise ValueError("No customer details found in the AI's answer.")
@@ -4403,9 +4409,13 @@ function glitchTick() {
   const st = num.stft1, st2 = back(2, "stft1");
   if (st != null && st2 != null && trimsTrustworthy() && Math.abs(st - st2) > 15 && Math.abs(st) > 20)
     fire("trimspike", `Fuel trim spike, bank 1 short term ${Math.round(st)} percent.`);
-  const frp = num.frp, frp5 = back(5, "frp");
-  if (frp != null && frp5 != null && frp5 > 20 && frp < frp5 * 0.72 && (num.rpm ?? 0) > 500)
-    fire("frpdrop", `Fuel pressure dropped from ${Math.round(frp5)} to ${Math.round(frp)} PSI.`);
+  const frp = num.frp, frp5 = back(5, "frp"), tps5 = back(5, "tps");
+  // Direct injection (rail well over 150 psi): the PCM commands pressure up and down with load, so a drop when the
+  // driver lifts off is normal. Only flag it there if the throttle is steady or still opening, and the drop is bigger.
+  const gdi = frp5 != null && frp5 > 150;
+  const footSteady = num.tps != null && tps5 != null && num.tps >= tps5 - 2;
+  if (frp != null && frp5 != null && frp5 > 20 && frp < frp5 * (gdi ? 0.6 : 0.72) && (num.rpm ?? 0) > 500 && (!gdi || footSteady))
+    fire("frpdrop", `Fuel pressure dropped from ${Math.round(frp5)} to ${Math.round(frp)} PSI${gdi ? " with steady throttle" : ""}.`);
 }
 function glitchWindow() {   // the last 15 s, full resolution, as a small CSV table
   const t = nowS();
@@ -4456,10 +4466,15 @@ function snapshot() {
 function requestAi(mode) {
   if (aiPendingId) return;
   aiPendingId = "ai-" + Date.now();
-  if (mode === "full") $("aiBox").innerHTML = `<span style="color:var(--o)">🤖 The AI team is analyzing live data, codes, monitors, Mode $06 and test results… (about 30–60 s)</span>`;
+  const id = aiPendingId, t0 = Date.now();
+  const tick = () => { if (aiPendingId === id && mode === "full")
+    $("aiBox").innerHTML = `<span style="color:var(--o)">🤖 The AI team is analyzing live data, codes, monitors, Mode $06 and test results… ${Math.round((Date.now() - t0) / 1000)} s (usually 1–2 min)</span>`; };
   sendValue({ type: "ai", id: aiPendingId, mode, at: new Date().toLocaleTimeString(), pids: snapshot(), dtcs, readiness: readinessSummary, mode6: mode6Summary, tests: T.results || {}, flags: plausNow() });
-  const id = aiPendingId;
-  setTimeout(() => { if (aiPendingId === id) { aiPendingId = null; if (mode === "full") $("aiBox").textContent = "AI request timed out. Try again."; logEvent("ai", "AI check (" + mode + ")", "No answer from the app within 3 min"); } }, 180000);
+  tick();
+  const timer = setInterval(() => { if (aiPendingId !== id) clearInterval(timer); else tick(); }, 1000);
+  setTimeout(() => { if (aiPendingId === id) { aiPendingId = null; clearInterval(timer);
+    if (mode === "full") $("aiBox").textContent = "No answer after 6 minutes. If it finishes later it will still show here — or tap AI Check to try again.";
+    logEvent("ai", "AI check (" + mode + ")", "No answer from the app within 6 min"); } }, 360000);
 }
 function showAi(text, label) {
   let h = esc(text || "")
@@ -6083,6 +6098,68 @@ def module_codes(d: dict) -> dict:
           for m in d.get("modules") or [] for c in m.get("codes", []) if c.get("code")}
 
 
+# ---- Background AI jobs: a long AI check can't be cut off by a page refresh (a scanner message, a tap) ----
+@st.cache_resource
+def _ai_jobs() -> dict:
+  return {}
+
+
+def start_ai_job(job_id: str, fn) -> bool:
+  """Run fn() on a background thread. False = this Streamlit can't do it (the caller then runs it the old way)."""
+  if not job_id or not hasattr(st, "fragment"):
+    return False
+  try:
+    from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+    ctx = get_script_run_ctx()
+  except Exception:
+    return False
+  if ctx is None:
+    return False
+  jobs = _ai_jobs()
+  for k in [k for k, v in jobs.items() if time.time() - v.get("started", 0) > 3600]:
+    jobs.pop(k, None)   # tidy up anything nobody collected
+  if job_id in jobs:
+    return True
+  jobs[job_id] = {"state": "running", "started": time.time()}
+  def work():
+    try:
+      jobs[job_id].update(state="done", result=fn(), finished=time.time())
+    except Exception as e:
+      jobs[job_id].update(state="error", error=f"{type(e).__name__}: {e}", finished=time.time())
+  th = threading.Thread(target=work, daemon=True, name=f"ai-{job_id}")
+  add_script_run_ctx(th, ctx)   # lets the job read the job's data and write to the problem log
+  th.start()
+  return True
+
+
+if hasattr(st, "fragment"):
+  @st.fragment(run_every=2)
+  def _ai_watch():
+    p = ss.get("_ai_pending")
+    if not p:
+      return
+    j = _ai_jobs().get(p["job"])
+    if j is None:   # the server restarted mid-job
+      ss._ai_pending = None
+      ss.ble_ai = {"id": p["comp_id"] + "-lost", "text": "⚠️ The app restarted during the AI check. Tap AI Check again.",
+                   "label": p["label"]}
+      st.rerun()
+    if j["state"] == "running":
+      st.info(f"🤖 {p['what']} — the AI team is working… {int(time.time() - j['started'])} s "
+              "(you can keep using the app; the answer appears in the scanner panel)")
+      return
+    _ai_jobs().pop(p["job"], None)
+    ss._ai_pending = None
+    if j["state"] == "done":
+      text, research, draft, ds_draft = j["result"]
+      ss.ble_ai = {"id": p["comp_id"], "text": text, "label": " · ".join(x for x in (
+          p["label"], team_names(draft, ds_draft, research), f"{int(j['finished'] - j['started'])} s") if x)}
+    else:
+      log_problem("ai", p["what"], j.get("error", "failed"))
+      ss.ble_ai = {"id": p["comp_id"], "text": f"⚠️ The AI check failed: {j.get('error')}", "label": p["label"]}
+    st.rerun()   # full refresh so the scanner panel receives the answer
+
+
 def handle_ble_event(ev: dict):
   if ev.get("type") == "sync":
     d = ev.get("dtcs") or {}
@@ -6169,10 +6246,18 @@ DIAGNOSTIC TASK:
 Use clean bold section headers and direct shop-floor language. Skip sections with no data."""
       label = f"[Full AI Check - {ev.get('at')}]"
     drive_mode = ev.get("mode") == "drive"
-    with st.status("🤖 AI team is checking the live data...", expanded=False) as status:
-      text, research, draft, ds_draft = team_answer(
-          prompt, vehicle, dtcs, ss.symptoms.strip(), use_web=bool(not drive_mode and ss.get("use_web") and secret("PERPLEXITY_API_KEY")),
-          status=status, fast=drive_mode)
+    symptoms = (ss.symptoms or "").strip()
+    # Live checks read the live data — no web research here (that's what the Diagnostic Tree is for), so they answer fast.
+    def job():
+      return team_answer(prompt, vehicle, dtcs, symptoms, use_web=False, status=None, fast=drive_mode,
+                         effort="low" if drive_mode else "medium")
+    if start_ai_job(ev.get("id"), job):
+      ss._ai_pending = {"job": ev.get("id"), "comp_id": ev.get("id"), "label": label,
+                        "what": "Live drive check" if drive_mode else "AI check"}
+      return
+    with st.status("🤖 AI team is checking the live data...", expanded=False) as status:   # older Streamlit: the old way
+      text, research, draft, ds_draft = team_answer(prompt, vehicle, dtcs, symptoms, use_web=False, status=status,
+                                                    fast=drive_mode, effort="low" if drive_mode else "medium")
       status.update(label="Done", state="complete")
     ss.ble_ai = {"id": ev.get("id"), "text": text, "label": label + " · " + team_names(draft, ds_draft, research)}
     st.rerun()
@@ -6194,6 +6279,8 @@ with tab2, guard("Live Telemetry tab"):
   if isinstance(event, dict) and event.get("id") and event["id"] != ss.ble_last_event:
     ss.ble_last_event = event["id"]
     handle_ble_event(event)
+  if ss.get("_ai_pending") and hasattr(st, "fragment"):
+    _ai_watch()
 
   # ---- Drive cycle coach: a concrete plan to finish the incomplete monitors ----
   _rdy = (ss.scan_data or {}).get("readiness") or ""
@@ -6211,7 +6298,7 @@ Full readiness status: {_rdy}
 Write a single practical drive cycle plan to complete them, in order, as a numbered checklist a technician follows
 while driving. For each step give: starting conditions (cold engine / coolant temp / fuel level if it matters),
 exact speeds, times and throttle behavior, and WHICH monitor that step completes. Mention this make's known quirks
-for setting these monitors if you are sure of them. Keep it under 300 words.""", max_tokens=900)
+for setting these monitors if you are sure of them. Keep it under 300 words.""", max_tokens=3000)
       ss.drive_plan = ("" if _plan.startswith("⚠️") else f"_{_who}_\n\n") + _plan
     if ss.drive_plan:
       with st.expander("📋 Drive cycle plan", expanded=True):
@@ -6797,7 +6884,7 @@ Say what you can read in the photo, and say so plainly if part of it is too blur
     with st.chat_message("assistant"):
       if chat_quick:
         with st.spinner("Thinking..."):
-          reply, who = quick_ai(chat_prompt, image_b64=photos_b64, max_tokens=1500)
+          reply, who = quick_ai(chat_prompt, image_b64=photos_b64, max_tokens=4000)
         research = ""
         st.caption(who + " · quick answer")
       else:
@@ -7059,7 +7146,7 @@ with tab3, guard("Diagnose tab"):
             vehicle=ss.vehicle_info or "the vehicle", complaint=ss.symptoms.strip() or "not given", codes=", ".join(current_codes()) or "none",
             tests=json.dumps(ss.test_results or {})[:2500], notes=ss.tech_notes.strip() or "none",
             fix=(ss.fix_part.strip() + (f" (proved by: {ss.fix_test.strip()})" if ss.fix_test.strip() else "")) or "not done yet",
-            plan=(ss.dtc_result or {}).get("text", "")[:2500] or "none"), max_tokens=700)
+            plan=(ss.dtc_result or {}).get("text", "")[:2500] or "none"), max_tokens=3000)
       if _sum.startswith("⚠️"):
         st.error(_sum)
       else:
@@ -7433,7 +7520,7 @@ with tab6, guard("Knowledge tab"):
           st.warning(f"Couldn't open {getattr(f, 'name', 'a photo')}.")
       if imgs:
         with st.spinner("Reading the pages and writing notes..."):
-          raw_ans, who = quick_ai(KNOW_EXTRACT_PROMPT, image_b64=imgs, max_tokens=6000)
+          raw_ans, who = quick_ai(KNOW_EXTRACT_PROMPT, image_b64=imgs, max_tokens=12000, effort="medium")
         found = find_json(raw_ans, list) or []
         found = [x for x in found if isinstance(x, dict) and str(x.get("rule") or "").strip()]
         if not found:
