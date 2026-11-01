@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-10-30"
+APP_VERSION = "2026-10-31"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -61,6 +61,13 @@ WHATS_NEW = [
     "FIX: AI Check no longer times out — Claude's thinking is kept in check (Anthropic's 'effort' setting), the check "
     "runs in the background so nothing on the page can cut it off, and the scanner shows a live seconds counter",
     "FIX: Glitch catcher no longer cries wolf on direct-injection engines when you lift off the throttle",
+    "NEW: 🪜 Step-by-step cards — work the test plan one test at a time: Done → Next, notes on what you found, and "
+    "quick buttons for 'Where is it?', 'How do I hook up the tool?' and 'How does it work?'",
+    "NEW: 🌟 Simple view (top right) — big status cards, plain-English codes, one test at a time; pro sections tucked away",
+    "NEW: Cam/crank correlation — cam edges in crank degrees after the gap (green = intake, red = exhaust), "
+    "compared with your known-good captures in degrees",
+    "NEW: NHTSA owner complaints for the vehicle, including the ones that sound like this car",
+    "NEW: One-tap symptom buttons on the Diagnose tab",
 ]
 
 st.markdown(
@@ -100,6 +107,21 @@ div[data-baseweb="input"] > div, div[data-baseweb="select"] > div, div[data-base
 .tdg-bar .dtc {{ font-family:'JetBrains Mono',monospace; font-weight:600; padding:3px 10px; border-radius:6px; }}
 .tdg-next {{ flex-basis:100%; color:#8B9BB4; font-size:.8rem; }}
 .tdg-next b {{ color:#10B981; }}
+/* simple view: big status cards + step cards */
+.tdg-card {{ border-radius:12px; padding:12px 14px; margin-bottom:10px; border:1px solid rgba(255,255,255,.08); color:#F1F5F9; }}
+.tdg-card small {{ color:rgba(241,245,249,.8); }}
+.tdg-big {{ font-size:1.45rem; font-weight:800; margin:2px 0; font-family:'JetBrains Mono',monospace; }}
+.tdg-green {{ background:linear-gradient(135deg,#064E3B,#065F46); border-left:6px solid #10B981; }}
+.tdg-yellow {{ background:linear-gradient(135deg,#713F12,#854D0E); border-left:6px solid #F59E0B; }}
+.tdg-red {{ background:linear-gradient(135deg,#7F1D1D,#991B1B); border-left:6px solid #EF4444; }}
+.tdg-blue {{ background:linear-gradient(135deg,#1E3A8A,#1D4ED8); border-left:6px solid #60A5FA; }}
+.tdg-gray {{ background:rgba(51,65,85,.55); border-left:6px solid #64748B; }}
+.tdg-step {{ background:#152033; border:2px solid #38BDF8; border-radius:16px; padding:16px 18px; margin:8px 0 10px; color:#F1F5F9; }}
+.tdg-step h3 {{ margin:.2rem 0 .4rem; color:#38BDF8; }}
+.tdg-step p {{ margin:.25rem 0; font-size:1.02rem; line-height:1.5; }}
+.tdg-badge {{ display:inline-block; background:#38BDF8; color:#0F172A; font-weight:800; padding:2px 10px; border-radius:999px; font-size:.8rem; }}
+.tdg-spec {{ color:#FDE68A; }}
+.tdg-safe {{ color:#FCA5A5; }}
 </style>
 
 <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; padding:12px 18px;
@@ -164,6 +186,7 @@ DEFAULTS = {
     "tech_notes": "", "customer_summary": "", "fix_part": "", "fix_test": "", "fix_notes": "",
     "customer_email": "", "odometer": "", "estimate_rows": [], "follow_up_days": 0, "follow_up_note": "",
     "follow_up_done": False, "drive_plan": "", "wave_result": None, "know_pending": None,
+    "plan_steps": None, "plan_idx": 0, "plan_done": [], "plan_notes": {}, "plan_qa": None,
 }
 for _k, _v in DEFAULTS.items():
     ss.setdefault(_k, copy.deepcopy(_v))
@@ -1288,13 +1311,17 @@ WAVE_TYPES = {
     "coil_amp": "Ignition coil current (amps)",
     "inj_v": "Injector voltage (low side)",
     "inj_amp": "Injector current (amps)",
-    "crank_sig": "Crank / cam sensor signal",
+    "crank_sig": "Crankshaft sensor (CKP)",
+    "cam_in": "Camshaft sensor — INTAKE (green)",
+    "cam_ex": "Camshaft sensor — EXHAUST (red)",
     "rel_comp": "Relative compression (starter current, cranking)",
     "px_cyl": "Pressure transducer — in cylinder",
     "px_intake": "Pressure transducer — intake / vacuum",
     "px_exhaust": "Pressure transducer — exhaust / tailpipe",
 }
+WAVE_COLORS = {"cam_in": "#22C55E", "cam_ex": "#EF4444"}   # shop standard: green = intake cam, red = exhaust cam
 WAVE_UNITS = {"sec_ign": "kV", "pri_ign": "V", "coil_amp": "A", "inj_v": "V", "inj_amp": "A", "crank_sig": "V",
+              "cam_in": "V", "cam_ex": "V",
               "rel_comp": "A", "px_cyl": "psi", "px_intake": "inHg/psi", "px_exhaust": "psi", "volts": "V"}
 _TIME_SCALE = {"s": 1.0, "sec": 1.0, "ms": 1e-3, "us": 1e-6, "µs": 1e-6, "μs": 1e-6, "ns": 1e-9}
 
@@ -1458,6 +1485,16 @@ def guess_type(ch: dict) -> str:
     return "pri_ign"
   if 25 < hi < 120 and np.nanmedian(y) > 9:
     return "inj_v"
+  # square-ish sensor signal: many teeth with a missing-tooth gap = crank; a handful of edges = cam
+  if hi - lo > 1.0:
+    mid, h = (hi + lo) / 2, (hi - lo) * 0.15
+    e = _edges(y, mid + h, mid - h)
+    if len(e) >= 30:
+      iv = np.diff(e).astype(float)
+      if np.any(iv > 1.6 * np.median(iv)):
+        return "crank_sig"
+    elif 2 <= len(e) <= 40:
+      return "cam_in"
   return "volts"
 
 
@@ -1898,6 +1935,95 @@ def _px_pulses(t, y, dt, cyl, kind):
   return m, ev, notes
 
 
+def _cam(t, y, dt):
+  hi, lo = float(np.nanpercentile(y, 99)), float(np.nanpercentile(y, 1))
+  mid, h = (hi + lo) / 2, (hi - lo) * 0.15
+  up, down = _edges(y, mid + h, mid - h), _edges(-y, -(mid - h), -(mid + h))
+  m = {"rising_edges": int(len(up)), "falling_edges": int(len(down)), "low_level_v": _r(lo), "high_level_v": _r(hi)}
+  notes = []
+  if lo > 0.8 and hi < 15:
+    notes.append(f"Cam signal never goes fully low (lowest {_r(lo)} V): check the sensor ground and signal circuit.")
+  if len(up) < 2:
+    notes.append("Too few cam edges — capture at least two full engine cycles (four crank turns is best).")
+  return m, [], notes
+
+
+def _crank_sync(t, y):
+  """Crank teeth + where each turn starts (first tooth after the missing-tooth gap). Single-gap wheels only."""
+  hi, lo = float(np.nanpercentile(y, 98)), float(np.nanpercentile(y, 2))
+  mid, h = (hi + lo) / 2, (hi - lo) * 0.15
+  e = _edges(y, mid + h, mid - h)
+  if len(e) < 20:
+    return None, "Too few crank teeth to find the sync gap."
+  iv = np.diff(t[e])
+  ref = np.array([np.median(iv[max(0, i - 6): i + 7]) for i in range(len(iv))])
+  ratio = iv / ref
+  gaps = np.where(ratio > 1.6)[0]
+  if len(gaps) < 2:
+    return None, "Need at least one full crank turn (two missing-tooth gaps) in the capture to measure cam timing."
+  between = np.diff(gaps)
+  if np.any(np.abs(between - np.median(between)) > 1):
+    return None, "Cam timing needs a crank wheel with one gap per turn (like 60-2 or 36-1); this wheel has several."
+  miss = max(1, int(round(float(np.median(ratio[gaps])))) - 1)
+  pitches = int(np.median(between)) + miss
+  return {"e": e, "gaps": gaps, "miss": miss, "pitch_deg": 360.0 / pitches, "pattern": f"{pitches}-{miss}"}, ""
+
+
+def cam_crank_angles(t, crank_y, cam_y) -> tuple[dict, list[str]]:
+  """Where every cam edge lands in CRANK degrees after the crank's missing-tooth gap — the cam/crank correlation
+  check (P0016-P0019, P0340s, VVT, timing chain stretch). Counts teeth, so normal speed wobble doesn't skew it."""
+  sync, why = _crank_sync(t, crank_y)
+  if not sync:
+    return {}, [why]
+  e, gaps, miss, pd_ = sync["e"], sync["gaps"], sync["miss"], sync["pitch_deg"]
+  te = t[e]
+  gap_set = set(int(g) for g in gaps)
+  # angle of every crank edge (0 deg = first tooth after the gap); None before the first sync
+  ang = np.full(len(e), np.nan)
+  cur = None
+  for j in range(len(e)):
+    if (j - 1) in gap_set:
+      cur = 0.0
+    elif cur is not None:
+      cur += pd_
+    ang[j] = np.nan if cur is None else cur
+  def where(tc):
+    j = int(np.searchsorted(te, tc) - 1)
+    if j < 0 or j >= len(e) - 1 or np.isnan(ang[j]):
+      return None
+    span = (miss + 1) * pd_ if j in gap_set else pd_
+    return (ang[j] + (tc - te[j]) / (te[j + 1] - te[j]) * span) % 360.0
+  hi, lo = float(np.nanpercentile(cam_y, 99)), float(np.nanpercentile(cam_y, 1))
+  mid, h = (hi + lo) / 2, (hi - lo) * 0.15
+  out, notes = {"crank_wheel": sync["pattern"]}, []
+  for name, idx in (("rising", _edges(cam_y, mid + h, mid - h)), ("falling", _edges(-cam_y, -(mid - h), -(mid + h)))):
+    angles = sorted(a for a in (where(t[i]) for i in idx) if a is not None)
+    clusters = []
+    for a in angles:   # the same cam edge lands at the same crank angle every other turn: group them
+      if clusters and min(abs(a - clusters[-1][-1]), 360 - abs(a - clusters[-1][-1])) <= 8:
+        clusters[-1].append(a)
+      else:
+        clusters.append([a])
+    if len(clusters) > 1 and min(abs(clusters[0][0] - clusters[-1][-1]), 360 - abs(clusters[0][0] - clusters[-1][-1])) <= 8:
+      clusters[0] = clusters.pop() + clusters[0]   # wraps around 0/360
+    for k, c in enumerate(clusters[:6]):
+      c = np.array(c)
+      mean = float(np.degrees(np.arctan2(np.mean(np.sin(np.radians(c))), np.mean(np.cos(np.radians(c)))))) % 360
+      spread = float(max(min(abs(x - mean), 360 - abs(x - mean)) for x in c))
+      out[f"{name}_edge_{k + 1}_deg"] = _r(mean, 1)
+      out[f"{name}_edge_{k + 1}_wobble_deg"] = _r(spread, 1)
+      if spread > 3:
+        notes.append(f"Cam {name} edge {k + 1} moves ±{_r(spread, 1)}° between turns — cam phaser moving, chain/belt "
+                     "slack, or a noisy signal. At a steady idle it should hold within about ±1–2°.")
+  if not any(k.endswith("_deg") and "wobble" not in k for k in out):
+    notes.append("No cam edges fell inside a full crank turn — capture a longer stretch.")
+  else:
+    notes.append("Angles are crank degrees after the first tooth past the missing-tooth gap. Compare them with a saved "
+                 "known-good capture of the same engine (or the factory correlation spec): a few degrees off on "
+                 "both cams = stretched chain/jumped timing; one cam off = that cam's phaser, sprocket or sensor.")
+  return out, notes
+
+
 def measure_channel(t, y, dt, wtype: str, cyl: int | None = None, rpm_hint: float | None = None) -> dict:
   """Measure one channel as the given type. Returns {"type", "measurements", "events", "notes"}."""
   ok = np.isfinite(y)
@@ -1916,6 +2042,8 @@ def measure_channel(t, y, dt, wtype: str, cyl: int | None = None, rpm_hint: floa
       m, ev, notes = _inj_amp(t, y, dt)
     elif wtype == "crank_sig":
       m, ev, notes = _crank_sig(t, y, dt, rpm_hint)
+    elif wtype in ("cam_in", "cam_ex"):
+      m, ev, notes = _cam(t, y, dt)
     elif wtype == "rel_comp":
       m, ev, notes = _rel_comp(t, y, dt, cyl)
     elif wtype == "px_cyl":
@@ -1992,6 +2120,51 @@ def nhtsa_recalls(make: str, model: str, year: str) -> list[dict]:
     return []
 
 
+@st.cache_data(ttl=86400, show_spinner=False, max_entries=300)
+def nhtsa_complaints(make: str, model: str, year: str) -> list[dict]:
+  """Owner complaints filed with NHTSA for this year / make / model (components + what the owner wrote)."""
+  if not (make and model and str(year).isdigit()):
+    return []
+  try:
+    r = http().get("https://api.nhtsa.gov/complaints/complaintsByVehicle",
+                   params={"make": make, "model": model, "modelYear": str(year)}, timeout=12)
+    r.raise_for_status()
+    return [{"components": str(x.get("components") or ""), "summary": str(x.get("summary") or ""),
+             "date": str(x.get("dateOfIncident") or ""), "crash": bool(x.get("crash")), "fire": bool(x.get("fire"))}
+            for x in (r.json().get("results") or [])]
+  except (requests.RequestException, ValueError):
+    return []
+
+
+def vehicle_complaints() -> list[dict]:
+  vd = ss.vehicle_details or {}
+  return nhtsa_complaints(str(vd.get("Make", "")), str(vd.get("Model", "")), str(vd.get("Model Year", "")))
+
+
+def complaint_summary(comps: list[dict]) -> tuple[list[tuple[str, int]], list[dict]]:
+  """(most-reported systems, the complaints most like THIS car's symptoms/codes)."""
+  counts = {}
+  for c in comps:
+    for part in {p.strip() for p in c["components"].split(",") if p.strip()}:
+      counts[part] = counts.get(part, 0) + 1
+  top = sorted(counts.items(), key=lambda kv: -kv[1])[:6]
+  words = {w for w in re.findall(r"[a-z]{4,}", (ss.symptoms or "").lower())} - \
+      {"when", "with", "then", "that", "this", "only", "after", "from", "have", "engine", "light", "car", "vehicle"}
+  for code in current_codes():
+    for pre, w in CODE_WORDS:
+      if code.startswith(pre):
+        words |= {x for x in w.split() if len(x) >= 4}
+        break
+  scored = []
+  for c in comps:
+    text = c["summary"].lower()
+    sc = sum(1 for w in words if w in text) + sum(2 for code in current_codes() if code.lower() in text)
+    if sc >= 2:
+      scored.append((sc, c))
+  scored.sort(key=lambda x: -x[0])
+  return top, [c for _, c in scored[:4]]
+
+
 def vehicle_recalls() -> list[dict]:
   vd = ss.vehicle_details or {}
   return nhtsa_recalls(str(vd.get("Make", "")), str(vd.get("Model", "")), str(vd.get("Model Year", "")))
@@ -2002,7 +2175,7 @@ JOB_FIELDS = ["customer_name", "customer_phone", "customer_address", "vin_input"
               "vehicle_details", "sel_codes", "manual_dtc", "symptoms", "ble_dtcs", "scan_data", "test_results", "dtc_result",
               "scope_result", "chat_history", "tech_notes", "customer_summary", "fix_part", "fix_test", "fix_notes",
               "customer_email", "odometer", "estimate_rows", "follow_up_days", "follow_up_note", "follow_up_done",
-              "wave_result"]
+              "wave_result", "plan_steps", "plan_idx", "plan_done", "plan_notes"]
 
 
 def job_snapshot() -> dict:
@@ -2171,6 +2344,12 @@ def shop_context() -> str:
     if recalls:
       out.append(f"NHTSA RECALLS FOR THIS YEAR/MAKE/MODEL ({len(recalls)}; may or may not be done on this VIN):")
       out += [f"- {r.get('NHTSACampaignNumber', '')} {r.get('Component', '')}: {str(r.get('Summary', ''))[:220]}" for r in recalls[:6]]
+    comps = vehicle_complaints()
+    if comps:
+      top, like = complaint_summary(comps)
+      out.append(f"NHTSA OWNER COMPLAINTS for this year/make/model ({len(comps)} filed; owner reports, not confirmed "
+                 f"fixes). Most reported: " + ", ".join(f"{n.title()} ({k})" for n, k in top[:5]))
+      out += [f"- Similar complaint: {c['summary'][:260]}" for c in like[:3]]
     kn = knowledge_for_job()
     if kn:
       out.append("THIS SHOP'S TESTING KNOWLEDGE (the technician's own notes: specs, what patterns mean, test methods). "
@@ -2476,8 +2655,217 @@ with guard("Cars in the shop"):
   with _topM:
     setup_panel()
   with _topR:
+    if "simple_view" not in ss:
+      ss.simple_view = st.query_params.get("view") == "simple"
+    st.toggle("🌟 Simple view", key="simple_view",
+              help="Big status cards, the plan one test at a time, plain-English codes. Hides the pro sections "
+                   "(scope math, report, estimate, confirmed fix) — nothing is lost, switch it off to see them.")
+    if ss.simple_view and st.query_params.get("view") != "simple":
+      st.query_params["view"] = "simple"
+    elif not ss.simple_view and "view" in st.query_params:
+      del st.query_params["view"]
     with st.expander("🆕 What's new"):
       st.markdown("\n".join(f"- {w}" for w in WHATS_NEW))
+
+
+STEP_PROMPT = """Turn this diagnostic test plan into step-by-step cards a technician (or a helper learning the trade) can
+work through one at a time on the vehicle.
+
+Vehicle: {vehicle}
+Codes: {codes}
+Symptoms: {symptoms}
+
+THE TEST PLAN:
+{plan}
+
+RULES:
+- 4 to 8 steps, in the same order as the plan (fastest/cheapest and most likely first).
+- Each step is ONE test with a clear pass/fail result. Plain, simple words.
+- Keep every spec, value and pin number EXACTLY as the plan gives it. Never invent a spec: if the plan has none,
+  write "Look up the spec in service info".
+- Add a short safety note where it matters (hot exhaust, moving belts or fan, fuel pressure, airbags, battery).
+- Explain each trouble code in one plain sentence (what the computer noticed), and write a one-line plain headline.
+
+Return JSON only:
+{{"headline": "...", "codes": [{{"code": "P0171", "plain": "..."}}],
+ "steps": [{{"title": "...", "do": "what to do, step by step", "where": "where on this vehicle", "tools": "tools needed",
+            "pass_fail": "what result means good vs bad", "safety": "or empty"}}]}}"""
+
+
+def _plan_sig() -> str:
+  r = ss.get("dtc_result") or {}
+  return hashlib.md5((str(r.get("title")) + str(r.get("text"))).encode()).hexdigest()[:10]
+
+
+def build_step_cards() -> bool:
+  plan = (ss.get("dtc_result") or {}).get("text", "")
+  if not plan.strip():
+    return False
+  with st.spinner("Turning the plan into step-by-step cards..."):
+    raw, who = quick_ai(STEP_PROMPT.format(vehicle=ss.vehicle_info or "not given", codes=", ".join(current_codes()) or "none",
+                                           symptoms=(ss.symptoms or "").strip() or "not given", plan=plan[:9000]),
+                        max_tokens=8000, effort="low")
+  obj = find_json(raw, dict) or {}
+  steps = [x for x in (obj.get("steps") or []) if isinstance(x, dict) and str(x.get("title") or "").strip()]
+  if not steps:
+    st.error("Couldn't turn the plan into steps. " + (raw[:250] if raw.startswith("⚠️") else "Try again."))
+    return False
+  obj["steps"], obj["_for"], obj["_who"] = steps[:10], _plan_sig(), who
+  ss.plan_steps, ss.plan_idx, ss.plan_done, ss.plan_notes, ss.plan_qa = obj, 0, [], {}, None
+  return True
+
+
+STEP_QUESTIONS = {
+    "where": ("📍 Where is it?", "Exactly where is the part or connector for this step on this vehicle, what does it look like, "
+                                "and what's in the way? Keep it short and practical."),
+    "tool": ("🛠️ How do I hook up the tool?", "Step by step, how do I hook up the tools for this test (leads, back-probe "
+                                              "points, settings), and what reading means good vs bad?"),
+    "how": ("💡 How does it work?", "Explain how this part or circuit works in plain words with an everyday comparison, "
+                                   "and why this test proves whether it's good. Keep it short."),
+}
+
+
+def step_cards_panel(simple: bool):
+  ps = ss.get("plan_steps") or {}
+  if not ss.get("dtc_result"):
+    return
+  if ps.get("_for") != _plan_sig():   # no cards yet, or they belong to an older plan
+    if st.button("🪜 Work this plan step by step — one test at a time", type="primary" if simple else "secondary",
+                 use_container_width=True, key="build_steps"):
+      if build_step_cards():
+        st.rerun()
+    return
+  steps, sig = ps["steps"], ps["_for"]
+  n, done = len(steps), set(ss.plan_done or [])
+  idx = max(0, min(int(ss.plan_idx or 0), n - 1))
+  e = html_lib.escape
+  if ps.get("headline"):
+    st.markdown(f'<div class="tdg-card tdg-blue"><b>🎯 {e(str(ps["headline"]))}</b></div>', unsafe_allow_html=True)
+  if ps.get("codes") and simple:
+    cc = st.columns(min(3, len(ps["codes"])))
+    for i_, c in enumerate(ps["codes"][:6]):
+      cc[i_ % len(cc)].markdown(f'<div class="tdg-card tdg-yellow"><b>{e(str(c.get("code", "")))}</b><br>'
+                                f'{e(str(c.get("plain", "")))}</div>', unsafe_allow_html=True)
+  st.progress(len(done) / n, text=f"{len(done)} of {n} tests done")
+  cur = steps[idx]
+  row = lambda icon, lab, k: (f'<p><b>{icon} {lab}:</b> {e(str(cur.get(k)))}</p>' if str(cur.get(k) or "").strip() else "")
+  st.markdown(
+      f'<div class="tdg-step"><span class="tdg-badge">STEP {idx + 1} OF {n}{" ✓ DONE" if idx in done else ""}</span>'
+      f'<h3>{e(str(cur.get("title", "")))}</h3>'
+      + row("👣", "What to do", "do") + row("📍", "Where", "where") + row("🛠️", "Tools", "tools")
+      + (f'<p class="tdg-spec"><b>📏 Pass / fail:</b> {e(str(cur.get("pass_fail")))}</p>' if cur.get("pass_fail") else "")
+      + (f'<p class="tdg-safe"><b>⚠️ Safety:</b> {e(str(cur.get("safety")))}</p>' if str(cur.get("safety") or "").strip() else "")
+      + "</div>", unsafe_allow_html=True)
+  note = st.text_input("What did you find on this step? (saved with the job, and the AI uses it)",
+                       value=(ss.plan_notes or {}).get(str(idx), ""), key=f"pn_{sig}_{idx}",
+                       placeholder="e.g. 0.42 V on the signal wire with key on — spec 0.5 V")
+  if note != (ss.plan_notes or {}).get(str(idx), ""):
+    ss.plan_notes = dict(ss.plan_notes or {}, **{str(idx): note})
+  b1, b2, b3 = st.columns([1, 1.6, 1])
+  if b1.button("⬅️ Back", disabled=idx == 0, use_container_width=True, key=f"pb_{sig}"):
+    ss.plan_idx, ss.plan_qa = idx - 1, None
+    st.rerun()
+  if b2.button("✅ Done — next test" if idx not in done else "↩️ Mark not done", type="primary", use_container_width=True,
+               key=f"pd_{sig}"):
+    if idx in done:
+      ss.plan_done = sorted(done - {idx})
+    else:
+      ss.plan_done = sorted(done | {idx})
+      ss.plan_idx = min(idx + 1, n - 1)
+    ss.plan_qa = None
+    st.rerun()
+  if b3.button("Skip ➡️", disabled=idx >= n - 1, use_container_width=True, key=f"ps_{sig}"):
+    ss.plan_idx, ss.plan_qa = idx + 1, None
+    st.rerun()
+  q = st.columns(3)
+  for i_, (k, (lab, ask)) in enumerate(STEP_QUESTIONS.items()):
+    if q[i_].button(lab, use_container_width=True, key=f"pq_{sig}_{k}"):
+      with st.spinner("Asking..."):
+        ans, who = quick_ai(f"Vehicle: {ss.vehicle_info or 'not given'}. Codes: {', '.join(current_codes()) or 'none'}.\n"
+                            f"Current test step: {cur.get('title')} — {cur.get('do')} (where: {cur.get('where')}; "
+                            f"pass/fail: {cur.get('pass_fail')}).\n\nQuestion: {ask}\nAnswer in plain words, under 180 words.",
+                            max_tokens=3000, effort="low")
+      ss.plan_qa = {"idx": idx, "q": lab, "a": ans}
+  qa = ss.get("plan_qa")
+  if qa and qa.get("idx") == idx:
+    st.info(f"**{qa['q']}**\n\n{qa['a']}")
+  with st.expander("All steps"):
+    for i_, stp in enumerate(steps):
+      mark = "✅" if i_ in done else ("👉" if i_ == idx else "⬜")
+      found = (ss.plan_notes or {}).get(str(i_), "")
+      st.markdown(f"{mark} **{i_ + 1}. {stp.get('title')}**" + (f" — _found: {found}_" if found else ""))
+    if st.button("🔄 Rebuild the cards from the plan", key=f"pr_{sig}"):
+      if build_step_cards():
+        st.rerun()
+
+
+def plan_progress_text() -> str:
+  ps = ss.get("plan_steps") or {}
+  if ps.get("_for") != _plan_sig() or not ps.get("steps"):
+    return ""
+  done = set(ss.plan_done or [])
+  lines = [f"- {'DONE' if i in done else 'not done'}: {s_.get('title')}"
+           + (f" — tech found: {(ss.plan_notes or {}).get(str(i))}" if (ss.plan_notes or {}).get(str(i)) else "")
+           for i, s_ in enumerate(ps["steps"])]
+  return "STEP-BY-STEP PROGRESS ON THE TEST PLAN:\n" + "\n".join(lines)
+
+
+def _num_from(text) -> float | None:
+  m = re.search(r"[-+]?\d+(?:\.\d+)?", str(text or ""))
+  return float(m.group(0)) if m else None
+
+
+def status_cards():
+  """Big, plain cards: battery, codes, fuel trim, engine temp, and anything that doesn't add up. Never shows a number
+  that wasn't actually read — 'not read yet' instead."""
+  sd = ss.scan_data or {}
+  pids = sd.get("pids") or {}
+  at = sd.get("at")
+  def card(col, cls, title, big, small):
+    col.markdown(f'<div class="tdg-card {cls}"><b>{title}</b><div class="tdg-big">{big}</div><small>{small}</small></div>',
+                 unsafe_allow_html=True)
+  c = st.columns(4)
+  volt, rpm = _num_from(pids.get("Battery Volt")), _num_from(pids.get("Engine RPM"))
+  if volt is None:
+    card(c[0], "tdg-gray", "🔋 Battery", "Not read yet", "Connect the scanner")
+  elif rpm and rpm > 400:
+    ok = 13.5 <= volt <= 15.0
+    card(c[0], "tdg-green" if ok else "tdg-red", "🔋 Charging", f"{volt:.1f} V",
+         "Alternator charging normally" if ok else ("Low — check alternator, belt, cables" if volt < 13.5 else "High — overcharging"))
+  else:
+    cls, word = ("tdg-green", "Fully charged") if volt >= 12.4 else (("tdg-yellow", "A bit low") if volt >= 12.2 else ("tdg-red", "Low — test the battery"))
+    card(c[0], cls, "🔋 Battery (engine off)", f"{volt:.1f} V", word)
+  codes = current_codes()
+  card(c[1], "tdg-green" if not codes else "tdg-red", "🚨 Trouble codes", f"{len(codes)} code(s)" if codes else "None",
+       ", ".join(codes[:5]) if codes else ("No codes stored" if sd else "Connect the scanner or type codes"))
+  st1, lt1 = _num_from(pids.get("STFT B1")), _num_from(pids.get("LTFT B1"))
+  if st1 is None or lt1 is None:
+    card(c[2], "tdg-gray", "⛽ Fuel trim", "Not read yet", "Shows once the engine is running")
+  else:
+    tot = st1 + lt1
+    cls = "tdg-green" if abs(tot) <= 10 else ("tdg-yellow" if abs(tot) <= 15 else "tdg-red")
+    word = "Balanced" if abs(tot) <= 10 else ("Adding fuel — running LEAN" if tot > 0 else "Pulling fuel — running RICH")
+    card(c[2], cls, "⛽ Fuel trim (bank 1)", f"{tot:+.0f}%", word + " · normal is within ±10%")
+  ect = _num_from(pids.get("Coolant (ECT)"))
+  flags = sd.get("flags") or []
+  if flags:
+    card(c[3], "tdg-red", "⚠️ Doesn't add up", f"{len(flags)} reading(s)", re.sub(r"<[^>]+>", "", flags[0])[:90])
+  elif ect is None:
+    card(c[3], "tdg-gray", "🌡️ Engine temp", "Not read yet", "Connect the scanner")
+  else:
+    cls, word = (("tdg-red", "Overheating!") if ect > 230 else ("tdg-green", "Warmed up") if ect >= 180
+                 else ("tdg-blue", "Still warming up — idle and trims aren't final yet"))
+    card(c[3], cls, "🌡️ Engine temp", f"{ect:.0f}°F", word)
+  if at:
+    st.caption(f"Readings from the last scan ({at}).")
+
+
+def pro_section(name: str):
+  """A section that Simple view hides (still loaded, so nothing typed in it is lost)."""
+  try:
+    return st.container(key=f"pro_{name}")
+  except TypeError:   # older Streamlit without keyed containers: just show it
+    return st.container()
 
 
 tab1, tab2, tab3, tab5, tab6 = st.tabs([
@@ -2629,6 +3017,20 @@ with tab1, guard("VIN & Customer tab"):
                       f"{r.get('Summary', '')}  \n_Fix: {r.get('Remedy', '')}_")
     elif ss.vehicle_details.get("Model"):
       st.caption("No NHTSA recalls found for this year/make/model.")
+
+    # 📣 What owners of this model complain about
+    comps = vehicle_complaints()
+    if comps:
+      top, like = complaint_summary(comps)
+      with st.expander(f"📣 {len(comps)} owner complaint(s) filed with NHTSA — most reported: "
+                       f"{', '.join(n.title() for n, _ in top[:3])}"):
+        st.caption("What owners of this year/make/model reported to NHTSA. Useful for spotting pattern failures; "
+                   "they're owner reports, not confirmed fixes.")
+        st.dataframe([{"System": n.title(), "Complaints": k} for n, k in top], use_container_width=True, hide_index=True)
+        if like:
+          st.markdown("**Complaints that sound like this car** (matched to the codes and symptoms):")
+          for c in like:
+            st.markdown(f"- _{c['components'].title()}_ — {c['summary'][:350]}{'…' if len(c['summary']) > 350 else ''}")
 
   st.write("---")
   st.markdown("#### 👤 Customer")
@@ -6266,6 +6668,8 @@ Use clean bold section headers and direct shop-floor language. Skip sections wit
 with tab2, guard("Live Telemetry tab"):
   st.subheader("📊 Scanner & Live Data")
   context_bar()
+  if ss.get("simple_view"):
+    status_cards()
   st.caption("Works in Chrome (Android, Windows, macOS, ChromeOS). Connecting reads the VIN and codes and fills them"
              " into the other tabs automatically. The Bluetooth link stays up while you use the rest of the app.")
   _vd = ss.vehicle_details or {}
@@ -6324,6 +6728,11 @@ def scan_context() -> str:
 # ========================================================
 # --- SCOPE DATA FILE SCREEN (Diagnose tab, section 2) ---
 # ========================================================
+SYMPTOM_CHIPS = ["⚠️ Check engine light on", "🛑 Cranks, no start", "🐢 Hard start", "🫨 Rough idle",
+                 "💨 Hesitates on acceleration", "📉 Stalls", "🔥 Overheating", "⛽ Poor fuel economy",
+                 "🔊 Unusual noise", "👃 Smell (fuel, coolant or burning)", "❄️ Only when cold", "🌡️ Only when hot",
+                 "🔁 Comes and goes", "🛣️ Only at highway speed", "⚙️ Shifting problem", "🔋 Battery keeps dying"]
+
 WAVE_CONDITIONS = ["Hot idle", "Cold idle", "Cranking (no start)", "2500 RPM steady", "Snap throttle",
                    "Road test / under load", "Key on, engine off"]
 WAVE_PROMPT = """You are a master automotive scope diagnostician (ignition, injectors, sensors, current ramps, pressure transducers).
@@ -6362,7 +6771,7 @@ def measure_cached(raw: bytes, idx: int, wtype: str, factor: float, cyl: int, rp
 
 def _pretty_key(k: str) -> str:
   out = k
-  for suf, lab in (("_kv_per_ms", " (kV/ms)"), ("_kv", " (kV)"), ("_ms", " (ms)"), ("_pct", " (%)"), ("_hz", " (Hz)"),
+  for suf, lab in (("_kv_per_ms", " (kV/ms)"), ("_wobble_deg", " wobble (±°)"), ("_deg", " (crank ° after gap)"), ("_kv", " (kV)"), ("_ms", " (ms)"), ("_pct", " (%)"), ("_hz", " (Hz)"),
                    ("_pp", " (peak-to-peak)"), ("_a", " (A)"), ("_v", " (V)")):
     if out.endswith(suf):
       out = out[: -len(suf)] + lab
@@ -6418,9 +6827,13 @@ def scope_data_section():
   setup = {"condition": cond, "rpm": rpm, "cyl": cyl or None, "fo": fo, "chans": []}
   keys = list(WAVE_TYPES)
   results = []
+  cams_seen = 0
   for i, ch in enumerate(cap["chans"]):
     a, b, c = st.columns([2.4, 0.8, 1.2])
     g = guess_type(ch)
+    if g == "cam_in":
+      g = "cam_in" if cams_seen == 0 else "cam_ex"   # first cam = intake (green), second = exhaust (red)
+      cams_seen += 1
     wtype = a.selectbox(f"{ch['name']} ({ch['unit']}) is:", keys, index=keys.index(g), format_func=lambda k: WAVE_TYPES[k],
                         key=f"wv_t_{fid}_{i}")
     cyl_no = int(b.number_input("Cyl #", 0, 16, value=0, key=f"wv_c_{fid}_{i}", help="Cylinder this probe is on (0 = not one cylinder)"))
@@ -6441,6 +6854,19 @@ def scope_data_section():
     results.append(measure_cached(raw, i, wtype, factor, cyl, rpm_hint))
     setup["chans"].append({"type": wtype, "cyl_no": cyl_no, "unit": unit, "_y": ch["y"] * factor, "name": ch["name"]})
 
+  # ---- cam/crank correlation: where each cam edge lands in crank degrees ----
+  crank_i = next((i for i, s_ in enumerate(setup["chans"]) if s_["type"] == "crank_sig"), None)
+  if crank_i is not None:
+    for i, s_ in enumerate(setup["chans"]):
+      if s_["type"] in ("cam_in", "cam_ex"):
+        try:
+          ang, cnotes = cam_crank_angles(cap["t"], setup["chans"][crank_i]["_y"], s_["_y"])
+        except Exception as e:
+          ang, cnotes = {}, [f"Couldn't work out cam timing: {e}"]
+        results[i] = dict(results[i], measurements={**results[i]["measurements"], **ang}, notes=cnotes + results[i]["notes"])
+  elif any(s_["type"] in ("cam_in", "cam_ex") for s_ in setup["chans"]):
+    st.caption("💡 Add the crank sensor on another channel to get cam timing in crank degrees (cam/crank correlation).")
+
   # ---- relative compression: name the cylinders from an ignition sync ----
   sync = next(((r, s_) for r, s_ in zip(results, setup["chans"]) if s_["type"] in ("sec_ign", "pri_ign", "coil_amp")
                and s_["cyl_no"] and r["events"]), None)
@@ -6460,7 +6886,8 @@ def scope_data_section():
     with st.container(border=True):
       st.markdown(f"**{ch['name']} — {WAVE_TYPES.get(r['type'], r['type'])}**" + (f" · cylinder {s_['cyl_no']}" if s_["cyl_no"] else ""))
       tt, yy = envelope(cap["t"], s_["_y"], 1500)
-      st.line_chart({"ms": tt * 1000, f"{ch['name']} ({s_['unit']})": yy}, x="ms", height=200)
+      _col = WAVE_COLORS.get(r["type"])
+      st.line_chart({"ms": tt * 1000, f"{ch['name']} ({s_['unit']})": yy}, x="ms", height=200, **({"color": _col} if _col else {}))
       st.dataframe([{"Measurement": _pretty_key(k), "Value": _pretty_val(v)} for k, v in r["measurements"].items()],
                    use_container_width=True, hide_index=True)
       for n in r["notes"]:
@@ -6503,10 +6930,15 @@ def scope_data_section():
       for key, val in r["measurements"].items():
         rv = rm.get(key)
         if isinstance(val, (int, float)) and isinstance(rv, (int, float)) and not isinstance(val, bool):
-          diff = round((val - rv) / abs(rv) * 100) if rv else None
+          if key.endswith("_deg"):   # timing: compare in degrees (wraps at 360)
+            dd = (val - rv + 180) % 360 - 180
+            shown = f"{dd:+.1f}°"
+          else:
+            diff = round((val - rv) / abs(rv) * 100) if rv else None
+            shown = f"{diff:+d}%" if diff is not None else "—"
           rows.append({"Channel": s_["name"], "Measurement": _pretty_key(key), "This car": val, "Known-good": rv,
-                       "Difference": f"{diff:+d}%" if diff is not None else "—"})
-          lines.append(f"{s_['name']} {key}: this {val} vs known-good {rv}" + (f" ({diff:+d}%)" if diff is not None else ""))
+                       "Difference": shown})
+          lines.append(f"{s_['name']} {key}: this {val} vs known-good {rv} ({shown})")
       tr = (ref.get("trace") or [])[k] if k < len(ref.get("trace") or []) else None
       if tr:
         st.line_chart({"ms": tr["t"], f"Known-good: {ref.get('label', '')}": tr["y"]}, x="ms", height=160)
@@ -6543,6 +6975,9 @@ def scope_data_section():
 with tab3, guard("Diagnose tab"):
   st.subheader("🔧 Diagnose")
   context_bar()
+  if ss.get("simple_view"):
+    status_cards()
+    st.markdown("<style>div[class*='st-key-pro_'] { display: none !important; }</style>", unsafe_allow_html=True)
 
   # ---------- 1. Codes ----------
   st.markdown("#### 1 · Fault codes")
@@ -6563,6 +6998,15 @@ with tab3, guard("Diagnose tab"):
   st.text_input("Add codes by hand (optional):", key="manual_dtc", placeholder="e.g. P0171, P0174")
   st.text_area("Symptoms / customer complaint (optional — works with or without codes):", key="symptoms", height=80,
                placeholder="e.g. Rough idle when cold, stumbles on hard acceleration, no check engine light")
+  # one-tap symptoms: build the complaint fast without typing
+  _chips = SYMPTOM_CHIPS
+  _have = (ss.symptoms or "").lower()
+  _cc = st.columns(6)
+  for _i, _chip in enumerate(_chips):
+    _done = _chip.split(" ", 1)[1].lower() in _have
+    if _cc[_i % 6].button(("✓ " if _done else "") + _chip, key=f"chip_{_i}", use_container_width=True, disabled=_done):
+      _txt = _chip.split(" ", 1)[1]
+      queue_update(symptoms=((ss.symptoms or "").rstrip(" ,.") + (", " if (ss.symptoms or "").strip() else "") + _txt))
 
   # ❄️ Freeze frame vs the live readings captured at sync: what changed since the code set?
   _ff = (ss.ble_dtcs or {}).get("freeze") or {}
@@ -6631,6 +7075,7 @@ Format strictly using these Markdown sections:
     with st.status("Working on it...", expanded=False) as status:
       text, research, draft, ds_draft = team_answer(sym_prompt, vehicle, "", symptoms, use_web, status)
       status.update(label="Done", state="complete")
+    ss._auto_steps = True
     ss.dtc_result = {"title": f"Symptoms · {vehicle}", "text": text, "research": research, "draft": draft, "ds_draft": ds_draft,
                     "team": team_names(draft, ds_draft, research)}
 
@@ -6676,138 +7121,147 @@ Format strictly using these Markdown sections:
     with st.status("Working on it...", expanded=False) as status:
       text, research, draft, ds_draft = team_answer(dtc_prompt, vehicle, code_str, symptoms, use_web, status)
       status.update(label="Done", state="complete")
+    ss._auto_steps = True
     ss.dtc_result = {"title": f"{code_str} · {vehicle}", "text": text, "research": research, "draft": draft, "ds_draft": ds_draft,
                     "team": team_names(draft, ds_draft, research)}
 
   if ss.dtc_result:  # stays on screen while you use other tabs
     team = ss.dtc_result.get("team") or team_names(ss.dtc_result.get("draft", ""), ss.dtc_result.get("ds_draft", ""),
                                                     ss.dtc_result.get("research", ""))
-    with st.expander(f"📋 Test plan: {ss.dtc_result['title']} · {team}", expanded=True):
+    _simple = bool(ss.get("simple_view"))
+    if _simple and (ss.get("plan_steps") or {}).get("_for") != _plan_sig() and ss.pop("_auto_steps", False):
+      build_step_cards()   # Simple view: go straight to one-test-at-a-time cards after the tree runs
+    with st.expander(f"📋 Test plan: {ss.dtc_result['title']} · {team}", expanded=not _simple):
       st.markdown(ss.dtc_result["text"])
-    if ss.dtc_result.get("draft"):
+    with guard("Step-by-step cards"):
+      step_cards_panel(_simple)
+    if _simple:
+      pass   # drafts and web research stay out of the way in Simple view
+    elif ss.dtc_result.get("draft"):
       with st.expander(f"✨ {gemini_label()}'s first draft (before {claude_label()}'s review)"):
         st.markdown(ss.dtc_result["draft"])
-    if ss.dtc_result.get("ds_draft"):
+    if ss.dtc_result.get("ds_draft") and not _simple:
       with st.expander(f"🐋 {deepseek_label()}'s draft (second opinion)"):
         st.markdown(ss.dtc_result["ds_draft"])
-    if ss.dtc_result.get("research"):
+    if ss.dtc_result.get("research") and not _simple:
       with st.expander("🌐 Web research Perplexity found (TSBs, recalls, known fixes, sources)"):
         st.markdown(ss.dtc_result["research"])
 
-  # ---------- 2. Scope lab ----------
-  st.write("---")
-  st.markdown("#### 2 · Scope & test readings")
-  with guard("Scope data file"):
-    scope_data_section()
-  st.markdown("**📸 Or a photo of the scope / meter screen**")
-  col_scope, col_scratch = st.columns(2)
-  with col_scope:
-    scope_capture = st.camera_input("Capture oscilloscope or meter") if st.toggle("📷 Open Camera for Scope / Meter") else None
-    scope_file = st.file_uploader("Or upload a scope / meter photo", type=["png", "jpg", "jpeg"], key="scope_upload")
-    active_img = scope_capture or scope_file
-    pil_scope_image = None
-    if active_img:
-      st.image(active_img.getvalue(), caption="Captured Scope / Meter Display")
-      pil_scope_image = ImageOps.exif_transpose(Image.open(active_img))
-      with st.form("save_wave", clear_on_submit=True):
-        _wl1, _wl2 = st.columns([3, 1])
-        _wave_label = _wl1.text_input("Save this capture to your waveform library as:",
-                                      placeholder="e.g. Known-good CKP — 2014 Accord 2.4 hot idle")
-        _wl2.write("")
-        if st.form_submit_button("💾 Save waveform") and _wave_label.strip():
-          store_put("wave", datetime.now().strftime("%Y%m%d%H%M%S"),
-                    {"label": _wave_label.strip(), "vehicle": ss.vehicle_info, "tech": ss.get("tech_user") or "",
-                     "date": datetime.now().strftime("%Y-%m-%d"), "b64": shrink_to_b64(active_img.getvalue(), 1000, 75)})
-          st.toast("Waveform saved to the library")
+  with pro_section("scope"):
+    # ---------- 2. Scope lab ----------
+    st.write("---")
+    st.markdown("#### 2 · Scope & test readings")
+    with guard("Scope data file"):
+      scope_data_section()
+    st.markdown("**📸 Or a photo of the scope / meter screen**")
+    col_scope, col_scratch = st.columns(2)
+    with col_scope:
+      scope_capture = st.camera_input("Capture oscilloscope or meter") if st.toggle("📷 Open Camera for Scope / Meter") else None
+      scope_file = st.file_uploader("Or upload a scope / meter photo", type=["png", "jpg", "jpeg"], key="scope_upload")
+      active_img = scope_capture or scope_file
+      pil_scope_image = None
+      if active_img:
+        st.image(active_img.getvalue(), caption="Captured Scope / Meter Display")
+        pil_scope_image = ImageOps.exif_transpose(Image.open(active_img))
+        with st.form("save_wave", clear_on_submit=True):
+          _wl1, _wl2 = st.columns([3, 1])
+          _wave_label = _wl1.text_input("Save this capture to your waveform library as:",
+                                        placeholder="e.g. Known-good CKP — 2014 Accord 2.4 hot idle")
+          _wl2.write("")
+          if st.form_submit_button("💾 Save waveform") and _wave_label.strip():
+            store_put("wave", datetime.now().strftime("%Y%m%d%H%M%S"),
+                      {"label": _wave_label.strip(), "vehicle": ss.vehicle_info, "tech": ss.get("tech_user") or "",
+                       "date": datetime.now().strftime("%Y-%m-%d"), "b64": shrink_to_b64(active_img.getvalue(), 1000, 75)})
+            st.toast("Waveform saved to the library")
 
-    _waves = store_list("wave", 80)
-    _wave_pick = None
-    if _waves:
-      _wopts = {r["id"]: (r.get("data") or {}) for r in _waves}
-      _wave_pick = st.selectbox("Compare against a saved waveform (optional):", [None] + list(_wopts), index=0,
-                                format_func=lambda i: "No comparison" if i is None else
-                                f"{_wopts[i].get('label', '?')} · {_wopts[i].get('vehicle') or ''} · {_wopts[i].get('date', '')}")
-      if _wave_pick:
-        try:
-          st.image(base64.b64decode(_wopts[_wave_pick].get("b64", "")), caption=f"Reference: {_wopts[_wave_pick].get('label', '')}", width=320)
-        except Exception:
-          st.warning("Couldn't show that saved waveform.")
-      with st.expander(f"📚 Waveform library ({len(_waves)} saved)"):
-        _wq = st.text_input("Filter:", key="wave_filter", placeholder="e.g. CKP, Accord, injector")
-        for _wid, _wd in _wopts.items():
-          if _wq.strip() and _wq.strip().lower() not in (_wd.get("label", "") + " " + (_wd.get("vehicle") or "")).lower():
-            continue
-          _wc1, _wc2 = st.columns([5, 1])
-          with _wc1:
-            try:
-              st.image(base64.b64decode(_wd.get("b64", "")), caption=f"{_wd.get('label', '')} · {_wd.get('vehicle') or ''} · {_wd.get('date', '')}", width=300)
-            except Exception:
-              st.caption(f"{_wd.get('label', '')} (image unreadable)")
-          if _wc2.button("🗑️", key=f"delw_{_wid}", help="Delete this saved waveform"):
-            store_delete("wave", _wid)
-            st.rerun()
+      _waves = store_list("wave", 80)
+      _wave_pick = None
+      if _waves:
+        _wopts = {r["id"]: (r.get("data") or {}) for r in _waves}
+        _wave_pick = st.selectbox("Compare against a saved waveform (optional):", [None] + list(_wopts), index=0,
+                                  format_func=lambda i: "No comparison" if i is None else
+                                  f"{_wopts[i].get('label', '?')} · {_wopts[i].get('vehicle') or ''} · {_wopts[i].get('date', '')}")
+        if _wave_pick:
+          try:
+            st.image(base64.b64decode(_wopts[_wave_pick].get("b64", "")), caption=f"Reference: {_wopts[_wave_pick].get('label', '')}", width=320)
+          except Exception:
+            st.warning("Couldn't show that saved waveform.")
+        with st.expander(f"📚 Waveform library ({len(_waves)} saved)"):
+          _wq = st.text_input("Filter:", key="wave_filter", placeholder="e.g. CKP, Accord, injector")
+          for _wid, _wd in _wopts.items():
+            if _wq.strip() and _wq.strip().lower() not in (_wd.get("label", "") + " " + (_wd.get("vehicle") or "")).lower():
+              continue
+            _wc1, _wc2 = st.columns([5, 1])
+            with _wc1:
+              try:
+                st.image(base64.b64decode(_wd.get("b64", "")), caption=f"{_wd.get('label', '')} · {_wd.get('vehicle') or ''} · {_wd.get('date', '')}", width=300)
+              except Exception:
+                st.caption(f"{_wd.get('label', '')} (image unreadable)")
+            if _wc2.button("🗑️", key=f"delw_{_wid}", help="Delete this saved waveform"):
+              store_delete("wave", _wid)
+              st.rerun()
 
-  with col_scratch:
-    comp_data = st.text_input("Compression / Leakdown (psi / % drop):",
-                              placeholder="e.g., Cyl 1: 160, Cyl 2: 155, Cyl 3: 90, Cyl 4: 160")
-    fuel_data = st.text_input("Fuel Pressure (Running / 5-min Bleed-down):",
-                              placeholder="e.g., 55 psi running, drops to 12 psi in 3 mins")
-    volt_data = st.text_input("Electrical / Voltage Drop:",
-                              placeholder="e.g., Cranking battery drop 9.1V, engine ground drop 0.4V")
-    scope_notes = st.text_area("Scope Waveform Observations:", height=70,
-                               placeholder="e.g., Coil burn time 0.7ms; injector kick only 35V; CKP missing tooth uneven")
+    with col_scratch:
+      comp_data = st.text_input("Compression / Leakdown (psi / % drop):",
+                                placeholder="e.g., Cyl 1: 160, Cyl 2: 155, Cyl 3: 90, Cyl 4: 160")
+      fuel_data = st.text_input("Fuel Pressure (Running / 5-min Bleed-down):",
+                                placeholder="e.g., 55 psi running, drops to 12 psi in 3 mins")
+      volt_data = st.text_input("Electrical / Voltage Drop:",
+                                placeholder="e.g., Cranking battery drop 9.1V, engine ground drop 0.4V")
+      scope_notes = st.text_area("Scope Waveform Observations:", height=70,
+                                 placeholder="e.g., Coil burn time 0.7ms; injector kick only 35V; CKP missing tooth uneven")
 
-  if st.button("🔍 Analyze Readings & Scope Pattern"):
-    prompt = f"""
-You are an expert ASE Master / L1 diagnostic technician and automotive oscilloscope waveform specialist.
-Analyze this oscilloscope or multimeter capture (if attached) alongside the physical shop test readings.
+    if st.button("🔍 Analyze Readings & Scope Pattern"):
+      prompt = f"""
+  You are an expert ASE Master / L1 diagnostic technician and automotive oscilloscope waveform specialist.
+  Analyze this oscilloscope or multimeter capture (if attached) alongside the physical shop test readings.
 
-Vehicle: {ss.vehicle_info or 'General'}
-Fault codes: {code_str or 'None'}
-Symptoms: {ss.symptoms.strip() or 'not given'}
-{scan_context()}
+  Vehicle: {ss.vehicle_info or 'General'}
+  Fault codes: {code_str or 'None'}
+  Symptoms: {ss.symptoms.strip() or 'not given'}
+  {scan_context()}
 
-PHYSICAL TEST READINGS:
-Compression/Leakdown: {comp_data or 'Not tested'}
-Fuel Pressure & Bleed-down: {fuel_data or 'Not tested'}
-Voltage Drop / Electrical: {volt_data or 'Not tested'}
-Scope Observations: {scope_notes or 'None reported'}
+  PHYSICAL TEST READINGS:
+  Compression/Leakdown: {comp_data or 'Not tested'}
+  Fuel Pressure & Bleed-down: {fuel_data or 'Not tested'}
+  Voltage Drop / Electrical: {volt_data or 'Not tested'}
+  Scope Observations: {scope_notes or 'None reported'}
 
-Web research already found for this job (TSBs / known fixes, if any):
-{(ss.dtc_result or {}).get("research", "")[:2500] or 'none'}
+  Web research already found for this job (TSBs / known fixes, if any):
+  {(ss.dtc_result or {}).get("research", "")[:2500] or 'none'}
 
-TASK:
-- Identify the signal type (secondary/primary ignition, injector voltage/current, CKP/CMP correlation, relative compression, PWM, sensor drop).
-- Evaluate key signatures: firing/inductive kV, dwell, burn line slope & turbulence, coil oscillations, ground bounce, attenuation, missing-tooth spacing.
-- Correlate waveform abnormalities with the physical readings, the fault codes and the scan data.
-{"- A SECOND image is attached: a KNOWN-GOOD reference waveform from this shop's library (" + _wopts[_wave_pick].get("label", "") + "). Compare the capture against it and call out every meaningful difference." if _wave_pick and pil_scope_image else ""}
+  TASK:
+  - Identify the signal type (secondary/primary ignition, injector voltage/current, CKP/CMP correlation, relative compression, PWM, sensor drop).
+  - Evaluate key signatures: firing/inductive kV, dwell, burn line slope & turbulence, coil oscillations, ground bounce, attenuation, missing-tooth spacing.
+  - Correlate waveform abnormalities with the physical readings, the fault codes and the scan data.
+  {"- A SECOND image is attached: a KNOWN-GOOD reference waveform from this shop's library (" + _wopts[_wave_pick].get("label", "") + "). Compare the capture against it and call out every meaningful difference." if _wave_pick and pil_scope_image else ""}
 
-FORMAT STRICTLY AS:
-### 1. Scope Waveform & Electrical Findings
-### 2. Component Condemnation & Defect Root Cause
-### 3. Immediate Pinpoint Verification Step
-"""
-    img_b64 = [img_part(pil_scope_image)["inline_data"]["data"]] if pil_scope_image else []
-    if _wave_pick and pil_scope_image:
-      img_b64.append(_wopts[_wave_pick].get("b64", ""))
-    with st.status("Working on it...", expanded=False) as status:
-      text, _r, draft, ds_draft = team_answer(prompt, ss.vehicle_info or "vehicle", code_str, ss.symptoms.strip(), False, status,
-                                              image_b64=img_b64)
-      status.update(label="Done", state="complete")
-    ss.scope_result = {"text": text, "team": team_names(draft, ds_draft, ""), "draft": draft, "ds_draft": ds_draft}
+  FORMAT STRICTLY AS:
+  ### 1. Scope Waveform & Electrical Findings
+  ### 2. Component Condemnation & Defect Root Cause
+  ### 3. Immediate Pinpoint Verification Step
+  """
+      img_b64 = [img_part(pil_scope_image)["inline_data"]["data"]] if pil_scope_image else []
+      if _wave_pick and pil_scope_image:
+        img_b64.append(_wopts[_wave_pick].get("b64", ""))
+      with st.status("Working on it...", expanded=False) as status:
+        text, _r, draft, ds_draft = team_answer(prompt, ss.vehicle_info or "vehicle", code_str, ss.symptoms.strip(), False, status,
+                                                image_b64=img_b64)
+        status.update(label="Done", state="complete")
+      ss.scope_result = {"text": text, "team": team_names(draft, ds_draft, ""), "draft": draft, "ds_draft": ds_draft}
 
-  if ss.scope_result:
-    sr = ss.scope_result if isinstance(ss.scope_result, dict) else {"text": str(ss.scope_result), "team": ""}
-    with st.expander(f"🔬 Scope & readings evaluation · {sr.get('team', '')}", expanded=True):
-      st.markdown(sr["text"])
-    if sr.get("draft") or sr.get("ds_draft"):
-      with st.expander("👀 See each AI's own read"):
-        if sr.get("draft"):
-          st.markdown(f"**✨ {gemini_label()}** (saw the photo)")
-          st.markdown(sr["draft"])
-        if sr.get("ds_draft"):
-          st.markdown(f"**🐋 {deepseek_label()}** (readings only — can't see photos)")
-          st.markdown(sr["ds_draft"])
+    if ss.scope_result:
+      sr = ss.scope_result if isinstance(ss.scope_result, dict) else {"text": str(ss.scope_result), "team": ""}
+      with st.expander(f"🔬 Scope & readings evaluation · {sr.get('team', '')}", expanded=True):
+        st.markdown(sr["text"])
+      if sr.get("draft") or sr.get("ds_draft"):
+        with st.expander("👀 See each AI's own read"):
+          if sr.get("draft"):
+            st.markdown(f"**✨ {gemini_label()}** (saw the photo)")
+            st.markdown(sr["draft"])
+          if sr.get("ds_draft"):
+            st.markdown(f"**🐋 {deepseek_label()}** (readings only — can't see photos)")
+            st.markdown(sr["ds_draft"])
 
   # ---------- 3. Copilot ----------
   st.write("---")
@@ -6868,6 +7322,7 @@ Fault codes being worked: {code_str or 'None'}
 Symptoms / complaint: {ss.symptoms.strip() or 'not given'}
 {scan_context()}
 Current test plan (if any): {plan or 'none yet'}
+{plan_progress_text()}
 Latest scope/readings evaluation (if any): {((ss.scope_result or {}).get('text', '') if isinstance(ss.scope_result, dict) else (ss.scope_result or ''))[:1500] or 'none'}
 Latest scope DATA FILE analysis (measured from raw data, if any): {((ss.wave_result or {}).get('text', ''))[:2000] or 'none'}
 
@@ -7079,155 +7534,157 @@ pre{{white-space:pre-wrap;font-family:inherit;font-size:13px;background:#fafafa;
 
 
 with tab3, guard("Diagnose tab"):
-  st.write("---")
-  with st.expander("📸 4 · Job photos & estimate", expanded=bool(
-      [r for r in (ss.estimate_rows or []) if isinstance(r, dict) and str(r.get("Item") or "").strip()])):
-    st.caption("Photos save with the job and go on the customer report — the leaky gasket or chafed wire sells the repair "
-               "better than words. The estimate prints on the report with a total.")
-    _pc1, _pc2 = st.columns(2)
-    with _pc1:
-      _new_photos = st.file_uploader("📸 Add photos to this job", type=["png", "jpg", "jpeg", "webp"],
-                                     accept_multiple_files=True, key=f"job_photos_{ss.get('photo_n', 0)}_{ss.get('job_n', 0)}")
-      if _new_photos and st.button(f"💾 Attach {len(_new_photos)} photo(s) to the job"):
-        autosave_job(force=True)
-        if not ss.get("job_id"):
-          st.warning("Add a customer, vehicle or code first so there's a job to attach them to.")
-        else:
-          _have = len(job_photos())
-          for _i, _f in enumerate(_new_photos[: max(0, 12 - _have)]):
-            try:
-              store_put("jobphoto", f"{ss.job_id}-{datetime.now().strftime('%H%M%S%f')}{_i}",
-                        {"job": ss.job_id, "b64": shrink_to_b64(_f.getvalue()), "name": getattr(_f, "name", ""),
-                         "at": datetime.now().strftime("%Y-%m-%d %I:%M %p")})
-            except Exception as _e:
-              st.warning(f"Couldn't save {getattr(_f, 'name', 'a photo')}: {_e}")
-          ss.photo_n = ss.get("photo_n", 0) + 1   # empty the picker
-          queue_update(toast="Photo(s) attached to the job")
-      _jp = job_photos()
-      if _jp:
-        st.caption(f"{len(_jp)} photo(s) on this job (12 max):")
-        for _ph in _jp:
-          _jc1, _jc2 = st.columns([5, 1])
-          with _jc1:
-            try:
-              st.image(base64.b64decode(_ph.get("b64", "")), width=260, caption=_ph.get("at", ""))
-            except Exception:
-              st.caption("(photo unreadable)")
-          if _jc2.button("🗑️", key=f"delp_{_ph['_id']}", help="Remove this photo"):
-            store_delete("jobphoto", _ph["_id"])
-            st.rerun()
-    with _pc2:
-      st.markdown("**🧾 Estimate** (tap a cell to edit; ➕ at the bottom adds a line)")
-      _est_in = ss.estimate_rows if isinstance(ss.estimate_rows, list) and ss.estimate_rows else         [{"Item": "", "Parts $": 0.0, "Labor $": 0.0}]
-      _est = st.data_editor(_est_in, num_rows="dynamic", use_container_width=True,
-                            key=f"est_{ss.get('job_n', 0)}_{ss.get('job_id') or 'new'}")
-      ss.estimate_rows = [r for r in (_est or []) if isinstance(r, dict)]
-      def _money(v):
-        try:
-          return float(str(v).replace("$", "").replace(",", "") or 0)
-        except ValueError:
-          return 0.0
-      _parts = sum(_money(r.get("Parts $")) for r in ss.estimate_rows)
-      _labor = sum(_money(r.get("Labor $")) for r in ss.estimate_rows)
-      if _parts or _labor:
-        st.markdown(f"Parts **${_parts:,.2f}** · Labor **${_labor:,.2f}** · **Total ${_parts + _labor:,.2f}**")
+  with pro_section("report"):
+    st.write("---")
+    with st.expander("📸 4 · Job photos & estimate", expanded=bool(
+        [r for r in (ss.estimate_rows or []) if isinstance(r, dict) and str(r.get("Item") or "").strip()])):
+      st.caption("Photos save with the job and go on the customer report — the leaky gasket or chafed wire sells the repair "
+                 "better than words. The estimate prints on the report with a total.")
+      _pc1, _pc2 = st.columns(2)
+      with _pc1:
+        _new_photos = st.file_uploader("📸 Add photos to this job", type=["png", "jpg", "jpeg", "webp"],
+                                       accept_multiple_files=True, key=f"job_photos_{ss.get('photo_n', 0)}_{ss.get('job_n', 0)}")
+        if _new_photos and st.button(f"💾 Attach {len(_new_photos)} photo(s) to the job"):
+          autosave_job(force=True)
+          if not ss.get("job_id"):
+            st.warning("Add a customer, vehicle or code first so there's a job to attach them to.")
+          else:
+            _have = len(job_photos())
+            for _i, _f in enumerate(_new_photos[: max(0, 12 - _have)]):
+              try:
+                store_put("jobphoto", f"{ss.job_id}-{datetime.now().strftime('%H%M%S%f')}{_i}",
+                          {"job": ss.job_id, "b64": shrink_to_b64(_f.getvalue()), "name": getattr(_f, "name", ""),
+                           "at": datetime.now().strftime("%Y-%m-%d %I:%M %p")})
+              except Exception as _e:
+                st.warning(f"Couldn't save {getattr(_f, 'name', 'a photo')}: {_e}")
+            ss.photo_n = ss.get("photo_n", 0) + 1   # empty the picker
+            queue_update(toast="Photo(s) attached to the job")
+        _jp = job_photos()
+        if _jp:
+          st.caption(f"{len(_jp)} photo(s) on this job (12 max):")
+          for _ph in _jp:
+            _jc1, _jc2 = st.columns([5, 1])
+            with _jc1:
+              try:
+                st.image(base64.b64decode(_ph.get("b64", "")), width=260, caption=_ph.get("at", ""))
+              except Exception:
+                st.caption("(photo unreadable)")
+            if _jc2.button("🗑️", key=f"delp_{_ph['_id']}", help="Remove this photo"):
+              store_delete("jobphoto", _ph["_id"])
+              st.rerun()
+      with _pc2:
+        st.markdown("**🧾 Estimate** (tap a cell to edit; ➕ at the bottom adds a line)")
+        _est_in = ss.estimate_rows if isinstance(ss.estimate_rows, list) and ss.estimate_rows else         [{"Item": "", "Parts $": 0.0, "Labor $": 0.0}]
+        _est = st.data_editor(_est_in, num_rows="dynamic", use_container_width=True,
+                              key=f"est_{ss.get('job_n', 0)}_{ss.get('job_id') or 'new'}")
+        ss.estimate_rows = [r for r in (_est or []) if isinstance(r, dict)]
+        def _money(v):
+          try:
+            return float(str(v).replace("$", "").replace(",", "") or 0)
+          except ValueError:
+            return 0.0
+        _parts = sum(_money(r.get("Parts $")) for r in ss.estimate_rows)
+        _labor = sum(_money(r.get("Labor $")) for r in ss.estimate_rows)
+        if _parts or _labor:
+          st.markdown(f"Parts **${_parts:,.2f}** · Labor **${_labor:,.2f}** · **Total ${_parts + _labor:,.2f}**")
 
-  st.write("---")
-  with st.expander("🧾 5 · Customer report — summary, email, text, print",
-                   expanded=bool((ss.customer_summary or "").strip() or (ss.tech_notes or "").strip())):
-    st.caption("One page with the vehicle, all codes, freeze frame, every test result (green / yellow / red) and the plan. "
-               "Open it on your phone and use Print → Save as PDF, or text it to the customer.")
-    notes = st.text_area("Technician notes / recommendation (goes on the report):", key="tech_notes", height=80,
-                         placeholder="e.g. Recommend replacing cylinder 3 ignition coil and spark plugs. Fuel trims normal after repair.")
-    _has_findings = bool(ss.dtc_result or ss.test_results or ss.tech_notes.strip() or ss.fix_part.strip() or current_codes())
-    if st.button("✍️ Write a plain-English summary for the customer", disabled=not _has_findings):
-      with st.spinner("Writing the customer summary..."):
-        _sum, _who = quick_ai(CUSTOMER_SUMMARY_PROMPT.format(
-            vehicle=ss.vehicle_info or "the vehicle", complaint=ss.symptoms.strip() or "not given", codes=", ".join(current_codes()) or "none",
-            tests=json.dumps(ss.test_results or {})[:2500], notes=ss.tech_notes.strip() or "none",
-            fix=(ss.fix_part.strip() + (f" (proved by: {ss.fix_test.strip()})" if ss.fix_test.strip() else "")) or "not done yet",
-            plan=(ss.dtc_result or {}).get("text", "")[:2500] or "none"), max_tokens=3000)
-      if _sum.startswith("⚠️"):
-        st.error(_sum)
-      else:
-        ss.customer_summary = _sum.strip()
-    st.text_area("Customer summary (edit it as you like — it goes at the top of the report):", key="customer_summary", height=130,
-                 placeholder="Tap the button above, or type your own summary for the customer.")
-    _rep_name = re.sub(r"\W+", "_", ss.vehicle_info or "vehicle")
-    _report_html = build_report_html(notes)
-    _bat = battery_slip_html() if any(re.search(r"charg|crank|battery|power", k, re.I) for k in (ss.test_results or {})) else ""
-    _sc1, _sc2, _sc3, _sc4 = st.columns(4)
-    with _sc1:
-      st.download_button("🧾 Download report", data=_report_html.encode("utf-8"), mime="text/html",
-                         file_name=f"report_{_rep_name}_{datetime.now():%Y%m%d}.html", use_container_width=True)
-    with _sc2:
-      if st.button("📧 Email it to the customer", use_container_width=True,
-                   disabled=not (email_ready() and (ss.customer_email or "").strip())):
-        with st.spinner("Sending the email..."):
-          _err = send_report_email(ss.customer_email.strip(), f"Diagnostic report — {ss.vehicle_info or 'your vehicle'}",
-                                   (ss.customer_summary or "").strip() or "Your diagnostic report is attached.",
-                                   _report_html, f"report_{_rep_name}_{datetime.now():%Y%m%d}.html")
-        if _err:
-          st.error(f"Couldn't send it: {_err}")
+    st.write("---")
+    with st.expander("🧾 5 · Customer report — summary, email, text, print",
+                     expanded=bool((ss.customer_summary or "").strip() or (ss.tech_notes or "").strip())):
+      st.caption("One page with the vehicle, all codes, freeze frame, every test result (green / yellow / red) and the plan. "
+                 "Open it on your phone and use Print → Save as PDF, or text it to the customer.")
+      notes = st.text_area("Technician notes / recommendation (goes on the report):", key="tech_notes", height=80,
+                           placeholder="e.g. Recommend replacing cylinder 3 ignition coil and spark plugs. Fuel trims normal after repair.")
+      _has_findings = bool(ss.dtc_result or ss.test_results or ss.tech_notes.strip() or ss.fix_part.strip() or current_codes())
+      if st.button("✍️ Write a plain-English summary for the customer", disabled=not _has_findings):
+        with st.spinner("Writing the customer summary..."):
+          _sum, _who = quick_ai(CUSTOMER_SUMMARY_PROMPT.format(
+              vehicle=ss.vehicle_info or "the vehicle", complaint=ss.symptoms.strip() or "not given", codes=", ".join(current_codes()) or "none",
+              tests=json.dumps(ss.test_results or {})[:2500],
+                notes=(ss.tech_notes.strip() + "\n" + plan_progress_text()).strip() or "none",
+              fix=(ss.fix_part.strip() + (f" (proved by: {ss.fix_test.strip()})" if ss.fix_test.strip() else "")) or "not done yet",
+              plan=(ss.dtc_result or {}).get("text", "")[:2500] or "none"), max_tokens=3000)
+        if _sum.startswith("⚠️"):
+          st.error(_sum)
         else:
-          record_sent("email", ss.customer_email.strip(), "report")
-          st.success(f"Report emailed to {ss.customer_email.strip()} ✓")
-    with _sc3:
-      if st.button("💬 Text the summary", use_container_width=True,
-                   disabled=not (sms_ready() and (ss.customer_phone or "").strip() and (ss.customer_summary or "").strip())):
-        _shop = secret("SHOP_NAME") or "the shop"
-        with st.spinner("Sending the text..."):
-          _err = send_sms(ss.customer_phone, f"{_shop} — {ss.vehicle_info or 'your vehicle'}:\n{ss.customer_summary.strip()}")
-        if _err:
-          st.error(f"Couldn't send it: {_err}")
+          ss.customer_summary = _sum.strip()
+      st.text_area("Customer summary (edit it as you like — it goes at the top of the report):", key="customer_summary", height=130,
+                   placeholder="Tap the button above, or type your own summary for the customer.")
+      _rep_name = re.sub(r"\W+", "_", ss.vehicle_info or "vehicle")
+      _report_html = build_report_html(notes)
+      _bat = battery_slip_html() if any(re.search(r"charg|crank|battery|power", k, re.I) for k in (ss.test_results or {})) else ""
+      _sc1, _sc2, _sc3, _sc4 = st.columns(4)
+      with _sc1:
+        st.download_button("🧾 Download report", data=_report_html.encode("utf-8"), mime="text/html",
+                           file_name=f"report_{_rep_name}_{datetime.now():%Y%m%d}.html", use_container_width=True)
+      with _sc2:
+        if st.button("📧 Email it to the customer", use_container_width=True,
+                     disabled=not (email_ready() and (ss.customer_email or "").strip())):
+          with st.spinner("Sending the email..."):
+            _err = send_report_email(ss.customer_email.strip(), f"Diagnostic report — {ss.vehicle_info or 'your vehicle'}",
+                                     (ss.customer_summary or "").strip() or "Your diagnostic report is attached.",
+                                     _report_html, f"report_{_rep_name}_{datetime.now():%Y%m%d}.html")
+          if _err:
+            st.error(f"Couldn't send it: {_err}")
+          else:
+            record_sent("email", ss.customer_email.strip(), "report")
+            st.success(f"Report emailed to {ss.customer_email.strip()} ✓")
+      with _sc3:
+        if st.button("💬 Text the summary", use_container_width=True,
+                     disabled=not (sms_ready() and (ss.customer_phone or "").strip() and (ss.customer_summary or "").strip())):
+          _shop = secret("SHOP_NAME") or "the shop"
+          with st.spinner("Sending the text..."):
+            _err = send_sms(ss.customer_phone, f"{_shop} — {ss.vehicle_info or 'your vehicle'}:\n{ss.customer_summary.strip()}")
+          if _err:
+            st.error(f"Couldn't send it: {_err}")
+          else:
+            record_sent("text", ss.customer_phone.strip(), "summary")
+            st.success("Summary texted ✓")
+      with _sc4:
+        if _bat:
+          st.download_button("🔋 Battery/charging slip", data=_bat.encode("utf-8"), mime="text/html",
+                             file_name=f"battery_{_rep_name}_{datetime.now():%Y%m%d}.html", use_container_width=True)
         else:
-          record_sent("text", ss.customer_phone.strip(), "summary")
-          st.success("Summary texted ✓")
-    with _sc4:
-      if _bat:
-        st.download_button("🔋 Battery/charging slip", data=_bat.encode("utf-8"), mime="text/html",
-                           file_name=f"battery_{_rep_name}_{datetime.now():%Y%m%d}.html", use_container_width=True)
-      else:
-        st.caption("🔋 Run the Charging or Cranking guided test to get a battery slip here.")
-    if not email_ready():
-      st.caption("📧 To email reports: add SMTP_USER and SMTP_PASSWORD to Streamlit Secrets (for Gmail, make an "
-                 "\"App password\" under Google Account → Security → 2-Step Verification, and use that, not your normal password).")
-    elif not (ss.customer_email or "").strip():
-      st.caption("📧 Add the customer's email on the VIN tab to enable emailing.")
-    if not sms_ready():
-      st.caption("💬 To text customers: make a free trial account at twilio.com, buy a texting number (~$1/mo), and add "
-                 "TWILIO_SID, TWILIO_TOKEN and TWILIO_FROM (the number, like +16785551234) to Secrets.")
-    _sent = [r.get("data") or {} for r in store_list("sent", 3, {"job": ss.get("job_id")})] if ss.get("job_id") else []
-    if _sent:
-      st.caption("Sent: " + " · ".join(f"{x.get('what')} by {x.get('how')} to {x.get('to')} ({x.get('at')})" for x in _sent))
+          st.caption("🔋 Run the Charging or Cranking guided test to get a battery slip here.")
+      if not email_ready():
+        st.caption("📧 To email reports: add SMTP_USER and SMTP_PASSWORD to Streamlit Secrets (for Gmail, make an "
+                   "\"App password\" under Google Account → Security → 2-Step Verification, and use that, not your normal password).")
+      elif not (ss.customer_email or "").strip():
+        st.caption("📧 Add the customer's email on the VIN tab to enable emailing.")
+      if not sms_ready():
+        st.caption("💬 To text customers: make a free trial account at twilio.com, buy a texting number (~$1/mo), and add "
+                   "TWILIO_SID, TWILIO_TOKEN and TWILIO_FROM (the number, like +16785551234) to Secrets.")
+      _sent = [r.get("data") or {} for r in store_list("sent", 3, {"job": ss.get("job_id")})] if ss.get("job_id") else []
+      if _sent:
+        st.caption("Sent: " + " · ".join(f"{x.get('what')} by {x.get('how')} to {x.get('to')} ({x.get('at')})" for x in _sent))
 
-    # ---------- 5. Confirmed fix ----------
-  st.write("---")
-  with st.expander("✅ 6 · Confirmed fix & follow-up — teaches the app", expanded=bool((ss.fix_part or "").strip())):
-    st.caption("When the car is fixed, write down what actually fixed it and the test that proved it. Next time a car like this "
-               "comes in, the AI sees your shop's real fixes first.")
-    f1, f2 = st.columns(2)
-    f1.text_input("What fixed it:", key="fix_part", placeholder="e.g. Replaced upstream O2 sensor (Bank 1 Sensor 1)")
-    f2.text_input("Test that proved it:", key="fix_test", placeholder="e.g. O2 now switching 0.1–0.9 V, total trims back within ±5%")
-    st.text_input("Extra notes (optional):", key="fix_notes", placeholder="e.g. Connector pin 3 was corroded too")
-    if st.button("💾 Save confirmed fix", type="primary", disabled=not (ss.fix_part.strip() and ss.vehicle_info)):
-      if save_fix():
-        st.success("Saved. It's now part of your shop's history for this car and for others like it.")
-      else:
-        st.error("Couldn't save the fix — add the vehicle or customer first.")
-    if not ss.vehicle_info:
-      st.caption("Set the vehicle on the VIN tab first.")
+      # ---------- 5. Confirmed fix ----------
+    st.write("---")
+    with st.expander("✅ 6 · Confirmed fix & follow-up — teaches the app", expanded=bool((ss.fix_part or "").strip())):
+      st.caption("When the car is fixed, write down what actually fixed it and the test that proved it. Next time a car like this "
+                 "comes in, the AI sees your shop's real fixes first.")
+      f1, f2 = st.columns(2)
+      f1.text_input("What fixed it:", key="fix_part", placeholder="e.g. Replaced upstream O2 sensor (Bank 1 Sensor 1)")
+      f2.text_input("Test that proved it:", key="fix_test", placeholder="e.g. O2 now switching 0.1–0.9 V, total trims back within ±5%")
+      st.text_input("Extra notes (optional):", key="fix_notes", placeholder="e.g. Connector pin 3 was corroded too")
+      if st.button("💾 Save confirmed fix", type="primary", disabled=not (ss.fix_part.strip() and ss.vehicle_info)):
+        if save_fix():
+          st.success("Saved. It's now part of your shop's history for this car and for others like it.")
+        else:
+          st.error("Couldn't save the fix — add the vehicle or customer first.")
+      if not ss.vehicle_info:
+        st.caption("Set the vehicle on the VIN tab first.")
 
-    st.markdown("**📅 Follow up with this customer?**")
-    _fu1, _fu2 = st.columns(2)
-    _fu_opts = list(FOLLOW_UP_LABELS)
-    _cur_fu = ss.follow_up_days if ss.follow_up_days in FOLLOW_UP_LABELS else 0
-    _fu_pick = _fu1.selectbox("Call them back", _fu_opts, index=_fu_opts.index(_cur_fu),
-                              format_func=lambda d: FOLLOW_UP_LABELS[d], key=f"fu_{ss.get('job_n', 0)}")
-    ss.follow_up_days = _fu_pick
-    _fu2.text_input("About what:", key="follow_up_note", placeholder="e.g. Rear brakes at 4mm — due soon")
-    if _fu_pick:
-      st.caption("It'll show under 📅 Callbacks due on the Log tab when the time comes (counted from the job's last update).")
+      st.markdown("**📅 Follow up with this customer?**")
+      _fu1, _fu2 = st.columns(2)
+      _fu_opts = list(FOLLOW_UP_LABELS)
+      _cur_fu = ss.follow_up_days if ss.follow_up_days in FOLLOW_UP_LABELS else 0
+      _fu_pick = _fu1.selectbox("Call them back", _fu_opts, index=_fu_opts.index(_cur_fu),
+                                format_func=lambda d: FOLLOW_UP_LABELS[d], key=f"fu_{ss.get('job_n', 0)}")
+      ss.follow_up_days = _fu_pick
+      _fu2.text_input("About what:", key="follow_up_note", placeholder="e.g. Rear brakes at 4mm — due soon")
+      if _fu_pick:
+        st.caption("It'll show under 📅 Callbacks due on the Log tab when the time comes (counted from the job's last update).")
 # ========================================================
 # --- TAB 5: VEHICLE & DTC LOG ---
 # ========================================================
