@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-03"
+APP_VERSION = "2026-11-04"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -71,6 +71,13 @@ WHATS_NEW = [
     "NEW: 📷 Camera on the Knowledge tab (snap book pages one at a time) and on Job photos — uploading still works too",
     "FIX: 'Stumble caught' no longer goes off when you lift off the gas, on upshifts, or when the converter locks up — "
     "it now reads the gas pedal sensor (every pass) and only alarms when RPM drops with your foot held on the gas",
+    "FASTER: a blurry VIN photo no longer waits on NHTSA lookups for readings that can't be right",
+    "NEW: 💬 Quick help chat at the top of every page — knows the open car, codes, scanner data, test plan, shop history "
+    "and your Knowledge notes (it picks the notes that match your question)",
+    "NEW: Every chat is saved permanently, the AI remembers earlier chats (same car first), 🕘 Past chats to search them, "
+    "and 📌 Save to Knowledge turns a good answer into a note",
+    "BETTER: The scanner's live drive check, test drive reviews, step-card questions, drive cycle plans and scope data "
+    "checks now use your Knowledge notes too",
 ]
 
 st.markdown(
@@ -1044,7 +1051,8 @@ def find_vin(img_bytes: bytes) -> dict:
   ranked = sorted(score, key=lambda c: -score[c])[:5]
   verified = []
   for c in ranked:
-    ok_cd, ok_db = vin_check_digit_ok(c), nhtsa_ok(c)
+    ok_cd = vin_check_digit_ok(c)
+    ok_db = ok_cd and nhtsa_ok(c)   # NHTSA always rejects a bad check digit, so don't wait on it for those
     score[c] += (4 if ok_cd else 0) + (4 if ok_db else 0)
     if ok_cd and ok_db:
       verified.append(c)
@@ -2192,7 +2200,8 @@ JOB_FIELDS = ["customer_name", "customer_phone", "customer_address", "vin_input"
 def job_snapshot() -> dict:
   d = {k: ss.get(k) for k in JOB_FIELDS}
   # photos stay out of storage (too big); the text of the chat is kept
-  d["chat_history"] = [{"role": m.get("role"), "content": m.get("content"), "photos_n": len(m.get("photos") or []) or m.get("photos_n", 0)}
+  d["chat_history"] = [{"role": m.get("role"), "content": m.get("content"), "photos_n": len(m.get("photos") or []) or m.get("photos_n", 0),
+                        "chat_id": m.get("chat_id")}
                        for m in (ss.get("chat_history") or [])][-40:]
   return d
 
@@ -2275,8 +2284,15 @@ def knowledge_entries() -> list[dict]:
   return [dict(r.get("data") or {}, _id=r["id"]) for r in store_list("know", 1000)]
 
 
-def knowledge_for_job(limit: int = 30) -> list[dict]:
-  """The notes that fit THIS job: matching systems (from the codes/symptoms) and this make, never another make's."""
+KN_STOP = {"the", "and", "for", "with", "what", "that", "this", "does", "have", "from", "when", "where", "which", "how", "why",
+           "are", "was", "you", "your", "can", "should", "would", "could", "there", "they", "its", "not", "but", "all", "any",
+           "out", "off", "get", "got", "just", "about", "into", "then", "than", "them", "will", "good", "bad", "need", "know",
+           "tell", "give", "look", "want", "car", "vehicle", "truck", "one", "two", "also", "still", "it's", "i'm", "don't"}
+
+
+def knowledge_for_job(limit: int = 30, extra: str = "") -> list[dict]:
+  """The notes that fit THIS job: matching systems (from the codes/symptoms, plus `extra` — the question being asked or
+  the kind of check) and this make, never another make's."""
   entries = knowledge_entries()
   if not entries:
     return []
@@ -2288,7 +2304,9 @@ def knowledge_for_job(limit: int = 30) -> list[dict]:
       if c.startswith(pre):
         words |= set(w.split())
         break
-  words |= {w for w in re.findall(r"[a-z0-9]+", ((ss.symptoms or "") + " " + (ss.vehicle_info or "")).lower()) if len(w) >= 3}
+  words |= {w for w in re.findall(r"[a-z0-9]+", ((ss.symptoms or "") + " " + (ss.vehicle_info or "") + " " + (extra or "")).lower())
+            if len(w) >= 3}
+  words -= KN_STOP
   fam = MAKE_PROFILES.get(make.upper(), make.upper()).lower() if make else ""
   same_family = ({m.lower() for m, f in MAKE_PROFILES.items() if f.lower() == fam} | {fam, make}) if make else set()
   all_makes = {m.lower() for m in MAKE_PROFILES} | {f.lower() for f in MAKE_PROFILES.values()} | \
@@ -2336,8 +2354,24 @@ def similar_fixes(limit: int = 8) -> list[dict]:
   return rows[:limit]
 
 
-def shop_context() -> str:
-  """This shop's own history for the AI prompts ('' if there is none)."""
+def knowledge_block(extra: str = "", limit: int = 30) -> str:
+  """The shop's Knowledge notes that fit this job / question, ready to drop into an AI prompt ('' if none)."""
+  try:
+    kn = knowledge_for_job(limit, extra)
+  except Exception as e:   # a bonus; never block an answer over it
+    log_problem("storage", "Knowledge notes for AI", str(e))
+    return ""
+  if not kn:
+    return ""
+  return ("THIS SHOP'S TESTING KNOWLEDGE (the technician's own notes: specs, what patterns mean, test methods). "
+          "Apply the ones that fit and say which you used; if a note conflicts with the measured data, say so:\n"
+          + "\n".join(f"- [{e.get('topic', 'General')}{(' · ' + e['applies_to']) if e.get('applies_to') and str(e['applies_to']).lower() not in ('all', 'any') else ''}] "
+                      f"{e.get('rule', '')}" for e in kn))
+
+
+def shop_context(extra: str = "") -> str:
+  """This shop's own history + Knowledge notes for the AI prompts ('' if there is none). `extra` = the question or the
+  kind of check, so the notes that fit it are picked."""
   out = []
   try:
     visits = vin_history(ss.active_vin)
@@ -2361,12 +2395,9 @@ def shop_context() -> str:
       out.append(f"NHTSA OWNER COMPLAINTS for this year/make/model ({len(comps)} filed; owner reports, not confirmed "
                  f"fixes). Most reported: " + ", ".join(f"{n.title()} ({k})" for n, k in top[:5]))
       out += [f"- Similar complaint: {c['summary'][:260]}" for c in like[:3]]
-    kn = knowledge_for_job()
-    if kn:
-      out.append("THIS SHOP'S TESTING KNOWLEDGE (the technician's own notes: specs, what patterns mean, test methods). "
-                 "Apply the ones that fit this job and say which you used; if a note conflicts with the measured data, say so:")
-      out += [f"- [{e.get('topic', 'General')}{(' · ' + e['applies_to']) if e.get('applies_to') and str(e['applies_to']).lower() not in ('all', 'any') else ''}] "
-              f"{e.get('rule', '')}" for e in kn]
+    kb = knowledge_block(extra)
+    if kb:
+      out.append(kb)
   except Exception as e:   # history is a bonus; never block a diagnosis over it
     log_problem("storage", "Shop history for AI", str(e))
   return ("\n\n" + "\n".join(out)) if out else ""
@@ -2678,6 +2709,10 @@ with guard("Cars in the shop"):
     with st.expander("🆕 What's new"):
       st.markdown("\n".join(f"- {w}" for w in WHATS_NEW))
 
+# 💬 Quick help sits here, above the tabs, on every page. It's filled in at the very end of the script (it needs the
+# scanner, plan and knowledge helpers defined further down), but Streamlit shows it in this spot.
+_quick_box = st.container()
+
 
 STEP_PROMPT = """Turn this diagnostic test plan into step-by-step cards a technician (or a helper learning the trade) can
 work through one at a time on the vehicle.
@@ -2794,7 +2829,8 @@ def step_cards_panel(simple: bool):
       with st.spinner("Asking..."):
         ans, who = quick_ai(f"Vehicle: {ss.vehicle_info or 'not given'}. Codes: {', '.join(current_codes()) or 'none'}.\n"
                             f"Current test step: {cur.get('title')} — {cur.get('do')} (where: {cur.get('where')}; "
-                            f"pass/fail: {cur.get('pass_fail')}).\n\nQuestion: {ask}\nAnswer in plain words, under 180 words.",
+                            f"pass/fail: {cur.get('pass_fail')}).\n\nQuestion: {ask}\nAnswer in plain words, under 180 words.\n\n"
+                            + knowledge_block(f"{cur.get('title')} {cur.get('do')} {cur.get('where')} {cur.get('tools')}", 8),
                             max_tokens=3000, effort="low")
       ss.plan_qa = {"idx": idx, "q": lab, "a": ans}
   qa = ss.get("plan_qa")
@@ -6675,7 +6711,8 @@ LATEST SNAPSHOT UNDER ROAD LOAD ({ev.get('at')}):
 Give a concise 3-bullet live assessment, under 100 words total:
 1. Fuel delivery & trim state (Bank 1 vs Bank 2 under the current load).
 2. Drivetrain health (trans temp, oil pressure, TCC slip, knock) — only if those values are present.
-3. Any anomaly to inspect back in the bay."""
+3. Any anomaly to inspect back in the bay.
+{knowledge_block("test drive road load fuel trim misfire stumble transmission shift converter slip knock " + (ss.symptoms or ""), 12)}"""
       label = f"[Live Drive AI Check - {ev.get('at')}]"
     else:
       prompt = f"""You are an expert ASE Master / L1 Diagnostic Technician.
@@ -6696,7 +6733,7 @@ MODE $06 RESULTS (value [min..max]):
 
 GUIDED TEST RESULTS (fuel trim / VE / catalyst / charging / power & braking, if run):
 {json.dumps(ev.get('tests') or ss.test_results or {}) or 'none'}
-{shop_context()}
+{shop_context("live data fuel trim misfire mode 06 readiness sensor o2 maf map charging")}
 
 DIAGNOSTIC TASK:
 1. Fuel control: total trim (STFT + LTFT) Bank 1 vs Bank 2; single- vs dual-bank pattern.
@@ -6763,7 +6800,8 @@ Full readiness status: {_rdy}
 Write a single practical drive cycle plan to complete them, in order, as a numbered checklist a technician follows
 while driving. For each step give: starting conditions (cold engine / coolant temp / fuel level if it matters),
 exact speeds, times and throttle behavior, and WHICH monitor that step completes. Mention this make's known quirks
-for setting these monitors if you are sure of them. Keep it under 300 words.""", max_tokens=3000)
+for setting these monitors if you are sure of them. Keep it under 300 words.
+{knowledge_block("drive cycle readiness monitor " + " ".join(_left), 8)}""", max_tokens=3000)
       ss.drive_plan = ("" if _plan.startswith("⚠️") else f"_{_who}_\n\n") + _plan
     if ss.drive_plan:
       with st.expander("📋 Drive cycle plan", expanded=True):
@@ -6772,18 +6810,260 @@ for setting these monitors if you are sure of them. Keep it under 300 words.""",
 # ========================================================
 # --- TAB 3: DIAGNOSE (STRATEGY + SCOPE LAB + COPILOT) ---
 # ========================================================
-def scan_context() -> str:
-  """Everything the scanner captured, for the AI prompts."""
+def scan_context(extra: str = "") -> str:
+  """Everything the scanner captured + the shop's history and Knowledge notes, for the AI prompts."""
   tests = ("\nGuided test results: " + json.dumps(ss.test_results)) if ss.test_results else ""
   if not ss.ble_dtcs and not ss.scan_data:
-    return "No scanner data (codes entered by hand)." + tests + shop_context()
+    return "No scanner data (codes entered by hand)." + tests + shop_context(extra)
   sd = ss.scan_data or {}
   pids = json.dumps(sd.get("pids") or {}, indent=0) if sd.get("pids") else "not captured"
   return (f"Scanner codes: {_fmt_dtcs(ss.ble_dtcs)}\n"
           f"I/M readiness: {sd.get('readiness') or 'not read'}\n"
           + ("".join("PLAUSIBILITY ALERT (reading that doesn't add up): " + f + "\n" for f in (sd.get("flags") or [])))
           + f"Mode $06 results: {sd.get('mode6') or 'not read'}\n"
-          + f"Live data snapshot at sync ({sd.get('at') or '?'}): {pids}" + tests + shop_context())
+          + f"Live data snapshot at sync ({sd.get('at') or '?'}): {pids}" + tests + shop_context(extra))
+
+
+# ========================================================
+# --- CHAT (💬 Quick help at the top + Copilot on the Diagnose tab: one conversation, saved permanently) ---
+# ========================================================
+def chat_memory(question: str) -> str:
+  """Earlier saved chats worth remembering for this question: this same car first, then ones on the same subject."""
+  try:
+    rows = [r.get("data") or {} for r in store_list("chat", 300)]
+  except Exception:
+    return ""
+  in_convo = {m.get("chat_id") for m in (ss.chat_history or []) if m.get("chat_id")}
+  rows = [d for d in rows if d.get("q") and d.get("id") not in in_convo]
+  same = [d for d in rows if ss.active_vin and d.get("vin") == ss.active_vin][:4]
+  words = {w for w in re.findall(r"[a-z0-9]+", question.lower()) if len(w) >= 3} - KN_STOP
+  scored = []
+  for d in rows:
+    if d in same:
+      continue
+    hit = len(words & set(re.findall(r"[a-z0-9]+", f"{d.get('q', '')} {d.get('vehicle', '')}".lower())))
+    if hit >= 2:
+      scored.append((hit, d))
+  scored.sort(key=lambda x: -x[0])
+  pick = same + [d for _, d in scored[:3]]
+  if not pick:
+    return ""
+  return ("EARLIER CHATS (this technician's past questions and the AI's past answers — for continuity only, NOT proven "
+          "facts; re-check anything you rely on, and say so if one was wrong):\n"
+          + "\n".join(f"- {d.get('at', '')} · {d.get('vehicle') or 'no car open'}: Q: {d.get('q', '')[:300]} → A: "
+                      + " ".join(str(d.get("a", "")).split())[:450] for d in pick))
+
+
+def chat_prompt_for(question: str, n_photos: int) -> str:
+  history = "\n".join(f"{m['role'].upper()}: {m['content']}" + (f" [attached {len(m['photos'])} photo(s)]" if m.get("photos") else "")
+                      for m in (ss.chat_history or [])[-6:])
+  plan = (ss.dtc_result or {}).get("text", "")[:3000]
+  sr = ss.scope_result
+  return f"""
+You are an expert automotive diagnostic technician assisting a mechanic in the field.
+Vehicle: {ss.vehicle_info or 'none open — answer in general, and ask for the vehicle if the answer depends on it'}
+Fault codes being worked: {", ".join(current_codes()) or 'None'}
+Symptoms / complaint: {(ss.symptoms or '').strip() or 'not given'}
+{scan_context(question)}
+Current test plan (if any): {plan or 'none yet'}
+{plan_progress_text()}
+Latest scope/readings evaluation (if any): {((sr or {}).get('text', '') if isinstance(sr, dict) else (sr or ''))[:1500] or 'none'}
+Latest scope DATA FILE analysis (measured from raw data, if any): {((ss.wave_result or {}).get('text', ''))[:2000] or 'none'}
+
+{chat_memory(question)}
+
+Recent conversation:
+{history}
+
+Earlier web research for this job (if any): {(ss.dtc_result or {}).get("research", "")[:2500] or 'none'}
+
+Respond directly, practically, and concisely to the latest question. Focus on physical shop tests, circuit checks, and logical isolation.
+""" + (f"""
+The technician attached {n_photos} photo(s) with this question (wiring diagram, connector, part, scope or meter).
+Read them carefully: wire colors, pin/cavity numbers, splices, grounds, connector IDs, component names, readings on screen.
+Say what you can read in the photo, and say so plainly if part of it is too blurry or cut off to read.""" if n_photos else "")
+
+
+def ask_chat(question: str, imgs: list, team: bool, where: str):
+  """Ask one question: shows it, gets the answer, and saves the pair to permanent memory."""
+  photos_b64 = [_jpeg_b64(im, 2000) for im in imgs]      # big enough to read wire colors and pin numbers
+  thumbs = []
+  for im in imgs:
+    t = im.convert("RGB"); t.thumbnail((500, 500)); b = io.BytesIO(); t.save(b, format="JPEG", quality=80); thumbs.append(b.getvalue())
+  rid = datetime.now().strftime("%Y%m%d%H%M%S%f")
+  ss.chat_history = (ss.chat_history or []) + [{"role": "user", "content": question, "photos": thumbs, "chat_id": rid}]
+  with st.chat_message("user"):
+    for thumb in thumbs:
+      st.image(thumb, width=220)
+    st.markdown(question)
+  prompt = chat_prompt_for(question, len(photos_b64))
+  n_notes = len(knowledge_for_job(30, question)) if knowledge_entries() else 0
+  research = ""
+  with st.chat_message("assistant"):
+    if not team:
+      with st.spinner("Thinking..."):
+        reply, who = quick_ai(prompt, image_b64=photos_b64, max_tokens=4000)
+      who = who + " · quick answer"
+    elif where == "quick":   # inside the Quick help box (no status box allowed there)
+      with st.spinner("The AI team is checking it (about a minute)..."):
+        reply, research, draft, ds_draft = team_answer(prompt, ss.vehicle_info or "General vehicle", ", ".join(current_codes()),
+                                                       (ss.symptoms or "").strip(), False, None, question=question,
+                                                       image_b64=photos_b64)
+      who = team_names(draft, ds_draft, research)
+    else:
+      with st.status("Working on it...", expanded=False) as status:
+        reply, research, draft, ds_draft = team_answer(
+            prompt, ss.vehicle_info or "General vehicle", ", ".join(current_codes()), (ss.symptoms or "").strip(),
+            bool(ss.get("use_web", False) and secret("PERPLEXITY_API_KEY")), status, question=question, image_b64=photos_b64)
+        status.update(label="Done", state="complete")
+      who = team_names(draft, ds_draft, research)
+    who += f" · 📖 {n_notes} of your notes sent" if n_notes else ""
+    st.caption(who)
+    st.markdown(reply)
+    if research and where != "quick":
+      with st.expander("🌐 Sources Perplexity found"):
+        st.markdown(research)
+  ss.chat_history.append({"role": "assistant", "content": reply, "chat_id": rid, "who": who})
+  if not str(reply).startswith("⚠️"):   # AI errors aren't worth remembering
+    store_put("chat", rid, {"id": rid, "q": question, "a": reply, "at": datetime.now().strftime("%Y-%m-%d %I:%M %p"),
+                            "vin": ss.active_vin or "", "vehicle": ss.vehicle_info or "", "codes": current_codes(),
+                            "job": ss.get("job_id") or "", "tech": ss.get("tech_user") or "", "who": who,
+                            "photos_n": len(imgs), "where": where})
+
+
+PIN_PROMPT = """A technician got this answer from the AI and wants to keep the useful testing fact as a note in the shop's
+knowledge base (the AI team reads these notes on every future diagnosis).
+Vehicle at the time: {vehicle}
+Question: {q}
+Answer: {a}
+
+Write ONE short note in plain words (1-3 sentences): a spec / known-good value, what a reading or pattern means, a test
+procedure, or a rule of thumb. Keep numbers and units exactly as given; add nothing that isn't in the answer.
+Return JSON only: {{"topic": "<2-4 words, e.g. Fuel pressure>", "type": "<one of: Spec / known-good value | What a pattern means | Test procedure | Rule of thumb>", "applies_to": "<make / engine / system it applies to, or All>", "rule": "<the note>"}}"""
+
+
+def chat_pin_form(where: str):
+  """📌 Save to Knowledge: the AI writes the answer up as one short note, the tech checks it, then it's saved."""
+  p = ss.chat_pin
+  if p.get("note") is None:
+    with st.spinner("Writing it up as a short note..."):
+      raw, _who = quick_ai(PIN_PROMPT.format(vehicle=ss.vehicle_info or "not given", q=p.get("q", "")[:1500], a=p.get("a", "")[:6000]),
+                           max_tokens=3000, effort="low")
+    o = find_json(raw, dict) or {}
+    p["note"] = {"topic": str(o.get("topic") or "General")[:60], "applies_to": str(o.get("applies_to") or "All")[:60],
+                 "type": o.get("type") if o.get("type") in KNOW_KINDS else "Rule of thumb",
+                 "rule": str(o.get("rule") or "").strip()[:600]}
+  n = p["note"]
+  with st.form(f"pin_form_{where}"):
+    st.markdown("**📌 Save to Knowledge** — fix anything that's off, then save. The AI team will use it on every job it fits.")
+    if not n["rule"]:
+      st.caption("The AI didn't find a clear testing fact in that answer — write the note in your own words.")
+    c1, c2, c3 = st.columns(3)
+    topic = c1.text_input("Topic", value=n["topic"])
+    kind = c2.selectbox("Type", KNOW_KINDS, index=KNOW_KINDS.index(n["type"]))
+    applies = c3.text_input("Applies to", value=n["applies_to"])
+    rule = st.text_area("Note", value=n["rule"], height=110)
+    s1, s2 = st.columns(2)
+    save = s1.form_submit_button("💾 Save to Knowledge", type="primary", use_container_width=True)
+    cancel = s2.form_submit_button("✖️ Cancel", use_container_width=True)
+  if save and str(rule or "").strip():
+    store_put("know", datetime.now().strftime("%Y%m%d%H%M%S%f"),
+              {"topic": str(topic or "General").strip(), "type": kind or "Rule of thumb", "applies_to": str(applies or "All").strip(),
+               "rule": str(rule).strip(), "source": f"Chat answer, {datetime.now():%Y-%m-%d}", "added": datetime.now().strftime("%Y-%m-%d"),
+               "tech": ss.get("tech_user") or ""})
+    ss.chat_pin = None
+    queue_update(toast="📌 Saved to Knowledge")
+  elif cancel:
+    ss.chat_pin = None
+    st.rerun()
+
+
+def chat_messages(msgs: list, where: str, start: int = 0):
+  """Show the conversation, with 📌 Save to Knowledge under each answer."""
+  for i, msg in enumerate(msgs, start):
+    with st.chat_message(msg.get("role") or "assistant"):
+      for thumb in msg.get("photos") or []:
+        st.image(thumb, width=220)
+      if msg.get("who"):
+        st.caption(msg["who"])
+      st.markdown(msg.get("content") or "")
+      if msg.get("role") == "assistant" and not str(msg.get("content") or "").startswith("⚠️"):
+        mid = str(msg.get("chat_id") or i)
+        pin = ss.get("chat_pin") or {}
+        if pin.get("id") == mid and pin.get("where") == where:
+          chat_pin_form(where)
+        elif st.button("📌 Save to Knowledge", key=f"pin_{where}_{mid}_{i}",
+                       help="Keep the useful fact from this answer as a Knowledge note the AI uses on every job"):
+          q = next((m.get("content", "") for m in reversed((ss.chat_history or [])[:i]) if m.get("role") == "user"), "")
+          ss.chat_pin = {"where": where, "id": mid, "q": q, "a": msg.get("content") or "", "note": None}
+          st.rerun()
+
+
+def past_chats_panel():
+  rows = [r.get("data") or {} for r in store_list("chat", 300)]
+  rows = [d for d in rows if d.get("q")]
+  if not rows:
+    st.caption("No saved chats yet — every question you ask is saved here.")
+    return
+  c1, c2 = st.columns([3, 1])
+  qq = c1.text_input("🔎 Search past chats", key="qh_search", placeholder="e.g. fuel pressure, Silverado, P0171").strip().lower()
+  mine = c2.checkbox("This car only", key="qh_car", disabled=not ss.active_vin)
+  shown = [d for d in rows if (not mine or d.get("vin") == ss.active_vin)
+           and (not qq or qq in f"{d.get('q', '')} {d.get('a', '')} {d.get('vehicle', '')}".lower())]
+  st.caption(f"{len(shown)} of {len(rows)} saved chat(s){' — showing the newest 15' if len(shown) > 15 else ''}")
+  for d in shown[:15]:
+    with st.container(border=True):
+      st.markdown(f"<small>{html_lib.escape(d.get('at', ''))} · {html_lib.escape(d.get('vehicle') or 'no car open')}"
+                  f"{(' · ' + html_lib.escape(d['tech'])) if d.get('tech') else ''}</small>", unsafe_allow_html=True)
+      st.markdown(f"**Q: {d.get('q', '')}**")
+      a = d.get("a", "")
+      st.markdown(a if len(a) <= 700 else a[:700] + " …")
+      b1, b2 = st.columns(2)
+      if b1.button("↩️ Continue this chat", key=f"qh_cont_{d.get('id')}", use_container_width=True):
+        ss.chat_history = (ss.chat_history or []) + [{"role": "user", "content": d.get("q", ""), "chat_id": d.get("id")},
+                                                     {"role": "assistant", "content": a, "chat_id": d.get("id"), "who": d.get("who", "")}]
+        st.rerun()
+      if b2.button("🗑️ Delete", key=f"qh_del_{d.get('id')}", use_container_width=True):
+        store_delete("chat", d.get("id"))
+        st.rerun()
+
+
+def quick_help_panel():
+  msgs = ss.chat_history or []
+  with st.expander("💬 Quick help — ask the AI anything", expanded=bool(msgs)):
+    n_kn = len(knowledge_entries())
+    st.caption("It knows the car that's open, the codes, the scanner data, the test plan, your shop history"
+               + (f" and your {n_kn} Knowledge note(s)" if n_kn else " and your Knowledge notes")
+               + " — and it remembers your earlier chats. Every question and answer is saved.")
+    show_all = len(msgs) > 6 and st.toggle("Show the whole conversation", key="qh_all")
+    start = 0 if show_all else max(0, len(msgs) - 6)
+    convo = st.container()
+    with convo:
+      chat_messages(msgs[start:], "quick", start)
+    with st.form("qh_form", clear_on_submit=True):
+      q = st.text_area("Your question", key="qh_q", height=80,
+                       placeholder="e.g. What should fuel pressure be on a 2014 Silverado 5.3?  ·  How do I test a 3-wire cam sensor?")
+      files = st.file_uploader("📷 Add photos (optional — wiring diagram, connector, part, meter)", type=["png", "jpg", "jpeg", "webp"],
+                               accept_multiple_files=True, key="qh_files") or []
+      f1, f2 = st.columns([1, 2])
+      go = f1.form_submit_button("Ask", type="primary", use_container_width=True)
+      team = f2.checkbox("Have the whole AI team check it (slower)", key="qh_team")
+    if go and str(q or "").strip():
+      imgs = []
+      for f in list(files)[:4]:
+        try:
+          imgs.append(ImageOps.exif_transpose(Image.open(io.BytesIO(f.getvalue()))))
+        except Exception:
+          st.warning(f"Couldn't open {getattr(f, 'name', 'that photo')} — try a JPG or PNG.")
+      with convo:
+        ask_chat(str(q).strip(), imgs, bool(team), "quick")
+    b1, b2 = st.columns(2)
+    if msgs and b1.button("🧹 New conversation", key="qh_new", use_container_width=True,
+                          help="Starts fresh. Earlier chats stay saved and the AI still remembers them."):
+      ss.chat_history = []
+      st.rerun()
+    if b2.toggle("🕘 Past chats", key="qh_past"):
+      past_chats_panel()
 
 
 # ========================================================
@@ -6934,8 +7214,7 @@ def scope_data_section():
   for r in results:
     if r["type"] == "rel_comp" and sync and cyl and fo:
       named = name_cylinders(r["events"], [e["time_ms"] for e in sync[0]["events"]], cyl, fo, sync[1]["cyl_no"])
-      if named:
-        r = dict(r)
+      if named:   # r is this channel's own result (a fresh copy from the cache), so updating it in place is safe
         r["measurements"]["relative_by_cylinder_pct"] = named
         weak = min(named.items(), key=lambda kv: kv[1] or 999)
         if weak[1] is not None and weak[1] < 85:
@@ -7020,7 +7299,8 @@ def scope_data_section():
   # ---- the AI team reads the numbers ----
   if st.button("🔍 Have the AI team interpret these measurements", type="primary", key=f"wv_ai_{fid}"):
     prompt = WAVE_PROMPT.format(vehicle=ss.vehicle_info or "not given", codes=", ".join(current_codes()) or "none",
-                                symptoms=(ss.symptoms or "").strip() or "not given", scan=scan_context(),
+                                symptoms=(ss.symptoms or "").strip() or "not given",
+                                scan=scan_context("scope waveform " + " ".join(WAVE_TYPES.get(c_["type"], "") for c_ in setup["chans"])),
                                 capture=capture_summary(cap, setup, results), compare=compare_txt)
     with st.status("The AI team is reading the measurements...", expanded=False) as status:
       text, _r, draft, ds_draft = team_answer(prompt, ss.vehicle_info or "vehicle", ", ".join(current_codes()),
@@ -7328,16 +7608,14 @@ Format strictly using these Markdown sections:
   st.write("---")
   st.markdown("#### 3 · Copilot chat")
   hcol1, hcol2 = st.columns([4, 1])
-  hcol1.caption("Ask follow-ups about the codes, the test plan or your readings. It already knows the vehicle and scan data.")
-  if ss.chat_history and hcol2.button("Clear chat"):
+  hcol1.caption("Ask follow-ups about the codes, the test plan or your readings. It knows the vehicle, the scan data, your shop "
+                "history and your Knowledge notes, and it remembers earlier chats. Same conversation as 💬 Quick help at the "
+                "top — every answer is saved.")
+  if ss.chat_history and hcol2.button("New chat", help="Starts fresh. Earlier chats stay saved and the AI still remembers them."):
     ss.chat_history = []
     st.rerun()
 
-  for msg in ss.chat_history:
-    with st.chat_message(msg["role"]):
-      for thumb in msg.get("photos") or []:
-        st.image(thumb, width=220)
-      st.markdown(msg["content"])
+  chat_messages(ss.chat_history or [], "copilot")
 
   # 📷 Photos for the next question: wiring diagrams, connectors, parts, scope or meter screens
   nkey = ss.get("chat_photo_n", 0)
@@ -7362,59 +7640,9 @@ Format strictly using these Markdown sections:
   user_question = st.chat_input("Ask a question (add photos above first if you want)" if not chat_imgs else
                                 f"Ask about the {len(chat_imgs)} photo(s) — e.g. 'Which wire is the 5V reference?'")
   if user_question:
-    photos_b64 = [_jpeg_b64(im, 2000) for im in chat_imgs]       # big enough to read wire colors and pin numbers
-    thumbs = []
-    for im in chat_imgs:
-      t = im.convert("RGB"); t.thumbnail((500, 500)); b = io.BytesIO(); t.save(b, format="JPEG", quality=80); thumbs.append(b.getvalue())
-    ss.chat_history.append({"role": "user", "content": user_question, "photos": thumbs})
     if chat_imgs:
       ss.chat_photo_n = nkey + 1        # empties the photo box for the next question
-    with st.chat_message("user"):
-      for thumb in thumbs:
-        st.image(thumb, width=220)
-      st.markdown(user_question)
-    history = "\n".join(f"{m['role'].upper()}: {m['content']}" + (f" [attached {len(m['photos'])} photo(s)]" if m.get("photos") else "")
-                        for m in ss.chat_history[-6:])
-    plan = (ss.dtc_result or {}).get("text", "")[:3000]
-    chat_prompt = f"""
-You are an expert automotive diagnostic technician assisting a mechanic in the field.
-Vehicle: {ss.vehicle_info or 'General'}
-Fault codes being worked: {code_str or 'None'}
-Symptoms / complaint: {ss.symptoms.strip() or 'not given'}
-{scan_context()}
-Current test plan (if any): {plan or 'none yet'}
-{plan_progress_text()}
-Latest scope/readings evaluation (if any): {((ss.scope_result or {}).get('text', '') if isinstance(ss.scope_result, dict) else (ss.scope_result or ''))[:1500] or 'none'}
-Latest scope DATA FILE analysis (measured from raw data, if any): {((ss.wave_result or {}).get('text', ''))[:2000] or 'none'}
-
-Recent conversation:
-{history}
-
-Earlier web research for this job (if any): {(ss.dtc_result or {}).get("research", "")[:2500] or 'none'}
-
-Respond directly, practically, and concisely to the latest question. Focus on physical shop tests, circuit checks, and logical isolation.
-""" + (f"""
-The technician attached {len(photos_b64)} photo(s) with this question (wiring diagram, connector, part, scope or meter).
-Read them carefully: wire colors, pin/cavity numbers, splices, grounds, connector IDs, component names, readings on screen.
-Say what you can read in the photo, and say so plainly if part of it is too blurry or cut off to read.""" if photos_b64 else "")
-    with st.chat_message("assistant"):
-      if chat_quick:
-        with st.spinner("Thinking..."):
-          reply, who = quick_ai(chat_prompt, image_b64=photos_b64, max_tokens=4000)
-        research = ""
-        st.caption(who + " · quick answer")
-      else:
-        with st.status("Working on it...", expanded=False) as status:
-          reply, research, draft, ds_draft = team_answer(
-              chat_prompt, ss.vehicle_info or "General vehicle", code_str, ss.symptoms.strip(),
-              bool(ss.get("use_web", False) and secret("PERPLEXITY_API_KEY")), status, question=user_question, image_b64=photos_b64)
-          status.update(label="Done", state="complete")
-        st.caption(team_names(draft, ds_draft, research))
-      st.markdown(reply)
-      if research:
-        with st.expander("🌐 Sources Perplexity found"):
-          st.markdown(research)
-    ss.chat_history.append({"role": "assistant", "content": reply})
+    ask_chat(user_question, chat_imgs, not chat_quick, "copilot")
 
 # ========================================================
 # --- TEST DRIVE REVIEW (saved drives from the Bluetooth dashboard) ---
@@ -7775,7 +8003,9 @@ DRIVE_REVIEW_TASK = """You are an expert ASE master diagnostic technician. Revie
 
 def review_drive(rec: dict, status_label: str = "Reviewing the drive...") -> str:
   with st.status(status_label) as status:
-    ans, research, draft, ds_draft = team_answer(DRIVE_REVIEW_TASK + drive_text(rec), rec.get("vehicle") or ss.vehicle_info or "vehicle",
+    same_car = not rec.get("vehicle") or rec.get("vehicle") == ss.vehicle_info
+    ctx = shop_context("test drive fuel trim misfire stumble transmission shift converter slip charging catalyst") if same_car else ""
+    ans, research, draft, ds_draft = team_answer(DRIVE_REVIEW_TASK + drive_text(rec) + ctx, rec.get("vehicle") or ss.vehicle_info or "vehicle",
                                                  ss.active_dtc, ss.symptoms.strip(), False, status)
     status.update(label="Done", state="complete")
   ss.setdefault("drive_reviews", {})[rec["id"]] = ans + f"\n\n_{team_names(draft, ds_draft, research)}_"
@@ -7995,7 +8225,7 @@ with tab5, guard("Log tab"):
   if st.button("📦 Prepare backup file"):
     with st.spinner("Gathering everything..."):
       _bk = {"app_version": APP_VERSION, "made": datetime.now().isoformat(),
-             **{k: store_list(k, 1000) for k in ("job", "fix", "log", "drive", "jobphoto", "wave", "csvwave", "know", "sent", "problem")}}
+             **{k: store_list(k, 1000) for k in ("job", "fix", "log", "drive", "jobphoto", "wave", "csvwave", "know", "chat", "sent", "problem")}}
       ss._backup = json.dumps(_bk)
       ss._backup_counts = " · ".join(f"{k}: {len(_bk.get(k) or [])}" for k in ("job", "fix", "log", "drive", "jobphoto", "wave"))
     st.toast("Backup ready — tap Download")
@@ -8176,6 +8406,10 @@ with tab6, guard("Knowledge tab"):
       except (ValueError, UnicodeDecodeError):
         st.error("That file isn't a notes export.")
 
+
+# 💬 Quick help (shows at the top of the page — see _quick_box)
+with _quick_box, guard("Quick help chat"):
+  quick_help_panel()
 
 
 # ========================================================
