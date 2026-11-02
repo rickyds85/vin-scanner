@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-02"
+APP_VERSION = "2026-11-03"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -69,6 +69,8 @@ WHATS_NEW = [
     "NEW: NHTSA owner complaints for the vehicle, including the ones that sound like this car",
     "NEW: One-tap symptom buttons on the Diagnose tab",
     "NEW: 📷 Camera on the Knowledge tab (snap book pages one at a time) and on Job photos — uploading still works too",
+    "FIX: 'Stumble caught' no longer goes off when you lift off the gas, on upshifts, or when the converter locks up — "
+    "it now reads the gas pedal sensor (every pass) and only alarms when RPM drops with your foot held on the gas",
 ]
 
 st.markdown(
@@ -3564,7 +3566,8 @@ const PIDS = {
   "0E": { tile: "timing", tier: 2, len: 1, fn: (b) => (b[0] / 2 - 64).toFixed(1) + "°" },
   "10": { tile: "maf", tier: 2, len: 2, fn: (b) => (u16(b) / 100).toFixed(1) + " g/s" },
   "0B": { tile: "map", tier: 2, len: 1, fn: (b) => (b[0] * 0.145038).toFixed(1) + " PSI" },
-  "49": { tile: "app", tier: 2, len: 1, fn: pct },
+  "49": { tile: "app", tier: 1, len: 1, fn: pct },   // gas pedal: read every pass, the glitch catcher needs it
+  "4A": { tile: "app", tier: 1, len: 1, fn: pct },   // pedal sensor E, for cars that skip D
   "14": { tile: "o2b1s1", tier: 2, len: 2, fn: o2v }, "24": { tile: "o2b1s1", tier: 2, len: 4, fn: lam }, "34": { tile: "o2b1s1", tier: 2, len: 4, fn: lam },
   "15": { tile: "o2b1s2", tier: 2, len: 2, fn: o2v },
   "16": { tile: "o2b2s1", tier: 2, len: 2, fn: o2v }, "26": { tile: "o2b2s1", tier: 2, len: 4, fn: lam }, "36": { tile: "o2b2s1", tier: 2, len: 4, fn: lam },
@@ -3614,7 +3617,7 @@ function choosePids(sup) {
   const alt1D = sup && sup.has("1D") && !sup.has("13");   // 4-bank O2 layout
   const pick = {
     rpm: ["0C"], load: ["04"], tps: ["11"], spd: ["0D"], stft1: ["06"], ltft1: ["07"], stft2: ["08"], ltft2: ["09"],
-    timing: ["0E"], maf: ["10"], map: ["0B"], app: ["49"], ect: ["05"], iat: ["0F"], aat: ["46"], eot: ["5C"],
+    timing: ["0E"], maf: ["10"], map: ["0B"], app: ["49", "4A"], ect: ["05"], iat: ["0F"], aat: ["46"], eot: ["5C"],
     frp: ["23", "0A"], fli: ["2F"], evap: ["2E"], baro: ["33"],
     fss: ["03"], absload: ["43"], cmdlam: ["44"], fuelrate: ["5E"], cmv: ["42"], cat1: ["3C"], cat2: ["3D"],
     egrcmd: ["2C"], egrerr: ["2D"], evapvp: ["32"], eth: ["52"], frpabs: ["59"], boost: ["70"], egt: ["78"],
@@ -4727,7 +4730,7 @@ let lastDecelT = 0, minTps = null, trimBadSince = 0;
 function closedLoop() { const f = shown.fss; return !f || f === "--" || f === "N/A" || /^CL/.test(f); }
 function inDecel() {
   if (num.tps != null && (num.spd ?? 0) < 2 && (num.rpm ?? 2000) < 1100) minTps = minTps == null ? num.tps : Math.min(minTps, num.tps);
-  const throttleShut = num.tps != null && num.tps <= (minTps ?? num.tps) + 1.5;
+  const throttleShut = num.tps != null && num.tps <= (minTps ?? closedTps ?? num.tps) + 1.5;
   const decel = /decel/i.test(shown.fss || "") || ((num.rpm ?? 0) > 1100 && (num.spd ?? 0) > 5 && (throttleShut || (num.load ?? 100) <= 18));
   if (decel) lastDecelT = nowS();
   return decel || nowS() - lastDecelT < 4;   // trims settle for a few seconds after fuel cut ends
@@ -4790,18 +4793,19 @@ function plausNow() { return Object.values(PL).filter((r) => r.until).map((r) =>
 
 // ===================== Glitch catcher: hi-res window around a stumble =====================
 const GB = [];   // ring buffer, ~1 entry per live-data pass, last 25 s
-const GB_KEYS = ["rpm", "spd", "tps", "load", "stft1", "ltft1", "map", "maf", "frp", "volt"];
+function back(secs, key) {   // a reading from `secs` seconds ago in the buffer
+  const t = nowS(), i = GB_KEYS.indexOf(key) + 1;
+  for (let j = GB.length - 1; j >= 0; j--) if (t - GB[j][0] >= secs) return GB[j][i];
+  return null;
+}
+const GB_KEYS = ["rpm", "spd", "tps", "app", "load", "stft1", "ltft1", "map", "maf", "frp", "volt"];
 let glitchCool = {};
 function glitchTick() {
   const t = nowS();
   GB.push([t, ...GB_KEYS.map((k) => (frsh(k, 6) ? r2(num[k]) : null))]);
   while (GB.length && t - GB[0][0] > 25) GB.shift();
+  learnClosed();   // learn "foot off" any time the engine runs, not only on a test drive
   if (!driveOn) return;
-  const back = (secs, key) => {
-    const i = GB_KEYS.indexOf(key) + 1;
-    for (let j = GB.length - 1; j >= 0; j--) if (t - GB[j][0] >= secs) return GB[j][i];
-    return null;
-  };
   const fire = (kind, text) => {
     if (glitchCool[kind] && t - glitchCool[kind] < 30) return;
     glitchCool[kind] = t;
@@ -4814,9 +4818,7 @@ function glitchTick() {
       }
     }, 5200);
   };
-  const rpm = num.rpm, rpm1 = back(1.2, "rpm");
-  if (rpm != null && rpm1 != null && rpm1 - rpm > 250 && (num.tps ?? 0) > 3 && (num.spd ?? 0) > 2 && !inDecel())
-    fire("stumble", `Stumble caught. RPM dropped ${Math.round(rpm1 - rpm)} with your foot on the throttle.`);
+  stumbleCheck(t, fire);
   const st = num.stft1, st2 = back(2, "stft1");
   if (st != null && st2 != null && trimsTrustworthy() && Math.abs(st - st2) > 15 && Math.abs(st) > 20)
     fire("trimspike", `Fuel trim spike, bank 1 short term ${Math.round(st)} percent.`);
@@ -4827,6 +4829,56 @@ function glitchTick() {
   const footSteady = num.tps != null && tps5 != null && num.tps >= tps5 - 2;
   if (frp != null && frp5 != null && frp5 > 20 && frp < frp5 * (gdi ? 0.6 : 0.72) && (num.rpm ?? 0) > 500 && (!gdi || footSteady))
     fire("frpdrop", `Fuel pressure dropped from ${Math.round(frp5)} to ${Math.round(frp)} PSI${gdi ? " with steady throttle" : ""}.`);
+}
+// "Foot off" positions are learned (the lowest reading seen with the engine running), because many throttle sensors
+// read 10-20% with the pedal fully released. Prefer the PEDAL sensor (what the foot does) over the throttle blade.
+let closedTps = null, closedApp = null, hasPedal = false;
+function learnClosed() {
+  if ((num.rpm ?? 0) < 400 || GB.length < 2) return;
+  const prev = GB[GB.length - 2];
+  for (const k of ["tps", "app"]) {
+    const p = prev[GB_KEYS.indexOf(k) + 1];
+    if (!frsh(k, 3) || p == null) continue;
+    const v = Math.max(num[k], p);   // must read low two passes in a row, so one glitchy reading can't fool it
+    if (k === "tps") closedTps = closedTps == null ? v : Math.min(closedTps, v);
+    else { closedApp = closedApp == null ? v : Math.min(closedApp, v); hasPedal = true; }
+  }
+}
+// Is the driver's foot ON the gas and not lifting? Returns null when off, lifting, or unknown (unknown never alarms).
+function footOnSteady() {
+  const usePedal = hasPedal || active.includes("49") || active.includes("4A");   // drive-by-wire: the pedal sensor is what the foot does
+  const k = usePedal ? "app" : "tps", closed = usePedal ? closedApp : closedTps;
+  if (!frsh(k, 3) || closed == null) return null;
+  const now = num[k], before = back(1.2, k);
+  if (now == null || before == null) return null;
+  const margin = usePedal ? 6 : 5;   // electronic throttles can sit a few % open when you lift off
+  if (now < closed + margin || before < closed + margin) return null;   // foot is off (or was a moment ago)
+  if (now < before - 3) return null;                                     // foot is lifting
+  return { k, now, pressed: now - closed };
+}
+// Stumble = RPM falls while the foot is held ON the gas. Normal RPM drops that are NOT stumbles: lifting off,
+// an upshift (speed keeps climbing, RPM stays down), the torque converter clutch locking (RPM drops and stays down).
+let dip = null;   // an RPM drop that changed the RPM-to-speed ratio: watch whether RPM comes back (stumble) or stays down
+function stumbleCheck(t, fire) {
+  const foot = footOnSteady();
+  const rpm = num.rpm, spd = num.spd;
+  if (!foot || rpm == null || spd == null || spd <= 5 || inDecel()) { dip = null; return; }
+  if (dip) {
+    if (t - dip.t > 3 || spd > dip.spd + 2 || Math.abs(foot.now - dip.ped) > 4) dip = null;   // stayed down / sped up / foot moved
+    else if (rpm >= dip.low + 0.6 * (dip.from - dip.low)) {
+      fire("stumble", `RPM dipped ${Math.round(dip.from - dip.low)} and came back with your foot steady on the gas. ` +
+                      `Engine stumble, or the torque converter clutch slipping.`);
+      dip = null; return;
+    } else { dip.low = Math.min(dip.low, rpm); return; }
+  }
+  const rpm1 = back(1.2, "rpm"), spd1 = back(1.2, "spd");
+  if (rpm1 == null || spd1 == null || spd1 <= 5) return;
+  const drop = rpm1 - rpm;
+  if (drop <= Math.max(250, 0.12 * rpm1)) return;
+  if (spd > spd1 + 0.5) return;                                          // still speeding up = an upshift
+  if (Math.abs((rpm / spd) / (rpm1 / spd1) - 1) < 0.10)                  // same RPM-to-speed ratio = same gear, no slip change
+    fire("stumble", `Stumble caught. RPM dropped ${Math.round(drop)} with your foot steady on the gas.`);
+  else dip = { t, from: rpm1, low: rpm, spd: spd1, ped: foot.now };
 }
 function glitchWindow() {   // the last 15 s, full resolution, as a small CSV table
   const t = nowS();
