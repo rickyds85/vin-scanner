@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-10-31"
+APP_VERSION = "2026-11-02"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -68,6 +68,7 @@ WHATS_NEW = [
     "compared with your known-good captures in degrees",
     "NEW: NHTSA owner complaints for the vehicle, including the ones that sound like this car",
     "NEW: One-tap symptom buttons on the Diagnose tab",
+    "NEW: 📷 Camera on the Knowledge tab (snap book pages one at a time) and on Job photos — uploading still works too",
 ]
 
 st.markdown(
@@ -1292,6 +1293,14 @@ def shrink_to_b64(data: bytes, max_side: int = 1200, quality: int = 80) -> str:
   b = io.BytesIO()
   img.save(b, format="JPEG", quality=quality)
   return base64.b64encode(b.getvalue()).decode()
+
+
+def camera_shot(label: str, key: str):
+  """Streamlit's in-page camera, asking for 1080p so text on a page is readable (older Streamlit: its default size)."""
+  try:
+    return st.camera_input(label, key=key, resolution="1080p")
+  except TypeError:
+    return st.camera_input(label, key=key)
 
 
 def job_photos() -> list[dict]:
@@ -7544,6 +7553,20 @@ with tab3, guard("Diagnose tab"):
       with _pc1:
         _new_photos = st.file_uploader("📸 Add photos to this job", type=["png", "jpg", "jpeg", "webp"],
                                        accept_multiple_files=True, key=f"job_photos_{ss.get('photo_n', 0)}_{ss.get('job_n', 0)}")
+        if st.toggle("📷 Use the camera", key="job_cam_on"):
+          _shot = camera_shot("Snap a photo for this job", key=f"job_cam_{ss.get('photo_n', 0)}_{ss.get('job_n', 0)}")
+          if _shot is not None and st.button("💾 Attach this photo to the job", key="job_cam_add"):
+            autosave_job(force=True)
+            if not ss.get("job_id"):
+              st.warning("Add a customer, vehicle or code first so there's a job to attach it to.")
+            elif len(job_photos()) >= 12:
+              st.warning("This job already has 12 photos (the max).")
+            else:
+              store_put("jobphoto", f"{ss.job_id}-{datetime.now().strftime('%H%M%S%f')}c",
+                        {"job": ss.job_id, "b64": shrink_to_b64(_shot.getvalue()), "name": "camera",
+                         "at": datetime.now().strftime("%Y-%m-%d %I:%M %p")})
+              ss.photo_n = ss.get("photo_n", 0) + 1   # empty the camera for the next one
+              queue_update(toast="Photo attached to the job")
         if _new_photos and st.button(f"💾 Attach {len(_new_photos)} photo(s) to the job"):
           autosave_job(force=True)
           if not ss.get("job_id"):
@@ -7965,16 +7988,36 @@ with tab6, guard("Knowledge tab"):
     st.caption("Lay the page flat in good light, whole page in the frame. A few pages at a time works best "
                "(up to 6 per batch). You'll check every note before it's saved.")
     kc1, kc2 = st.columns([2, 1])
-    pages = kc1.file_uploader("Page photos", type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True,
+    pages = kc1.file_uploader("Upload page photos (on a phone this also offers Take Photo — the sharpest option)",
+                              type=["png", "jpg", "jpeg", "webp"], accept_multiple_files=True,
                               key=f"know_pages_{ss.get('know_n', 0)}") or []
     src = kc2.text_input("Source (book, chapter or page)", key="know_src", placeholder="e.g. Steckler scope book, ch. 3")
-    if pages and st.button(f"🧠 Pull the testing info from {min(len(pages), 6)} page(s)", type="primary"):
+    # 📷 camera: snap a page, add it, snap the next one
+    if st.toggle("📷 Use the camera — snap pages one at a time", key="know_cam_on"):
+      st.caption("If it opens the selfie camera, tap the flip-camera icon. Hold the phone straight over the page.")
+      shot = camera_shot("Snap a page", key=f"know_cam_{ss.get('know_n', 0)}_{ss.get('know_cam_n', 0)}")
+      if shot is not None and st.button("➕ Add this page", key="know_cam_add", type="primary"):
+        ss.know_cam_pages = (ss.get("know_cam_pages") or []) + [shot.getvalue()]
+        ss.know_cam_n = ss.get("know_cam_n", 0) + 1   # empties the camera for the next page
+        st.rerun()
+    cam_pages = ss.get("know_cam_pages") or []
+    if cam_pages:
+      st.caption(f"📷 {len(cam_pages)} page(s) from the camera, ready to read:")
+      st.image(cam_pages, width=110)
+      if st.button("🗑️ Clear camera pages", key="know_cam_clear"):
+        ss.know_cam_pages = []
+        st.rerun()
+    all_pages = [(getattr(f, "name", "a photo"), f.getvalue()) for f in pages] + \
+        [(f"camera page {i + 1}", b) for i, b in enumerate(cam_pages)]
+    if len(all_pages) > 6:
+      st.caption(f"{len(all_pages)} pages added — the first 6 are read in this batch; do the rest in the next one.")
+    if all_pages and st.button(f"🧠 Pull the testing info from {min(len(all_pages), 6)} page(s)", type="primary"):
       imgs = []
-      for f in pages[:6]:
+      for name_, raw_ in all_pages[:6]:
         try:
-          imgs.append(shrink_to_b64(f.getvalue(), 1800, 85))
+          imgs.append(shrink_to_b64(raw_, 1800, 85))
         except Exception:
-          st.warning(f"Couldn't open {getattr(f, 'name', 'a photo')}.")
+          st.warning(f"Couldn't open {name_}.")
       if imgs:
         with st.spinner("Reading the pages and writing notes..."):
           raw_ans, who = quick_ai(KNOW_EXTRACT_PROMPT, image_b64=imgs, max_tokens=12000, effort="medium")
@@ -7989,6 +8032,7 @@ with tab6, guard("Knowledge tab"):
                               "Applies to": str(x.get("applies_to") or "All")[:60], "Note": str(x.get("rule")).strip()[:600]}
                              for x in found]
           ss.know_pending_src, ss.know_pending_who = src.strip(), who
+          ss.know_cam_pages = cam_pages[max(0, 6 - len(pages)):]   # keep any camera pages that didn't fit in this batch
     if ss.get("know_pending"):
       st.markdown(f"**{len(ss.know_pending)} note(s) found** — fix anything that's off, untick what you don't want, then save. "
                   f"<small>({ss.get('know_pending_who', '')})</small>", unsafe_allow_html=True)
