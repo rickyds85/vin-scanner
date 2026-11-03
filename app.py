@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-04"
+APP_VERSION = "2026-11-06"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -78,6 +78,16 @@ WHATS_NEW = [
     "and 📌 Save to Knowledge turns a good answer into a note",
     "BETTER: The scanner's live drive check, test drive reviews, step-card questions, drive cycle plans and scope data "
     "checks now use your Knowledge notes too",
+    "NEW: 🎥 Videos in the chat — Gemini watches and listens (noises, shakes, smoke, scope or scan-tool screens) and "
+    "reports to the rest of the team; follow-up questions keep using the same video",
+    "NEW: 🤝 Chat answers now come from all the AIs checking each other by default (untick it for a quick one-AI answer)",
+    "NEW: 🔆 Keep screen on (top right) stops the phone locking while the app is open; chat answers are worked out in "
+    "the background and saved, so locking the phone or switching tabs can't lose them, and a reload brings the chat back",
+    "NEW: 🧪 The AI runs its own tests — after an AI Check it lists the tests it wants (O2 sensor response, purge leak, "
+    "fuel pressure hold, idle, vacuum, charging, cranking, Mode $06, monitors, test drive). Tap Run and the app does them, "
+    "tells you out loud when to rev it, snap it or pinch a hose, then sends the results back to the AI team for a follow-up",
+    "FIX: Factory (enhanced) readings that can't be right — like 138 psi barometric pressure or a 2961 gear ratio — are "
+    "now hidden, and a group that disagrees with the standard readings is dropped, so they don't confuse you or the AI",
 ]
 
 st.markdown(
@@ -117,6 +127,7 @@ div[data-baseweb="input"] > div, div[data-baseweb="select"] > div, div[data-base
 .tdg-bar .dtc {{ font-family:'JetBrains Mono',monospace; font-weight:600; padding:3px 10px; border-radius:6px; }}
 .tdg-next {{ flex-basis:100%; color:#8B9BB4; font-size:.8rem; }}
 .tdg-next b {{ color:#10B981; }}
+.st-key-quickhelp {{ border-color: rgba(16,185,129,.45) !important; background: rgba(16,185,129,.04); }}
 /* simple view: big status cards + step cards */
 .tdg-card {{ border-radius:12px; padding:12px 14px; margin-bottom:10px; border:1px solid rgba(255,255,255,.08); color:#F1F5F9; }}
 .tdg-card small {{ color:rgba(241,245,249,.8); }}
@@ -359,6 +370,12 @@ def _store_versions() -> dict:
   return {}
 
 
+# ---- Background AI jobs: a long AI answer can't be cut off by a page refresh, a tap, or the phone locking ----
+@st.cache_resource
+def _ai_jobs() -> dict:
+  return {}
+
+
 def _bump(kind: str):
   v = _store_versions()
   v[kind] = v.get(kind, 0) + 1
@@ -531,6 +548,60 @@ def gemini(parts: list, *, json_mode: bool = False, timeout: int = 60) -> str:
   if not text.strip():
     raise AIError("Gemini returned an empty answer. Try again.")
   return text
+
+
+GEMINI_UPLOAD_URL = "https://generativelanguage.googleapis.com/upload/v1beta/files"
+GEMINI_FILE_URL = "https://generativelanguage.googleapis.com/v1beta/{name}"
+VIDEO_TYPES = {"mp4": "video/mp4", "m4v": "video/mp4", "mov": "video/mov", "webm": "video/webm", "3gp": "video/3gpp",
+               "avi": "video/avi", "mpeg": "video/mpeg", "mpg": "video/mpg", "wmv": "video/wmv"}
+PHOTO_TYPES = ["png", "jpg", "jpeg", "webp"]
+
+
+def video_mime(name: str) -> str:
+  return VIDEO_TYPES.get(str(name).rsplit(".", 1)[-1].lower(), "video/mp4")
+
+
+def is_video(name: str) -> bool:
+  return str(name).rsplit(".", 1)[-1].lower() in VIDEO_TYPES
+
+
+def gemini_upload(data: bytes, mime: str, name: str = "video", wait: int = 240) -> dict:
+  """Send a video to Gemini's file store (videos are too big to send inline) and wait until Gemini has processed it.
+  Returns {"uri", "mime", "name", "at"}. Google deletes these files by itself after 48 hours."""
+  key = secret("GEMINI_API_KEY")
+  if not key:
+    raise AIError("GEMINI_API_KEY is missing from Streamlit Secrets — Gemini is the AI that watches and listens to videos.")
+  s = http()
+  try:
+    r = s.post(GEMINI_UPLOAD_URL, timeout=30, json={"file": {"display_name": str(name)[:100]}},
+               headers={"x-goog-api-key": key, "X-Goog-Upload-Protocol": "resumable", "X-Goog-Upload-Command": "start",
+                        "X-Goog-Upload-Header-Content-Length": str(len(data)), "X-Goog-Upload-Header-Content-Type": mime,
+                        "Content-Type": "application/json"})
+    url = r.headers.get("x-goog-upload-url")
+    if r.status_code != 200 or not url:
+      raise AIError(f"Couldn't start sending the video to Gemini (HTTP {r.status_code}): {r.text[:200]}")
+    r = s.post(url, data=data, timeout=600, headers={"Content-Length": str(len(data)), "X-Goog-Upload-Offset": "0",
+                                                     "X-Goog-Upload-Command": "upload, finalize"})
+    if r.status_code != 200:
+      raise AIError(f"Sending the video to Gemini failed (HTTP {r.status_code}): {r.text[:200]}")
+    f = r.json().get("file") or {}
+    t0 = time.time()
+    while f.get("name") and f.get("state") not in ("ACTIVE", "FAILED") and time.time() - t0 < wait:
+      time.sleep(3)
+      g = s.get(GEMINI_FILE_URL.format(name=f["name"]), headers={"x-goog-api-key": key}, timeout=20)
+      if g.status_code == 200:
+        f = g.json()
+  except requests.RequestException as e:
+    raise AIError(f"Video upload connection error: {e}") from e
+  except ValueError as e:
+    raise AIError("Gemini sent back an unreadable answer about the video.") from e
+  if f.get("state") != "ACTIVE" or not f.get("uri"):
+    raise AIError(f"Gemini couldn't process the video (state: {f.get('state') or 'unknown'}). Try a shorter clip (under a minute works best).")
+  return {"uri": f["uri"], "mime": f.get("mimeType") or mime, "name": str(name), "at": time.time()}
+
+
+def video_parts(refs: list) -> list:
+  return [{"file_data": {"mime_type": v["mime"], "file_uri": v["uri"]}} for v in refs or [] if v.get("uri")]
 
 
 def ask_gemini(prompt: str) -> str:
@@ -849,7 +920,7 @@ INSTRUCTIONS:
 
 def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: bool, status=None, *,
                 question: str = "", image_b64="", fast: bool = False, research: str = "",
-                effort: str | None = None) -> tuple[str, str, str, str]:
+                effort: str | None = None, extra_parts: list | None = None) -> tuple[str, str, str, str]:
   """The whole team on one job: Perplexity researches -> Gemini and DeepSeek draft at the same time
   -> Claude checks both (and the photo, if any) and writes the final answer.
   Steps are skipped if their key isn't set. fast=True = short answers (live test drive checks).
@@ -866,15 +937,16 @@ def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: b
     status.update(label=f"{writers} working on it" + (" with the web research..." if research else "..."))
   pool, ds_job = None, None
   if has_deepseek():   # DeepSeek runs in the background while Gemini works, so it adds no wait time
-    ds_prompt = full + ("\n\nNOTE: the technician attached photo(s) (scope, meter, wiring diagram or part) that you cannot see. "
-                        "Work from the text; another technician is reading the photos." if _img_list(image_b64) else "")
+    ds_prompt = full + ("\n\nNOTE: the technician attached photo(s) or a video that you cannot see. "
+                        "Work from the text (and the VIDEO REPORT, if there is one); another technician is looking at them."
+                        if _img_list(image_b64) or extra_parts else "")
     pool = ThreadPoolExecutor(max_workers=1)
     # its own connection: the shared one isn't guaranteed safe while Gemini uses it at the same time
     ds_job = pool.submit(_deepseek_raw, secret("DEEPSEEK_API_KEY"), deepseek_model(), requests.Session(),
                          ds_prompt, tokens, 60 if fast else 120, _model_swaps())
   try:
-    parts = [{"text": full}] + [{"inline_data": {"mime_type": "image/jpeg", "data": b}} for b in _img_list(image_b64)]
-    draft = gemini(parts, timeout=45 if fast else 60)
+    parts = [{"text": full}] + [{"inline_data": {"mime_type": "image/jpeg", "data": b}} for b in _img_list(image_b64)] + (extra_parts or [])
+    draft = gemini(parts, timeout=45 if fast else (150 if extra_parts else 60))
   except AIError as e:
     gem_err = str(e)
   if ds_job:
@@ -2201,7 +2273,8 @@ def job_snapshot() -> dict:
   d = {k: ss.get(k) for k in JOB_FIELDS}
   # photos stay out of storage (too big); the text of the chat is kept
   d["chat_history"] = [{"role": m.get("role"), "content": m.get("content"), "photos_n": len(m.get("photos") or []) or m.get("photos_n", 0),
-                        "chat_id": m.get("chat_id")}
+                        "chat_id": m.get("chat_id"), "who": m.get("who", ""), "videos": m.get("videos") or [],
+                        "video_names": m.get("video_names") or [], "reused_video": bool(m.get("reused_video"))}
                        for m in (ss.get("chat_history") or [])][-40:]
   return d
 
@@ -2526,6 +2599,30 @@ def _set_cookie(tok: str, max_age: int):
                   f" + (location.protocol === 'https:' ? '; Secure' : '');</script>", height=0)
 
 
+def keep_screen_on(on: bool):
+  """Screen Wake Lock on the app's page: the phone won't dim and lock while the app is open and on screen. The browser
+  drops the lock when you switch away, so it's taken again whenever the app comes back or is tapped."""
+  components.html("""<script>
+  const w = window.parent;
+  w.__tdgKeepOn = %s;
+  async function lock() {
+    try {
+      if (!w.__tdgKeepOn || !("wakeLock" in w.navigator) || w.document.visibilityState !== "visible") return;
+      if (w.__tdgWake && !w.__tdgWake.released) return;
+      w.__tdgWake = await w.navigator.wakeLock.request("screen");
+    } catch (e) {}
+  }
+  if (!w.__tdgWakeHooked) {
+    w.__tdgWakeHooked = true;
+    w.document.addEventListener("visibilitychange", lock);
+    w.document.addEventListener("click", lock, { passive: true });
+    w.document.addEventListener("touchend", lock, { passive: true });
+  }
+  if (w.__tdgKeepOn) lock();
+  else if (w.__tdgWake) { try { w.__tdgWake.release(); } catch (e) {} w.__tdgWake = null; }
+  </script>""" % ("true" if on else "false"), height=0)
+
+
 def require_password():
   users = shop_users()
   if not users:
@@ -2609,6 +2706,9 @@ if "ble_vin" in st.query_params or "ble_dtc" in st.query_params:
 # --- CARS IN THE SHOP (open jobs) ---
 # ========================================================
 if (_jr := ss.pop("_job_request", None)) is not None:
+  ss.chat_conv, ss._chat_pending = None, None   # a different car = a new conversation
+  if "chat" in st.query_params:
+    del st.query_params["chat"]
   if _jr == "new":
     new_job()
   elif not load_job(_jr):
@@ -2706,6 +2806,10 @@ with guard("Cars in the shop"):
       st.query_params["view"] = "simple"
     elif not ss.simple_view and "view" in st.query_params:
       del st.query_params["view"]
+    st.toggle("🔆 Keep screen on", value=True, key="keep_on",
+              help="Stops the phone from locking while the app is open, so it doesn't reset in the middle of a job. "
+                   "Uses a little more battery — turn it off when you don't need it.")
+    keep_screen_on(bool(ss.get("keep_on", True)))
     with st.expander("🆕 What's new"):
       st.markdown("\n".join(f"- {w}" for w in WHATS_NEW))
 
@@ -3259,6 +3363,7 @@ canvas.tplot { background: rgba(15,22,36,.85); border: 1px solid var(--line); bo
   <div id="m6Box" class="box">Loads automatically on connect.</div>
 
   <h3 style="color:var(--o)">🤖 AI MASTER TECH EVALUATION</h3>
+  <div id="runBox" class="box" style="display:none;border-color:var(--o)"></div>
   <div id="aiBox" class="box">Connect, let it stream for a few seconds, then tap AI Check.</div>
 </div>
 
@@ -3282,6 +3387,7 @@ window.addEventListener("message", (e) => {
     lastAiShown = a.ai.id;
     if (a.ai.id === aiPendingId) aiPendingId = null;
     showAi(a.ai.text, a.ai.label);
+    if (typeof offerTests === "function") offerTests(a.ai.tests || []);
   }
   fitHeight();
 });
@@ -4279,6 +4385,34 @@ function fmtOem(sig, v) {
     default: return r1(x) + " " + sig.unit;
   }
 }
+// Readings that can't physically be right mean the factory data list doesn't fit this car (wrong year or layout): hide them.
+function oemSane(g, text) {
+  const n = String(g.name || "").toLowerCase(), val = toNumber(text);
+  if (/navigation|gps|latitude|longitude|compass|altitude/.test(n)) return false;
+  if (val == null || !isFinite(val)) return true;
+  const psi = / psi$/.test(text), pctU = /%$/.test(text);
+  if (/baro/.test(n)) return !psi || (val >= 7 && val <= 16.5);
+  if (/(tank|evap|vapou?r).*press|press.*(tank|evap|vapou?r)/.test(n)) return !psi || Math.abs(val) <= 3;
+  if (psi && val > 400 && !/rail|fuel press|inject|high.?press|hydraul|brake|line press|clutch|oil press|refrig|a\/c|ac press|boost|turbo/.test(n)) return false;
+  if (/ratio/.test(n) && !pctU) return /speed ratio|slip/.test(n) ? val >= 0 && val <= 2.5 : val >= 0 && val <= 8;
+  if (/steer/.test(n) && /angle/.test(n)) return Math.abs(val) <= 1000;
+  if (/rpm|engine speed|turbine speed|shaft speed/.test(n) && !pctU) return val >= -50 && val <= 12000;
+  if (/ V$/.test(text)) return val >= -1 && val <= 32;
+  if (pctU) return val >= -150 && val <= 250;
+  if (/ mph$/.test(text)) return val >= 0 && val <= 200;
+  return true;
+}
+// A factory reading that disagrees with the same thing read the standard way = that request is decoded wrong on this car.
+function oemDisagrees(g, text) {
+  const n = String(g.name || "").toLowerCase(), val = toNumber(text);
+  if (val == null || !isFinite(val)) return false;
+  const off = (a, b, tol) => Math.abs(a - b) > tol;
+  if (/baro/.test(n) && / psi$/.test(text) && fresh("baro", 60)) { const std = num.baro * 0.4912; return off(val, std, Math.max(0.8, std * 0.1)); }
+  if (/fuel level/.test(n) && /%$/.test(text) && fresh("fli", 60)) return off(val, num.fli, 15);
+  if (/^(engine )?(speed|rpm)$|^engine rpm$/.test(n) && fresh("rpm", 3)) return off(val, num.rpm, Math.max(200, num.rpm * 0.2));
+  if (/coolant temp/.test(n) && /°F$/.test(text) && fresh("ect", 60)) return off(val, num.ect, 20);
+  return false;
+}
 function cleanName(n) {
   n = n.replace(/,?\s*(v\.?\s?\d+|var\.?\s?\d+|variation \d+)\s*$/i, "").replace(/,\s*$/, "").trim();
   return n.charAt(0).toUpperCase() + n.slice(1);
@@ -4409,14 +4543,23 @@ async function pollEnhanced() {
     const mod = oemModules[c.hdr] || (oemModules[c.hdr] = { alive: false, silent: 0 });
     const { bytes, replied } = await readOem(c);
     if (replied || bytes) mod.alive = true; else mod.silent++;
-    let any = false;
+    let any = false, wrong = false;
+    const vals = [];
     if (bytes) for (const g of c.sigs) {
       const v = extractBits(bytes, g.bix, g.len, g.lsb, g.sign);
       const text = v == null ? null : fmtOem(g, v);
       if (text == null) continue;
-      any = true;
-      setTile(oemTile(g), text);
+      if (oemDisagrees(g, text)) { wrong = true; break; }
+      if (!oemSane(g, text)) continue;
+      vals.push([g, text]);
     }
+    if (wrong) {   // it disagrees with the same reading done the standard way: this request's layout doesn't fit this car
+      c.state = "dead";
+      c.sigs.forEach((g) => { delete shown[oemTile(g)]; delete num[oemTile(g)]; });
+      logEvent("scanner", "Enhanced PIDs", `Hid ${c.req} (${c.sigs.length} readings): they don't match the standard readings, so that factory layout doesn't fit this car`);
+      continue;
+    }
+    for (const [g, text] of vals) { any = true; setTile(oemTile(g), text); }
     if (c.state === "new") c.state = any ? "live" : "dead";
     else if (any) c.miss = 0;
     else if (++c.miss >= 3) c.state = "dead";
@@ -4733,18 +4876,19 @@ async function liveLoop(token) {
   let cycle = 0, t0 = performance.now(), cmds = 0;
   while (token === loopToken) {
     cycle++;
-    const due = active.filter((p) => cycle === 1 || cycle % TIER_EVERY[PIDS[p].tier] === 0);
+    const due = FOCUS ? active.filter((p) => FOCUS.includes(p))   // a test needs these fast: read only them
+                      : active.filter((p) => cycle === 1 || cycle % TIER_EVERY[PIDS[p].tier] === 0);
     await txn(() => pollPids(due));
     cmds += batchOK ? Math.ceil(due.length / 6) : due.length;
     if (token !== loopToken) break;
-    if (cycle % 6 === 0) {
+    if (cycle % 6 === 0 && !FOCUS) {
       const r = await txn(() => sendCmd("ATRV", 600));
       const m = (r || "").match(/(\d+\.\d+)/);
       if (m) setTile("volt", parseFloat(m[1]).toFixed(1) + " V", parseFloat(m[1]));
     }
     const discovering = oemCmds.some((c) => c.state === "new");
-    if (oemCmds.length && cycle % (discovering ? 2 : 3) === 0) await txn(pollEnhanced);
-    await extraPolls(cycle);
+    if (oemCmds.length && !FOCUS && cycle % (discovering ? 2 : 3) === 0) await txn(pollEnhanced);
+    if (!FOCUS) await extraPolls(cycle);
     if (cycle % 10 === 0) {
       const secs = (performance.now() - t0) / 1000;
       $("rate").textContent = `· ${(cycle / secs).toFixed(1)} refresh/s${batchOK ? " · multi-PID" : ""}`;
@@ -4966,13 +5110,14 @@ function requestAi(mode) {
   if (aiPendingId) return;
   aiPendingId = "ai-" + Date.now();
   const id = aiPendingId, t0 = Date.now();
-  const tick = () => { if (aiPendingId === id && mode === "full")
+  const tick = () => { if (aiPendingId === id && mode !== "drive")
     $("aiBox").innerHTML = `<span style="color:var(--o)">🤖 The AI team is analyzing live data, codes, monitors, Mode $06 and test results… ${Math.round((Date.now() - t0) / 1000)} s (usually 1–2 min)</span>`; };
-  sendValue({ type: "ai", id: aiPendingId, mode, at: new Date().toLocaleTimeString(), pids: snapshot(), dtcs, readiness: readinessSummary, mode6: mode6Summary, tests: T.results || {}, flags: plausNow() });
+  sendValue({ type: "ai", id: aiPendingId, mode, at: new Date().toLocaleTimeString(), pids: snapshot(), dtcs, readiness: readinessSummary, mode6: mode6Summary, tests: T.results || {}, flags: plausNow(),
+              ran: RUN.ran.slice() });
   tick();
   const timer = setInterval(() => { if (aiPendingId !== id) clearInterval(timer); else tick(); }, 1000);
   setTimeout(() => { if (aiPendingId === id) { aiPendingId = null; clearInterval(timer);
-    if (mode === "full") $("aiBox").textContent = "No answer after 6 minutes. If it finishes later it will still show here — or tap AI Check to try again.";
+    if (mode !== "drive") $("aiBox").textContent = "No answer after 6 minutes. If it finishes later it will still show here — or tap AI Check to try again.";
     logEvent("ai", "AI check (" + mode + ")", "No answer from the app within 6 min"); } }, 360000);
 }
 function showAi(text, label) {
@@ -5244,7 +5389,7 @@ function stopDriveTests() {
   const n = Object.keys(D.done).length;
   lastSpeak = 0; speak(`Test drive done. ${n} test${n === 1 ? "" : "s"} completed. Results are on screen.`);
   aiPendingId = null;  // don't let a pending mid-drive check block the final review
-  requestAi("full");   // full AI review including the test results
+  requestAi(RUN.on ? "followup" : "full");   // full AI review including the test results (a follow-up if the AI asked for the drive)
 }
 function driveReportHtml() {
   const D = T.drive, rows = [];
@@ -5789,7 +5934,7 @@ function renderFreeze() {
 let misRR = 0, misLive = {}, misEvents = [], r41 = null;
 async function extraPolls(cycle) {
   if (!isCan) return;
-  const focus = T.drive.on || ["mis", "rdy"].includes(testTab);
+  const focus = T.drive.on || RUN.on || ["mis", "rdy"].includes(testTab);
   if (misMids.length && cycle % (focus ? 3 : 15) === 0) await txn(pollMisfires);
   if (cycle % (focus ? 10 : 40) === 0) await txn(pollMonitors41);
 }
@@ -6421,6 +6566,332 @@ function drawExtraPlots() {
   }
 }
 
+// ===================== 🧪 AI test runner: the app runs the tests the AI asks for =====================
+// The AI check ends with a list of tests from this catalog. One tap and the app runs them in order, saying out loud
+// when the tech has to do something (rev it, snap it, pinch a hose), then sends the results straight back to the AI team.
+const AUTO_TESTS = {
+  mode06:   { name: "Re-read Mode $06 results", phase: 0, mins: 0.3 },
+  monitors: { name: "Re-read readiness monitors", phase: 0, mins: 0.1 },
+  fuelhold: { name: "Fuel pressure hold — key on, engine off (2 min)", phase: 1, mins: 2.5 },
+  crank:    { name: "Cranking / starting test", phase: 1, mins: 0.7 },
+  idle:     { name: "Warm idle check — trims, O2s, misfires (1 min)", phase: 2, mins: 1.2 },
+  purge:    { name: "EVAP purge check — you pinch the purge hose when told", phase: 2, mins: 1.7 },
+  o2:       { name: "O2 sensor response — idle, 2,500 RPM, snap, let off", phase: 3, mins: 1.5 },
+  vacuum:   { name: "Vacuum test from the MAP sensor — idle, snap, 2,500 hold", phase: 3, mins: 1.3 },
+  charging: { name: "Charging — idle, then headlights + blower + defroster on", phase: 3, mins: 0.7 },
+  drive:    { name: "Test drive — catalyst, fuel trims under load, transmission", phase: 4, mins: 10 },
+};
+const RUN = { offer: [], on: false, list: [], i: 0, step: "", left: null, stop: false, skip: false, ran: [] };
+let FOCUS = null;   // while a test needs fast readings, the live loop reads only these PIDs
+let lastRunRender = 0;
+function offerTests(ids) { RUN.offer = (ids || []).filter((x) => AUTO_TESTS[x] && !RUN.ran.includes(x)); renderRun(true); }
+function renderRun(force) {
+  const box = $("runBox"); if (!box) return;
+  if (!force && nowS() - lastRunRender < 0.4) return;
+  lastRunRender = nowS();
+  if (RUN.on) {
+    const id = RUN.list[RUN.i], t = AUTO_TESTS[id];
+    box.style.display = "block";
+    box.innerHTML = `<b>🧪 Running the AI's tests — ${RUN.i + 1} of ${RUN.list.length}: ${t ? t.name : ""}</b>
+      <div style="font-size:1.2rem;margin:8px 0;color:var(--o);font-weight:700">${esc(RUN.step)}${RUN.left != null ? ` <span class="note">(${RUN.left} s)</span>` : ""}</div>
+      <button class="tbtn sec" data-run="skip">Skip this test</button> <button class="tbtn sec" data-run="stop">Stop all</button>
+      <div class="note" style="margin-top:6px">${RUN.list.map((x, k) => (k < RUN.i ? "✅ " : k === RUN.i ? "▶️ " : "⬜ ") + AUTO_TESTS[x].name).join("<br>")}</div>`;
+  } else if (RUN.offer.length) {
+    const mins = Math.max(1, Math.round(RUN.offer.filter((x) => x !== "drive").reduce((s, x) => s + AUTO_TESTS[x].mins, 0)));
+    box.style.display = "block";
+    box.innerHTML = `<b>🧪 The AI wants to run ${RUN.offer.length} test${RUN.offer.length > 1 ? "s" : ""} itself:</b><br>
+      ${RUN.offer.map((x) => "• " + AUTO_TESTS[x].name).join("<br>")}
+      <div style="margin-top:8px"><button class="tbtn" data-run="go">▶ Run them now</button>
+      <span class="note">about ${mins} min${RUN.offer.includes("drive") ? " plus the drive" : ""} · it tells you out loud when to touch the pedal or a hose,
+      then sends the results straight back to the AI team</span></div>`;
+  } else box.style.display = "none";
+  fitHeight();
+}
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-run]"); if (!b) return;
+  const a = b.dataset.run;
+  if (a === "go") runTests(RUN.offer.slice());
+  else if (a === "skip") RUN.skip = true;
+  else if (a === "stop") RUN.stop = true;
+});
+function runSay(text, talk = true) { RUN.step = text; RUN.left = null; renderRun(true); if (talk) { lastSpeak = 0; speak(text); } }
+const runAbort = () => RUN.stop || RUN.skip;
+async function runWait(cond, secs, countdown = true) {   // wait until cond() is true; false on time-out / skip / stop
+  const t0 = nowS();
+  while (!runAbort()) {
+    if (cond()) { RUN.left = null; return true; }
+    const left = secs - (nowS() - t0);
+    if (left <= 0) break;
+    RUN.left = countdown ? Math.ceil(left) : null; renderRun();
+    await sleep(250);
+  }
+  RUN.left = null;
+  return false;
+}
+async function runRecord(secs, keys, okFn) {   // sample these readings for `secs` seconds of time that okFn() allows
+  const out = [], t0 = nowS(), lastT = {};
+  let good = 0, last = nowS();
+  while (!runAbort() && good < secs && nowS() - t0 < secs * 4 + 30) {
+    await sleep(120);
+    const t = nowS(), ok = !okFn || okFn();
+    if (ok) good += t - last;
+    last = t;
+    RUN.left = Math.max(0, Math.ceil(secs - good)); renderRun();
+    if (!ok) continue;
+    if (keys.some((k) => numT[k] && numT[k] !== lastT[k])) {   // a new sample whenever any reading was refreshed
+      keys.forEach((k) => (lastT[k] = numT[k]));
+      out.push([t, ...keys.map((k) => (fresh(k, 3) ? num[k] : null))]);
+    }
+  }
+  RUN.left = null;
+  return out;
+}
+const runIdling = () => fresh("rpm", 3) && num.rpm > 400 && num.rpm < 1300 && (num.spd ?? 0) < 1;
+const runRunning = () => fresh("rpm", 3) && num.rpm > 400;
+const runEngineOff = () => !fresh("rpm", 5) || (num.rpm ?? 0) < 50;
+async function runNeedWarmIdle() {
+  if (!runRunning()) { runSay("Start the engine and let it idle."); if (!await runWait(runRunning, 120)) return false; }
+  if ((num.ect ?? 200) < 170) {
+    runSay(`Let it warm up first — coolant is ${Math.round(num.ect)}°F, the test needs about 170.`);
+    if (!await runWait(() => (num.ect ?? 200) >= 170, 900)) return false;
+  }
+  if (!runIdling()) { runSay("Let it idle in Park or Neutral, foot off the gas."); if (!await runWait(runIdling, 45)) return false; }
+  return true;
+}
+const colOf = (rows, keys, k) => rows.map((r) => r[keys.indexOf(k) + 1]).filter((x) => x != null && isFinite(x));
+const r1 = (x, d = 1) => (x == null || !isFinite(x) ? null : +x.toFixed(d));
+function runSkipped(name, why) { reportTest(name, { skipped: true, verdict: why }, true); }
+async function runTests(ids) {
+  if (!connected) { alert("Connect to the vehicle first."); return; }
+  if (RUN.on) return;
+  ids = ids.filter((x) => AUTO_TESTS[x]).sort((a, b) => AUTO_TESTS[a].phase - AUTO_TESTS[b].phase);
+  Object.assign(RUN, { on: true, list: ids, i: 0, stop: false, skip: false, offer: [], step: "", left: null });
+  if (!streaming) startStream();
+  wake(true);
+  logEvent("tests", "AI test runner", "Running: " + ids.join(", "));
+  let drove = false;
+  for (RUN.i = 0; RUN.i < ids.length && !RUN.stop; RUN.i++) {
+    const id = ids[RUN.i];
+    RUN.skip = false; RUN.left = null; renderRun(true);
+    try { await AUTO_RUN[id](); }
+    catch (e) { logEvent("scanner-crash", "AI test " + id, e.message, e.stack); runSkipped(AUTO_TESTS[id].name, "The test hit an error: " + e.message); }
+    FOCUS = null;
+    if (RUN.skip) runSkipped(AUTO_TESTS[id].name, "Skipped by the technician (or the conditions never happened)");
+    if (!RUN.stop) RUN.ran.push(id);
+    if (id === "drive") drove = true;
+  }
+  FOCUS = null;
+  const stopped = RUN.stop;
+  if (driveOn && stopped) $("driveBtn").click();
+  RUN.on = false; RUN.step = ""; renderRun(true); renderTests();
+  if (!driveOn) wake(false);
+  lastSpeak = 0;
+  if (stopped) { speak("Tests stopped."); return; }
+  if (drove) return;   // ending the test drive already sent everything to the AI team
+  speak("All done. Sending the results to the AI team.");
+  aiPendingId = null; requestAi("followup");
+}
+
+const AUTO_RUN = {
+  async mode06() {
+    runSay("Reading Mode $06 test results…", false);
+    await txn(loadMode6);
+    reportTest("Mode $06 re-read", { results: (mode6Summary || "").slice(0, 2000) }, true);
+  },
+  async monitors() {
+    runSay("Reading the readiness monitors…", false);
+    await txn(loadReadiness);
+    await txn(pollMonitors41);
+    const s = { since_clear: readinessSummary };
+    if (r41) { const rows = readinessRows(r41.B, r41.C, r41.D, true); s.this_drive_complete = rows.filter((r) => r.done).map((r) => r.n); s.this_drive_not_done = rows.filter((r) => !r.done).map((r) => r.n); }
+    reportTest("Readiness re-read", s, true);
+  },
+  async fuelhold() {
+    const name = "Fuel pressure hold (KOEO)", pid = ["23", "0A", "59"].find((p) => active.includes(p));
+    if (!pid) return runSkipped(name, "This car doesn't report fuel pressure to a scan tool — put a gauge on the rail to check pressure and hold.");
+    const tile = PIDS[pid].tile;
+    runSay("Fuel pressure hold test. Shut the engine off and leave the key ON. Don't crank it.");
+    if (!await runWait(runEngineOff, 120)) return;
+    FOCUS = [pid, "0C"];
+    runSay("Leave the key on and don't touch anything. Recording fuel pressure for 2 minutes.");
+    const rows = await runRecord(120, [tile], null);
+    FOCUS = null;
+    if (runAbort()) return;
+    const v = colOf(rows, [tile], tile);
+    if (v.length < 6) return runSkipped(name, "Not enough fuel pressure readings came back.");
+    const start = avg(v.slice(0, 4)), end = avg(v.slice(-4)), drop = start > 1 ? (start - end) / start * 100 : null;
+    let g = "g", text;
+    if (start < 5) { g = "r"; text = `Almost no fuel pressure with the key on (${start.toFixed(0)} psi) → the pump didn't prime or pressure bleeds off right away (pump check valve, leaking injector, regulator). Cycle the key and watch for the prime.`; }
+    else if (drop > 35) { g = "r"; text = `Pressure fell ${drop.toFixed(0)}% in 2 minutes (${start.toFixed(0)} → ${end.toFixed(0)} psi) → it's leaking down: leaking injector(s) (raw fuel = rich codes, hard hot start), pump check valve, or regulator. Pinch the return/feed line to split it, or pull the rail and watch the injectors.`; }
+    else if (drop > 15) { g = "y"; text = `Pressure fell ${drop.toFixed(0)}% in 2 minutes (${start.toFixed(0)} → ${end.toFixed(0)} psi) — a slow leak-down. Recheck with a gauge over 10–20 minutes before condemning anything.`; }
+    else text = `Pressure held (${start.toFixed(0)} → ${end.toFixed(0)} psi over 2 minutes) → no leaking injectors or check valve.`;
+    reportTest(name, { start_psi: r1(start, 0), end_psi: r1(end, 0), drop_pct: r1(drop, 0), grade: gradeTxt(g), verdict: text }, true);
+    runSay("Done. You can start the engine.");
+  },
+  async crank() {
+    if (!runEngineOff()) { runSay("Cranking test. Shut the engine off and leave the key ON."); if (!await runWait(runEngineOff, 120)) return; }
+    await crankTest();
+    if (!runRunning()) { runSay("Start the engine for the next test."); await runWait(runRunning, 60); }
+  },
+  async idle() {
+    if (!await runNeedWarmIdle()) return;
+    const keys = ["rpm", "stft1", "ltft1", "stft2", "ltft2", "maf", "map", "o2b1s1", "o2b2s1"], m0 = misAnalyze().all;
+    runSay("Idle check. Foot off the gas for one minute.");
+    const rows = await runRecord(60, keys, runIdling);
+    if (runAbort()) return;
+    const rpm = colOf(rows, keys, "rpm"), t1 = avg(colOf(rows, keys, "stft1")) + (avg(colOf(rows, keys, "ltft1")) ?? 0);
+    const st2 = colOf(rows, keys, "stft2"), t2 = st2.length ? avg(st2) + (avg(colOf(rows, keys, "ltft2")) ?? 0) : null;
+    const newMis = misAnalyze().all - m0, wob = rpm.length > 5 ? sd(rpm) : null, out = []; let g = "g";
+    if (wob != null && wob > 60) { g = "r"; out.push(`Idle is rough — RPM swings ±${wob.toFixed(0)}.`); } else if (wob != null && wob > 30) { g = "y"; out.push(`Idle is a bit unsteady (±${wob.toFixed(0)} RPM).`); } else if (wob != null) out.push("Idle RPM is steady.");
+    for (const [b, t] of [["Bank 1", t1], ["Bank 2", t2]]) if (t != null && isFinite(t)) { const a = Math.abs(t); if (a > 15) g = "r"; else if (a > 10 && g === "g") g = "y"; out.push(`${b} total trim ${fmtF(t)}% ${a <= 10 ? "(normal)" : t > 0 ? "(lean)" : "(rich)"}.`); }
+    if (newMis > 0) { g = "r"; out.push(`${newMis} misfire(s) counted during the minute — ${misAnalyze().text.replace(/<[^>]+>/g, "")}`); } else if (misMids.length) out.push("No misfires counted.");
+    reportTest("Warm idle check", { rpm_avg: r1(avg(rpm), 0), rpm_swing: r1(wob, 0), total_trim_b1: r1(t1), total_trim_b2: r1(t2), maf_gs: r1(avg(colOf(rows, keys, "maf"))),
+      map_psi: r1(avg(colOf(rows, keys, "map"))), new_misfires: newMis, grade: gradeTxt(g), verdict: out.join(" ") }, true);
+  },
+  async purge() {
+    const name = "EVAP purge check";
+    if (!await runNeedWarmIdle()) return;
+    const keys = ["stft1", "ltft1", "stft2", "ltft2", "evap", "o2b1s1", "o2b2s1"];
+    FOCUS = ["0C", "0D", "06", "07", "08", "09", "2E"].filter((p) => active.includes(p));
+    runSay("Purge check. Step 1: let it idle. Recording normal fuel trims for 40 seconds.");
+    const base = await runRecord(40, keys, runIdling);
+    if (runAbort()) return;
+    runSay("Step 2: find the purge hose — from the purge valve to the intake. Get ready to pinch it shut.");
+    await runWait(() => false, 8);
+    if (runAbort()) return;
+    runSay("Pinch it shut now and hold it.");
+    const pinch = await runRecord(20, keys, runIdling);
+    if (runAbort()) return;
+    runSay("Let go of the hose.");
+    const after = await runRecord(15, keys, runIdling);
+    FOCUS = null;
+    if (runAbort()) return;
+    const tot = (rows) => { const b1 = avg(colOf(rows, keys, "stft1")), l1 = avg(colOf(rows, keys, "ltft1")) ?? 0, b2 = avg(colOf(rows, keys, "stft2")), l2 = avg(colOf(rows, keys, "ltft2")) ?? 0;
+      const v = [b1 != null ? b1 + l1 : null, b2 != null ? b2 + l2 : null].filter((x) => x != null); return v.length ? avg(v) : null; };
+    const B = tot(base), P = tot(pinch), A = tot(after), cmd = avg(colOf(base, keys, "evap")), cmdP = avg(colOf(pinch, keys, "evap"));
+    if (B == null || P == null) return runSkipped(name, "Not enough fuel trim readings came back.");
+    const d = P - B; let g = "g", text;
+    const cmdTxt = cmd == null ? "commanded purge isn't reported on this car" : `purge commanded ${cmd.toFixed(0)}%`;
+    if (Math.abs(d) < 3) text = `Pinching the purge hose barely changed the fuel trims (${fmtF(d)}%, ${cmdTxt}) → purge isn't adding fuel at idle right now, so it's not the cause there.`;
+    else if (d > 0 && cmd != null && cmd < 3 && (cmdP ?? 0) < 3) { g = "r"; text = `Purge is commanded OFF, but pinching the hose moved the trims ${fmtF(d)}% → the purge valve is LEAKING (stuck open). That adds fuel vapor all the time: rich codes, rough idle, hard start right after filling up. Replace the purge valve.`; }
+    else if (d > 0 && d >= 8) { g = "y"; text = `Purge vapor is adding a lot of fuel (trims went ${fmtF(d)}% leaner with the hose pinched, ${cmdTxt}) → a heavily loaded canister (topping off the tank, saturated canister) can set rich codes. Check the canister for liquid fuel and the vent valve.`; }
+    else if (d > 0) text = `Purge adds a normal small amount of fuel (trims ${fmtF(d)}% with the hose pinched, ${cmdTxt}).`;
+    else { g = "y"; text = `Pinching the hose made the trims go ${fmtF(d)}% (richer) — unusual: purge may be pulling air (leak at the canister/lines) instead of vapor. Smoke test the EVAP system.`; }
+    if (A != null && Math.abs(A - B) > 4) text += ` After letting go the trims didn't settle back (${fmtF(A)}% vs ${fmtF(B)}%), so treat this result as a rough guide and repeat it.`;
+    reportTest(name, { trim_base: r1(B), trim_pinched: r1(P), trim_after: r1(A), change_pct: r1(d), purge_cmd_pct: r1(cmd, 0), grade: gradeTxt(g), verdict: text }, true);
+  },
+  async o2() {
+    const name = "O2 sensor response";
+    const pids = {};
+    ["o2b1s1", "o2b2s1", "o2b1s2", "o2b2s2"].forEach((t) => { const p = active.find((x) => PIDS[x] && PIDS[x].tile === t); if (p) pids[t] = p; });
+    if (!pids.o2b1s1 && !pids.o2b2s1) return runSkipped(name, "This car doesn't report the front O2 sensors to a scan tool — scope them instead.");
+    if (!await runNeedWarmIdle()) return;
+    const keys = ["rpm", "tps", "app", "stft1", "stft2", "o2b1s1", "o2b2s1", "o2b1s2", "o2b2s2"];
+    FOCUS = ["0C", "11", "49", "4A", "06", "08", ...Object.values(pids)].filter((p) => active.includes(p));
+    runSay("O2 test. Step 1: let it idle, foot off the gas.");
+    const idle = await runRecord(20, keys, runIdling);
+    if (runAbort()) return;
+    runSay("Step 2: bring it up to 2,500 RPM and hold it steady.");
+    const at2500 = () => fresh("rpm", 2) && num.rpm >= 2100 && num.rpm <= 2900;
+    let hold = [];
+    if (await runWait(at2500, 30)) { runSay("Hold it right there.", false); hold = await runRecord(20, keys, at2500); }
+    if (runAbort()) return;
+    runSay("Step 3: let it drop to idle, then snap the throttle wide open and let go right away.");
+    await runWait(runIdling, 15);
+    const tpsIdle = avg(colOf(idle, keys, "tps")) ?? num.tps ?? 15;
+    const snapped = () => (fresh("tps", 2) && num.tps >= tpsIdle + 30) || (fresh("rpm", 2) && num.rpm > 3600);
+    let snap = [];
+    if (await runWait(snapped, 20)) snap = await runRecord(6, keys, null);
+    FOCUS = null;
+    if (runAbort()) return;
+    runSay("Done. Let it idle.", false);
+    const res = o2Analyze(keys, idle, hold, snap, pids);
+    reportTest(name, res, true);
+  },
+  async vacuum() {
+    if (!active.includes("0B")) return runSkipped("Vacuum (MAP)", "This car doesn't report a MAP sensor — use a vacuum gauge or a pressure transducer.");
+    if (!await runNeedWarmIdle()) return;
+    const step = async (s, say, secs) => { runSay(say); Object.assign(T.vac, { step: s, buf: [], t0: nowS(), relT: null }); await runWait(() => !T.vac.step, secs); if (runAbort()) T.vac.step = null; };
+    await step("idle", "Vacuum test. Step 1: idle for 10 seconds.", 20);
+    if (runAbort()) return;
+    await step("snap", "Step 2: snap the throttle wide open and let go.", 16);
+    if (runAbort()) return;
+    await step("hold", "Step 3: bring it up to 2,500 RPM and hold it for 30 seconds.", 45);
+  },
+  async charging() {
+    if (!runRunning()) { runSay("Charging test. Start the engine."); if (!await runWait(runRunning, 90)) return; }
+    runSay("Charging test. Let it idle with the lights, blower and defroster off.");
+    await runWait(() => false, 10);
+    if (runAbort() || chgVolts() == null) return;
+    chgRecord("idle");
+    runSay("Now turn on the headlights, the blower on high and the rear defroster.");
+    await runWait(() => false, 15);
+    if (runAbort() || chgVolts() == null) return;
+    chgRecord("loaded");
+    runSay("Done. You can turn them off.");
+  },
+  async drive() {
+    runSay("Last one: a test drive. Drive normally, and when it's safe include steady cruising, one hard pull and one firm stop. Tap Stop Test Drive when you're back.");
+    if (!driveOn) $("driveBtn").click();
+    await runWait(() => !driveOn, 7200, false);
+    if (runAbort() && driveOn) $("driveBtn").click();   // skipped: end the drive (that sends the review)
+  },
+};
+
+function o2Stats(rows, keys, k, wide) {
+  const pts = rows.map((r) => [r[0], r[keys.indexOf(k) + 1]]).filter((p) => p[1] != null);
+  if (pts.length < 5) return null;
+  const v = pts.map((p) => p[1]), secs = Math.max(1, pts[pts.length - 1][0] - pts[0][0]), mid = wide ? 1.0 : 0.45;
+  let cross = 0;
+  for (let i = 1; i < v.length; i++) if ((v[i - 1] - mid) * (v[i] - mid) < 0) cross++;
+  return { min: r1(Math.min(...v), 3), max: r1(Math.max(...v), 3), avg: r1(avg(v), 3),
+           rich_pct: Math.round(v.filter((x) => (wide ? x < 0.98 : x > 0.7)).length / v.length * 100),
+           lean_pct: Math.round(v.filter((x) => (wide ? x > 1.02 : x < 0.2)).length / v.length * 100),
+           switches_per_10s: r1(cross / 2 / secs * 10), samples_per_s: r1(v.length / secs) };
+}
+function o2Analyze(keys, idle, hold, snap, pids) {
+  const out = { grade: "GOOD" }, notes = []; let g = "g";
+  const worse = (x) => { if (x === "r" || (x === "y" && g === "g")) g = x; };
+  for (const [bank, up, dn, stft] of [["Bank 1", "o2b1s1", "o2b1s2", "stft1"], ["Bank 2", "o2b2s1", "o2b2s2", "stft2"]]) {
+    if (!pids[up]) continue;
+    const wide = ["24", "34", "26", "36", "28", "38"].includes(pids[up]);
+    const I = o2Stats(idle, keys, up, wide), H = o2Stats(hold, keys, up, wide), S = o2Stats(snap, keys, up, wide);
+    const D = pids[dn] ? o2Stats(hold.length ? hold : idle, keys, dn, false) : null;
+    const trimH = avg(colOf(hold.length ? hold : idle, keys, stft));
+    out[bank + " front sensor"] = { type: wide ? "wideband (lambda)" : "narrowband (volts)", idle: I, at_2500: H, snap: S };
+    if (D) out[bank + " rear sensor"] = D;
+    const main = H || I; if (!main) continue;
+    if (wide) {
+      if (main.rich_pct >= 80) { worse("r"); notes.push(`${bank} front (wideband) reads RICH most of the time (avg λ ${main.avg}) ${trimH != null && trimH < -8 ? "and the PCM is pulling fuel (" + fmtF(trimH) + "%) → the mixture really is rich" : "but the PCM isn't pulling much fuel → sensor or its circuit may be skewed"}.`); }
+      else if (main.lean_pct >= 80) { worse("r"); notes.push(`${bank} front (wideband) reads LEAN most of the time (avg λ ${main.avg}).`); }
+      else notes.push(`${bank} front (wideband) holds near λ 1.00 (avg ${main.avg}) → normal.`);
+      if (S) { if (S.min > 0.97) { worse("y"); notes.push(`${bank}: no rich dip on the snap (lowest λ ${S.min}) → slow sensor or the snap wasn't hard enough.`); }
+               if (S.max < 1.15) { worse("y"); notes.push(`${bank}: didn't read lean on the let-off (highest λ ${S.max}) — normal if this engine doesn't cut fuel on a short decel.`); } }
+    } else {
+      const span = main.max - main.min;
+      if (main.rich_pct >= 80 && main.min > 0.45) { worse("r"); notes.push(trimH != null && trimH < -8
+          ? `${bank} front stays RICH (above 0.7 V ${main.rich_pct}% of the time, never below ${main.min} V) and the PCM is pulling fuel (${fmtF(trimH)}%) → the mixture really is rich: fuel pressure, leaking injector, purge, fuel in the oil, or a MAF reading high.`
+          : `${bank} front stays RICH (above 0.7 V ${main.rich_pct}% of the time) but the PCM ISN'T pulling fuel (trim ${fmtF(trimH)}%) → the sensor or its signal circuit is reading rich falsely (contaminated sensor, signal shorted to voltage, bad ground). Check it with propane / a vacuum leak and back-probe the signal.`); }
+      else if (main.lean_pct >= 80 && main.max < 0.45) { worse("r"); notes.push(`${bank} front stays LEAN (below 0.2 V ${main.lean_pct}% of the time, never above ${main.max} V).`); }
+      else if (span < 0.3) { worse("r"); notes.push(`${bank} front barely moves (${main.min}–${main.max} V) → dead/lazy sensor, heater not working, or the engine is out of closed loop.`); }
+      else if (H && H.switches_per_10s < 2) { worse("y"); notes.push(`${bank} front switches slowly at 2,500 RPM (${H.switches_per_10s} times per 10 s; a healthy sensor is usually 5 or more) → lazy sensor.`); }
+      else notes.push(`${bank} front switches normally (${main.min}–${main.max} V${H ? ", " + H.switches_per_10s + " times per 10 s at 2,500" : ""}).`);
+      if (S) {
+        if (S.max < 0.8) { worse("y"); notes.push(`${bank}: didn't go rich on the snap (peak ${S.max} V, should pass 0.8 V) → slow/contaminated sensor or an exhaust leak ahead of it.`); }
+        if (S.min > 0.2) { worse("y"); notes.push(`${bank}: didn't go lean when you let off (lowest ${S.min} V, should drop under 0.2 V) → slow sensor, or an injector leaking during decel fuel cut.`); }
+        if (S.max >= 0.8 && S.min <= 0.2) notes.push(`${bank}: full rich and lean response on the snap (${S.max} V / ${S.min} V) → sensor responds.`);
+      }
+      if (D && main.switches_per_10s && D.switches_per_10s >= 0.6 * main.switches_per_10s && D.max - D.min > 0.5) {
+        worse("y"); notes.push(`${bank} rear sensor copies the front one (${D.switches_per_10s} vs ${main.switches_per_10s} switches per 10 s) → the catalyst is storing little oxygen (low efficiency).`);
+      } else if (D) notes.push(`${bank} rear sensor is steady (${D.min}–${D.max} V) → catalyst storing oxygen.`);
+    }
+  }
+  if (!hold.length) notes.push("The 2,500 RPM hold wasn't recorded, so the switching speed is from idle only.");
+  if (!snap.length) notes.push("No throttle snap was detected, so the rich/lean response wasn't tested.");
+  out.grade = gradeTxt(g); out.verdict = notes.join(" ");
+  return out;
+}
+
 // ---------- wiring ----------
 const EXTRA_HTML = { mis: misHtml, rdy: rdyHtml, vac: vacHtml, warm: warmHtml, crank: crankHtml, trans: transHtml, nvh: nvhHtml, tail: tailHtml, rec: recHtml };
 const EXTRA_ACTIONS = {
@@ -6597,12 +7068,6 @@ def module_codes(d: dict) -> dict:
           for m in d.get("modules") or [] for c in m.get("codes", []) if c.get("code")}
 
 
-# ---- Background AI jobs: a long AI check can't be cut off by a page refresh (a scanner message, a tap) ----
-@st.cache_resource
-def _ai_jobs() -> dict:
-  return {}
-
-
 def start_ai_job(job_id: str, fn) -> bool:
   """Run fn() on a background thread. False = this Streamlit can't do it (the caller then runs it the old way)."""
   if not job_id or not hasattr(st, "fragment"):
@@ -6650,13 +7115,68 @@ if hasattr(st, "fragment"):
     _ai_jobs().pop(p["job"], None)
     ss._ai_pending = None
     if j["state"] == "done":
-      text, research, draft, ds_draft = j["result"]
+      text, research, draft, ds_draft, *more = j["result"]
       ss.ble_ai = {"id": p["comp_id"], "text": text, "label": " · ".join(x for x in (
-          p["label"], team_names(draft, ds_draft, research), f"{int(j['finished'] - j['started'])} s") if x)}
+          p["label"], team_names(draft, ds_draft, research), f"{int(j['finished'] - j['started'])} s") if x),
+                   "tests": (more[0] if more else []) or []}
     else:
       log_problem("ai", p["what"], j.get("error", "failed"))
       ss.ble_ai = {"id": p["comp_id"], "text": f"⚠️ The AI check failed: {j.get('error')}", "label": p["label"]}
     st.rerun()   # full refresh so the scanner panel receives the answer
+
+
+# Tests the app can run by itself from the scanner. The tech only follows spoken prompts (rev it, snap it, pinch a hose).
+AUTO_TESTS = {
+    "mode06": "Re-read the Mode $06 test results now",
+    "monitors": "Re-read the readiness monitors (since clear and this drive)",
+    "fuelhold": "Fuel pressure hold for 2 min, key on engine off (only if the car reports fuel rail pressure)",
+    "crank": "Cranking / starting test: battery voltage dip, cranking speed, time to start",
+    "idle": "1-minute warm idle check: RPM steadiness, total fuel trims per bank, MAF, MAP, misfire counts",
+    "purge": "EVAP purge check: fuel trims at idle, then with the purge hose pinched shut, then released — proves a leaking/stuck-open purge valve",
+    "o2": "O2 sensor response: front and rear O2s plus short-term trims at idle, a 2,500 RPM hold, a throttle snap and the let-off — "
+          "switching speed, stuck rich/lean, rich/lean response, rear copying the front (catalyst)",
+    "vacuum": "Vacuum test from the MAP sensor: idle, snap, 2,500 RPM hold (exhaust restriction, valve/ring sealing)",
+    "charging": "Charging: voltage at idle, then with headlights, blower and rear defroster on",
+    "drive": "Test drive with the automatic tests: catalyst, fuel trims at idle/cruise/load, VE, transmission and converter, misfires",
+}
+RUN_TESTS_RULES = """
+
+APP TESTS — the app can run these by itself (the technician just follows spoken prompts):
+{catalog}
+If any of them would help prove or rule out a cause, END your answer with one line exactly like this:
+RUN_TESTS: o2, purge, mode06
+Use only ids from the list, most useful first, at most 5. Don't list tests already run ({ran}).
+Tests that need a meter, scope, gauge, propane or smoke machine go in your normal next-steps list for the technician.
+If no app test would help, write: RUN_TESTS: none"""
+
+
+def run_tests_rules(ran: list) -> str:
+  catalog = "\n".join(f"- {k}: {v}" for k, v in AUTO_TESTS.items() if k not in ran)
+  return RUN_TESTS_RULES.format(catalog=catalog, ran=", ".join(ran) or "none yet")
+
+
+def split_run_tests(text: str) -> tuple[str, list | None]:
+  """Pull the RUN_TESTS line off the end of an answer. None = the AI didn't write one."""
+  found = None
+  def grab(m):
+    nonlocal found
+    found = [t for t in re.findall(r"[a-z0-9]+", m.group(1).lower()) if t in AUTO_TESTS]
+    return ""
+  clean = re.sub(r"(?im)^[\s*_`>-]*RUN[_ ]TESTS?\s*[:=]\s*(.*)$", grab, text or "").rstrip()
+  return clean, (list(dict.fromkeys(found))[:5] if found is not None else None)
+
+
+def pick_tests(answer: str, ran: list) -> list:
+  """The AI didn't say which app tests to run (the final reviewer dropped the line): ask quickly."""
+  ask = ("Here is a diagnostic evaluation. Which of these tests that a scan tool app can run by itself would help prove or "
+         "rule out the causes it discusses? Reply with JSON only: a list of ids, most useful first, at most 5, [] if none.\n"
+         + "\n".join(f"- {k}: {v}" for k, v in AUTO_TESTS.items() if k not in ran) + "\n\nEVALUATION:\n" + answer[:6000])
+  try:
+    raw, _who = quick_ai(ask, max_tokens=1500, effort="low")
+    got = find_json(raw, list) or []
+    return [t for t in dict.fromkeys(str(x).strip().lower() for x in got) if t in AUTO_TESTS and t not in ran][:5]
+  except Exception:
+    return []
 
 
 def handle_ble_event(ev: dict):
@@ -6714,6 +7234,39 @@ Give a concise 3-bullet live assessment, under 100 words total:
 3. Any anomaly to inspect back in the bay.
 {knowledge_block("test drive road load fuel trim misfire stumble transmission shift converter slip knock " + (ss.symptoms or ""), 12)}"""
       label = f"[Live Drive AI Check - {ev.get('at')}]"
+    elif ev.get("mode") == "followup":
+      ran = [t for t in (ev.get("ran") or []) if t in AUTO_TESTS]
+      prior = (ss.get("ble_ai") or {}).get("text", "")
+      prompt = f"""You are an expert ASE Master / L1 Diagnostic Technician. Earlier you evaluated this vehicle and asked the app
+to run some tests by itself. It just ran them ({", ".join(ran) or "see results"}). The results are below — each has the
+measurements and the app's own verdict.
+
+Vehicle: {vehicle}
+Codes read from the vehicle: {dtcs}
+Technician-entered DTC: {ss.active_dtc or 'None'}
+
+YOUR EARLIER EVALUATION (for reference):
+{prior[:5000] or 'not available'}
+
+TEST RESULTS (from the app's automatic tests and any guided tests):
+{json.dumps(ev.get('tests') or ss.test_results or {}, indent=1)}
+
+LIVE DATA NOW (Mode 01 + OEM enhanced PIDs; enhanced values are unverified beta):
+{pids}
+
+I/M READINESS: {ev.get('readiness') or 'Not read'}
+MODE $06 RESULTS: {ev.get('mode6') or 'Not read'}
+PLAUSIBILITY ALERTS: {"; ".join(ev.get('flags') or []) or 'none'}
+{shop_context("o2 sensor purge fuel pressure fuel trim misfire vacuum charging")}
+
+TASK:
+1. For each test: what it proved or ruled out, in one or two lines. Say so if a result looks wrong (test not done
+   properly, skipped, bad data) instead of trusting it.
+2. The updated most likely cause(s), ranked, and how sure you are now.
+3. The next step: the single most definitive test or repair for the technician, with the tool and the pass/fail number.
+
+Use clean bold section headers and direct shop-floor language.""" + run_tests_rules(ran)
+      label = f"[AI follow-up on the tests - {ev.get('at')}]"
     else:
       prompt = f"""You are an expert ASE Master / L1 Diagnostic Technician.
 Vehicle: {vehicle}
@@ -6743,23 +7296,30 @@ DIAGNOSTIC TASK:
 5. Readiness: which monitors are incomplete and the drive-cycle conditions to set them.
 6. The single most definitive next physical/electrical test to confirm the root cause.
 
-Use clean bold section headers and direct shop-floor language. Skip sections with no data."""
+Use clean bold section headers and direct shop-floor language. Skip sections with no data.""" + \
+          run_tests_rules([t for t in (ev.get("ran") or []) if t in AUTO_TESTS])
       label = f"[Full AI Check - {ev.get('at')}]"
     drive_mode = ev.get("mode") == "drive"
     symptoms = (ss.symptoms or "").strip()
+    ran_before = [t for t in (ev.get("ran") or []) if t in AUTO_TESTS]
     # Live checks read the live data — no web research here (that's what the Diagnostic Tree is for), so they answer fast.
     def job():
-      return team_answer(prompt, vehicle, dtcs, symptoms, use_web=False, status=None, fast=drive_mode,
-                         effort="low" if drive_mode else "medium")
+      text, research, draft, ds_draft = team_answer(prompt, vehicle, dtcs, symptoms, use_web=False, status=None, fast=drive_mode,
+                                                    effort="low" if drive_mode else "medium")
+      tests = []
+      if not drive_mode and not str(text).startswith("⚠️"):
+        text, tests = split_run_tests(text)
+        if tests is None:   # the reviewer dropped the line: ask which tests quickly
+          tests = pick_tests(text, ran_before)
+        tests = [t for t in tests if t not in ran_before]
+      return text, research, draft, ds_draft, tests
     if start_ai_job(ev.get("id"), job):
       ss._ai_pending = {"job": ev.get("id"), "comp_id": ev.get("id"), "label": label,
-                        "what": "Live drive check" if drive_mode else "AI check"}
+                        "what": "Live drive check" if drive_mode else ("Follow-up on the tests" if ev.get("mode") == "followup" else "AI check")}
       return
-    with st.status("🤖 AI team is checking the live data...", expanded=False) as status:   # older Streamlit: the old way
-      text, research, draft, ds_draft = team_answer(prompt, vehicle, dtcs, symptoms, use_web=False, status=status,
-                                                    fast=drive_mode, effort="low" if drive_mode else "medium")
-      status.update(label="Done", state="complete")
-    ss.ble_ai = {"id": ev.get("id"), "text": text, "label": label + " · " + team_names(draft, ds_draft, research)}
+    with st.spinner("🤖 AI team is checking the live data..."):   # older Streamlit: the old way
+      text, research, draft, ds_draft, tests = job()
+    ss.ble_ai = {"id": ev.get("id"), "text": text, "label": label + " · " + team_names(draft, ds_draft, research), "tests": tests}
     st.rerun()
 
 
@@ -6834,7 +7394,8 @@ def chat_memory(question: str) -> str:
   except Exception:
     return ""
   in_convo = {m.get("chat_id") for m in (ss.chat_history or []) if m.get("chat_id")}
-  rows = [d for d in rows if d.get("q") and d.get("id") not in in_convo]
+  rows = [d for d in rows if d.get("q") and d.get("a") and d.get("state", "done") == "done"
+          and not str(d.get("a")).startswith("⚠️") and d.get("id") not in in_convo]
   same = [d for d in rows if ss.active_vin and d.get("vin") == ss.active_vin][:4]
   words = {w for w in re.findall(r"[a-z0-9]+", question.lower()) if len(w) >= 3} - KN_STOP
   scored = []
@@ -6854,7 +7415,7 @@ def chat_memory(question: str) -> str:
                       + " ".join(str(d.get("a", "")).split())[:450] for d in pick))
 
 
-def chat_prompt_for(question: str, n_photos: int) -> str:
+def chat_prompt_for(question: str, n_photos: int, n_videos: int = 0) -> str:
   history = "\n".join(f"{m['role'].upper()}: {m['content']}" + (f" [attached {len(m['photos'])} photo(s)]" if m.get("photos") else "")
                       for m in (ss.chat_history or [])[-6:])
   plan = (ss.dtc_result or {}).get("text", "")[:3000]
@@ -6881,54 +7442,226 @@ Respond directly, practically, and concisely to the latest question. Focus on ph
 """ + (f"""
 The technician attached {n_photos} photo(s) with this question (wiring diagram, connector, part, scope or meter).
 Read them carefully: wire colors, pin/cavity numbers, splices, grounds, connector IDs, component names, readings on screen.
-Say what you can read in the photo, and say so plainly if part of it is too blurry or cut off to read.""" if n_photos else "")
+Say what you can read in the photo, and say so plainly if part of it is too blurry or cut off to read.""" if n_photos else "") + ("""
+The technician attached a VIDEO (with sound). If you can watch it, watch and listen to the whole thing. If you can't, work
+from the VIDEO REPORT below, written by the team member who watched it. Base anything about sounds or movement on the video,
+and say plainly what can't be judged from a phone video (e.g. a noise that needs a stethoscope or a pressure test).""" if n_videos else "")
 
 
-def ask_chat(question: str, imgs: list, team: bool, where: str):
-  """Ask one question: shows it, gets the answer, and saves the pair to permanent memory."""
+VIDEO_WATCH_PROMPT = """You are a master automotive technician. The technician recorded this video (with sound) and asks:
+{question}
+Vehicle: {vehicle} · Codes: {codes} · Symptoms: {symptoms}
+
+Watch and listen to the WHOLE video and write a VIDEO REPORT for the rest of the diagnostic team, who cannot see or hear it:
+- What is shown: the part / area of the engine bay / gauge, scan tool, meter or scope screen / dash lights / smoke, leaks,
+  movement or shaking — with time stamps (m:ss).
+- Every sound: describe it (tick, tap, knock, rattle, whine, hiss, squeal, chirp, grind, misfire "chuff", exhaust puff),
+  when it happens, and whether it follows engine speed, half engine speed (valvetrain), road/wheel speed, or none;
+  whether it changes with throttle, load, A/C, steering or temperature, and whether it's steady or comes and goes.
+- Every number you can read on a screen or gauge, with its time stamp.
+- What can't be judged from this video (camera too far, wind noise, too short, too dark) — say so plainly.
+Facts only: describe what you see and hear. Don't diagnose beyond pointing out what stands out."""
+
+
+class _JobStatus:
+  """Lets the AI team report its progress ("Claude is checking...") to the screen from a background job."""
+  def __init__(self, job_id: str):
+    self.job_id = job_id
+
+  def update(self, label: str | None = None, **_kw):
+    if label and self.job_id in _ai_jobs():
+      _ai_jobs()[self.job_id]["label"] = label
+
+
+def run_chat_ai(job_id: str, prompt: str, question: str, photos_b64: list, vrefs: list, team: bool,
+                vehicle: str, codes: str, symptoms: str) -> tuple[str, str, str]:
+  """The AI part of one chat answer (runs in the background). Returns (answer, who answered, web research)."""
+  status = _JobStatus(job_id)
+  vparts = video_parts(vrefs)
+  if vparts and not secret("GEMINI_API_KEY"):
+    return "⚠️ Videos need the Gemini key (GEMINI_API_KEY) — Gemini is the AI that watches and listens to them.", "", ""
+  research = ""
+  if team:
+    if vparts:
+      status.update(label="🎥 ✨ Gemini is watching and listening to the video...")
+      try:
+        report = gemini([{"text": VIDEO_WATCH_PROMPT.format(question=question, vehicle=vehicle or "not given",
+                                                             codes=codes or "none", symptoms=symptoms or "not given")}] + vparts,
+                        timeout=180)
+        prompt += ("\n\nVIDEO REPORT (✨ Gemini watched and listened to the technician's video; the other team members "
+                   "can't see or hear it and work from this report):\n" + report)
+      except AIError as e:
+        log_problem("ai", "Video report", str(e))
+        prompt += f"\n\nVIDEO REPORT: not available ({e}). Say that the video couldn't be checked."
+    reply, research, draft, ds_draft = team_answer(prompt, vehicle or "General vehicle", codes, symptoms,
+                                                   bool(secret("PERPLEXITY_API_KEY")), status, question=question,
+                                                   image_b64=photos_b64, extra_parts=vparts)
+    who = ("🎥 " if vparts else "") + team_names(draft, ds_draft, research) + " · all checked each other"
+  elif vparts:   # quick answer about a video: Gemini is the one that can watch it
+    status.update(label="🎥 ✨ Gemini is watching and listening to the video...")
+    try:
+      reply = gemini([{"text": prompt}] + [{"inline_data": {"mime_type": "image/jpeg", "data": b}} for b in photos_b64] + vparts,
+                     timeout=180)
+      who = f"✨ {gemini_label()} · watched the video · quick answer"
+    except AIError as e:
+      reply, who = f"⚠️ {e}", ""
+  else:
+    status.update(label="⚡ Quick answer — thinking...")
+    reply, who = quick_ai(prompt, image_b64=photos_b64, max_tokens=4000)
+    who = (who + " · quick answer") if who else ""
+  return reply, who, research
+
+
+def _recent_video_refs() -> list:
+  """Follow-up questions keep using the video from the last few questions (Gemini keeps it for 48 hours)."""
+  asked = [m for m in (ss.chat_history or []) if m.get("role") == "user"]
+  for m in reversed(asked[-3:]):
+    vs = [v for v in (m.get("videos") or []) if v.get("uri") and time.time() - float(v.get("at") or 0) < 40 * 3600]
+    if vs:
+      return vs[-1:]
+  return []
+
+
+def _chat_add_answer(rid: str, reply: str, who: str = "", research: str = "", vrefs: list | None = None):
+  hist = list(ss.chat_history or [])
+  ui = next((i for i, m in enumerate(hist) if m.get("role") == "user" and m.get("chat_id") == rid), None)
+  if ui is not None and vrefs:
+    hist[ui] = dict(hist[ui], videos=vrefs)
+  msg = {"role": "assistant", "content": reply, "chat_id": rid, "who": who, "research": research}
+  ai = next((i for i, m in enumerate(hist) if m.get("role") == "assistant" and m.get("chat_id") == rid), None)
+  if ai is not None:
+    hist[ai] = msg
+  elif ui is not None:
+    hist.insert(ui + 1, msg)
+  else:
+    hist.append(msg)
+  ss.chat_history = hist
+
+
+def ask_chat(question: str, imgs: list, team: bool, where: str, videos: list | None = None):
+  """Ask one question. The answer is worked out in the background (so locking the phone or switching tabs can't lose
+  it), saved to permanent memory when it's done, and shown by the progress box (_chat_watch)."""
+  videos = list(videos or [])[:2]   # [(file name, bytes)]
   photos_b64 = [_jpeg_b64(im, 2000) for im in imgs]      # big enough to read wire colors and pin numbers
   thumbs = []
   for im in imgs:
     t = im.convert("RGB"); t.thumbnail((500, 500)); b = io.BytesIO(); t.save(b, format="JPEG", quality=80); thumbs.append(b.getvalue())
   rid = datetime.now().strftime("%Y%m%d%H%M%S%f")
-  ss.chat_history = (ss.chat_history or []) + [{"role": "user", "content": question, "photos": thumbs, "chat_id": rid}]
-  with st.chat_message("user"):
-    for thumb in thumbs:
-      st.image(thumb, width=220)
-    st.markdown(question)
-  prompt = chat_prompt_for(question, len(photos_b64))
+  if not ss.get("chat_conv"):
+    ss.chat_conv = rid
+  st.query_params["chat"] = ss.chat_conv   # a reload (phone locked too long) brings this conversation back
+  reuse = [] if videos else _recent_video_refs()
+  ss.chat_history = (ss.chat_history or []) + [{"role": "user", "content": question, "photos": thumbs, "chat_id": rid,
+                                                "video_names": [n for n, _ in videos], "videos": [],
+                                                "reused_video": bool(reuse)}]
+  prompt = chat_prompt_for(question, len(photos_b64), len(videos) or len(reuse))
   n_notes = len(knowledge_for_job(30, question)) if knowledge_entries() else 0
-  research = ""
-  with st.chat_message("assistant"):
-    if not team:
-      with st.spinner("Thinking..."):
-        reply, who = quick_ai(prompt, image_b64=photos_b64, max_tokens=4000)
-      who = who + " · quick answer"
-    elif where == "quick":   # inside the Quick help box (no status box allowed there)
-      with st.spinner("The AI team is checking it (about a minute)..."):
-        reply, research, draft, ds_draft = team_answer(prompt, ss.vehicle_info or "General vehicle", ", ".join(current_codes()),
-                                                       (ss.symptoms or "").strip(), False, None, question=question,
-                                                       image_b64=photos_b64)
-      who = team_names(draft, ds_draft, research)
+  vehicle, codes, symptoms = ss.vehicle_info or "", ", ".join(current_codes()), (ss.symptoms or "").strip()
+  meta = {"id": rid, "conv": ss.chat_conv, "q": question, "at": datetime.now().strftime("%Y-%m-%d %I:%M %p"),
+          "vin": ss.active_vin or "", "vehicle": vehicle, "codes": current_codes(), "job": ss.get("job_id") or "",
+          "tech": ss.get("tech_user") or "", "photos_n": len(imgs), "videos_n": len(videos) or len(reuse), "where": where,
+          "team": bool(team)}
+  store_put("chat", rid, dict(meta, a="", state="working"))
+  job_id = "chat-" + rid
+
+  def job():
+    vrefs = list(reuse)
+    try:
+      for name, data in videos:
+        _JobStatus(job_id).update(label=f"📤 Sending the video to Gemini ({len(data) / 1e6:.0f} MB)...")
+        vrefs.append(gemini_upload(data, video_mime(name), name))
+      reply, who, research = run_chat_ai(job_id, prompt, question, photos_b64, vrefs, team, vehicle, codes, symptoms)
+    except AIError as e:
+      reply, who, research = f"⚠️ {e}", "", ""
+    if who and n_notes:
+      who += f" · 📖 {n_notes} of your notes sent"
+    ok = not str(reply).startswith("⚠️")
+    store_put("chat", rid, dict(meta, a=reply, who=who, state="done" if ok else "failed",
+                                videos=[v for v in vrefs if v not in reuse], reused=bool(reuse)))
+    return reply, who, research, [v for v in vrefs if v not in reuse]
+
+  if start_ai_job(job_id, job):
+    ss._chat_pending = {"job": job_id, "rid": rid, "where": where}
+    st.rerun()   # shows the question and the progress box right away
+  with st.spinner("The AI is working on it..."):   # older Streamlit without background jobs: wait here
+    reply, who, research, vrefs = job()
+  _chat_add_answer(rid, reply, who, research, vrefs)
+  st.rerun()
+
+
+if hasattr(st, "fragment"):
+  @st.fragment(run_every=2)
+  def _chat_watch():
+    """Progress box for the answer being worked on; puts the answer in the chat when it's ready."""
+    p = ss.get("_chat_pending")
+    if not p:
+      return
+    j = _ai_jobs().get(p["job"])
+    if j is None:   # the app restarted (or another window already collected it): use what was saved
+      ss._chat_pending = None
+      rec = store_get("chat", p["rid"]) or {}
+      _chat_add_answer(p["rid"], rec.get("a") or "⚠️ The app restarted before this answer came back. Please ask again.",
+                       rec.get("who", ""), "", rec.get("videos"))
+      st.rerun()
+    if j["state"] == "running":
+      secs = int(time.time() - j["started"])
+      st.info(f"{j.get('label') or '🤖 The AI team is working on it...'} · {secs // 60}:{secs % 60:02d}  \n"
+              "You can lock your phone or use other tabs — the answer is saved when it's ready.")
+      return
+    _ai_jobs().pop(p["job"], None)
+    ss._chat_pending = None
+    if j["state"] == "done":
+      reply, who, research, vrefs = j["result"]
+      _chat_add_answer(p["rid"], reply, who, research, vrefs)
     else:
-      with st.status("Working on it...", expanded=False) as status:
-        reply, research, draft, ds_draft = team_answer(
-            prompt, ss.vehicle_info or "General vehicle", ", ".join(current_codes()), (ss.symptoms or "").strip(),
-            bool(ss.get("use_web", False) and secret("PERPLEXITY_API_KEY")), status, question=question, image_b64=photos_b64)
-        status.update(label="Done", state="complete")
-      who = team_names(draft, ds_draft, research)
-    who += f" · 📖 {n_notes} of your notes sent" if n_notes else ""
-    st.caption(who)
-    st.markdown(reply)
-    if research and where != "quick":
-      with st.expander("🌐 Sources Perplexity found"):
-        st.markdown(research)
-  ss.chat_history.append({"role": "assistant", "content": reply, "chat_id": rid, "who": who})
-  if not str(reply).startswith("⚠️"):   # AI errors aren't worth remembering
-    store_put("chat", rid, {"id": rid, "q": question, "a": reply, "at": datetime.now().strftime("%Y-%m-%d %I:%M %p"),
-                            "vin": ss.active_vin or "", "vehicle": ss.vehicle_info or "", "codes": current_codes(),
-                            "job": ss.get("job_id") or "", "tech": ss.get("tech_user") or "", "who": who,
-                            "photos_n": len(imgs), "where": where})
+      log_problem("ai", "Chat answer", j.get("error", "failed"))
+      _chat_add_answer(p["rid"], f"⚠️ The AI couldn't answer: {j.get('error')}", "")
+    st.rerun()   # full refresh so the answer shows everywhere
+else:
+  def _chat_watch():
+    pass
+
+
+def restore_chat(conv: str):
+  """After a reload (phone locked for a long time, browser restarted), bring back the conversation and any answer that
+  was still being worked on."""
+  try:
+    recs = sorted((r.get("data") or {} for r in store_list("chat", 200, {"conv": conv})), key=lambda d: str(d.get("id", "")))
+  except Exception:
+    return
+  if not recs:
+    return
+  hist = list(ss.chat_history or [])
+  have = {(m.get("role"), m.get("chat_id")) for m in hist}
+  for d in recs:
+    rid = d.get("id")
+    if ("user", rid) not in have:
+      hist.append({"role": "user", "content": d.get("q", ""), "chat_id": rid, "videos": d.get("videos") or [],
+                   "reused_video": bool(d.get("reused"))})
+    if ("assistant", rid) in have:
+      continue
+    if d.get("state", "done") != "working":
+      hist.append({"role": "assistant", "content": d.get("a") or "", "chat_id": rid, "who": d.get("who", "")})
+    elif "chat-" + str(rid) in _ai_jobs():
+      ss._chat_pending = {"job": "chat-" + str(rid), "rid": rid, "where": "quick"}   # still working: keep watching it
+    else:
+      hist.append({"role": "assistant", "content": "⚠️ The app restarted before this answer came back. Please ask again.",
+                   "chat_id": rid})
+  ss.chat_history, ss.chat_conv = hist, conv
+
+
+def new_chat():
+  ss.chat_history, ss.chat_conv, ss._chat_pending = [], None, None
+  if "chat" in st.query_params:
+    del st.query_params["chat"]
+
+
+# After a reload (phone locked a long time, browser closed): the conversation's id is in the address bar — bring it back
+if "_chat_restored" not in ss:
+  ss._chat_restored = True
+  if _qc := st.query_params.get("chat"):
+    with guard("Bringing back the chat"):
+      restore_chat(_qc)
 
 
 PIN_PROMPT = """A technician got this answer from the AI and wants to keep the useful testing fact as a note in the shop's
@@ -6984,9 +7717,15 @@ def chat_messages(msgs: list, where: str, start: int = 0):
     with st.chat_message(msg.get("role") or "assistant"):
       for thumb in msg.get("photos") or []:
         st.image(thumb, width=220)
+      vnames = msg.get("video_names") or [v.get("name", "video") for v in msg.get("videos") or []]
+      if msg.get("role") == "user" and (vnames or msg.get("reused_video")):
+        st.caption("🎥 " + (", ".join(vnames) if vnames else "about the same video as before"))
       if msg.get("who"):
         st.caption(msg["who"])
       st.markdown(msg.get("content") or "")
+      if msg.get("research") and where == "copilot":
+        with st.expander("🌐 Sources Perplexity found"):
+          st.markdown(msg["research"])
       if msg.get("role") == "assistant" and not str(msg.get("content") or "").startswith("⚠️"):
         mid = str(msg.get("chat_id") or i)
         pin = ss.get("chat_pin") or {}
@@ -7028,41 +7767,78 @@ def past_chats_panel():
         st.rerun()
 
 
+def _try(fn, *a, fallback_drop=(), **kw):
+  """Call a Streamlit function with newer options; on an older Streamlit, retry without them."""
+  try:
+    return fn(*a, **kw)
+  except TypeError:
+    return fn(*a, **{k: v for k, v in kw.items() if k not in fallback_drop})
+
+
+def chat_files_split(files: list) -> tuple[list, list]:
+  """Uploaded files -> (photos as images, videos as (name, bytes))."""
+  imgs, vids = [], []
+  for f in files or []:
+    name = getattr(f, "name", "file")
+    if is_video(name):
+      if len(vids) < 2:
+        vids.append((name, f.getvalue()))
+      continue
+    try:
+      if len(imgs) < 4:
+        imgs.append(ImageOps.exif_transpose(Image.open(io.BytesIO(f.getvalue()))))
+    except Exception:
+      st.warning(f"Couldn't open {name} — try a JPG or PNG.")
+  return imgs, vids
+
+
 def quick_help_panel():
+  """💬 Always-open question box above the tabs, with the conversation (foldable) right above it."""
   msgs = ss.chat_history or []
-  with st.expander("💬 Quick help — ask the AI anything", expanded=bool(msgs)):
+  pending = ss.get("_chat_pending")
+  box = _try(st.container, border=True, key="quickhelp", fallback_drop=("key",))
+  with box:
     n_kn = len(knowledge_entries())
-    st.caption("It knows the car that's open, the codes, the scanner data, the test plan, your shop history"
-               + (f" and your {n_kn} Knowledge note(s)" if n_kn else " and your Knowledge notes")
-               + " — and it remembers your earlier chats. Every question and answer is saved.")
-    show_all = len(msgs) > 6 and st.toggle("Show the whole conversation", key="qh_all")
-    start = 0 if show_all else max(0, len(msgs) - 6)
-    convo = st.container()
-    with convo:
-      chat_messages(msgs[start:], "quick", start)
-    with st.form("qh_form", clear_on_submit=True):
-      q = st.text_area("Your question", key="qh_q", height=80,
-                       placeholder="e.g. What should fuel pressure be on a 2014 Silverado 5.3?  ·  How do I test a 3-wire cam sensor?")
-      files = st.file_uploader("📷 Add photos (optional — wiring diagram, connector, part, meter)", type=["png", "jpg", "jpeg", "webp"],
-                               accept_multiple_files=True, key="qh_files") or []
-      f1, f2 = st.columns([1, 2])
-      go = f1.form_submit_button("Ask", type="primary", use_container_width=True)
-      team = f2.checkbox("Have the whole AI team check it (slower)", key="qh_team")
-    if go and str(q or "").strip():
-      imgs = []
-      for f in list(files)[:4]:
-        try:
-          imgs.append(ImageOps.exif_transpose(Image.open(io.BytesIO(f.getvalue()))))
-        except Exception:
-          st.warning(f"Couldn't open {getattr(f, 'name', 'that photo')} — try a JPG or PNG.")
-      with convo:
-        ask_chat(str(q).strip(), imgs, bool(team), "quick")
-    b1, b2 = st.columns(2)
-    if msgs and b1.button("🧹 New conversation", key="qh_new", use_container_width=True,
+    slot = st.container()             # where a new question + answer show up
+    if msgs:
+      with st.expander("💬 Conversation", expanded=True):
+        show_all = len(msgs) > 4 and st.toggle("Show the whole conversation", key="qh_all")
+        start = 0 if show_all else max(0, len(msgs) - 4)
+        chat_messages(msgs[start:], "quick", start)
+        slot = st.container()
+    if pending and pending.get("where") != "copilot":
+      with slot:
+        _chat_watch()
+    with _try(st.form, "qh_form", clear_on_submit=True, border=False, fallback_drop=("border",)):
+      c1, c2 = _try(st.columns, [6, 1], vertical_alignment="bottom", fallback_drop=("vertical_alignment",))
+      q = c1.text_input("**💬 Quick help** — ask the AI anything", key="qh_q",
+                        placeholder="e.g. How do I test a 3-wire cam sensor?  ·  What's that noise in this video?")
+      go = c2.form_submit_button("Ask", type="primary", use_container_width=True)
+      files = (st.file_uploader("📷 🎥 Photos or a video (wiring diagram, connector, part, meter — or a video of the noise, "
+                                "shake or scope screen; sound is included)",
+                                type=PHOTO_TYPES + list(VIDEO_TYPES), accept_multiple_files=True, key="qh_files") or []
+               if ss.get("qh_photos") else [])
+    o1, o2, o3, o4 = st.columns(4)
+    o1.toggle("📷 🎥 Add photos / video", key="qh_photos")
+    o2.checkbox("🤝 All AIs check each other", value=True, key="qh_team",
+                help="On: Perplexity researches, Gemini and DeepSeek each answer, and Claude checks them against each other "
+                     "(about a minute). Off: one AI answers in a few seconds.")
+    past = o3.toggle("🕘 Past chats", key="qh_past")
+    if msgs and o4.button("🧹 New chat", key="qh_new", use_container_width=True,
                           help="Starts fresh. Earlier chats stay saved and the AI still remembers them."):
-      ss.chat_history = []
+      new_chat()
       st.rerun()
-    if b2.toggle("🕘 Past chats", key="qh_past"):
+    st.caption("Knows the open car, the codes, the scanner data, the test plan, your shop history and "
+               + (f"your {n_kn} Knowledge notes" if n_kn else "your Knowledge notes")
+               + " · remembers your earlier chats · every question and answer is saved")
+    if go and str(q or "").strip():
+      if pending:
+        st.warning("Hang on — the last answer is still being worked on. Ask again when it shows up.")
+      else:
+        imgs, vids = chat_files_split(files)
+        with slot:
+          ask_chat(str(q).strip(), imgs, bool(ss.get("qh_team", True)), "quick", vids)
+    if past:
       past_chats_panel()
 
 
@@ -7612,17 +8388,22 @@ Format strictly using these Markdown sections:
                 "history and your Knowledge notes, and it remembers earlier chats. Same conversation as 💬 Quick help at the "
                 "top — every answer is saved.")
   if ss.chat_history and hcol2.button("New chat", help="Starts fresh. Earlier chats stay saved and the AI still remembers them."):
-    ss.chat_history = []
+    new_chat()
     st.rerun()
 
   chat_messages(ss.chat_history or [], "copilot")
+  if (ss.get("_chat_pending") or {}).get("where") == "copilot":
+    _chat_watch()
 
   # 📷 Photos for the next question: wiring diagrams, connectors, parts, scope or meter screens
   nkey = ss.get("chat_photo_n", 0)
-  with st.expander("📷 Add photos to your question (wiring diagram, connector, part, scope, meter)",
+  with st.expander("📷 🎥 Add photos or a video to your question (wiring diagram, connector, part, scope, meter, noise)",
                    expanded=bool(ss.get(f"chat_cam_on_{nkey}"))):
-    chat_files = st.file_uploader("Take or upload photos (up to 4)", type=["png", "jpg", "jpeg", "webp"],
+    chat_files = st.file_uploader("Take or upload photos (up to 4) or a video (sound is included)",
+                                  type=PHOTO_TYPES + list(VIDEO_TYPES),
                                   accept_multiple_files=True, key=f"chat_files_{nkey}_{ss.get('job_n', 0)}") or []
+    chat_vids = [(f.name, f.getvalue()) for f in chat_files if is_video(f.name)][:2]
+    chat_files = [f for f in chat_files if not is_video(f.name)]
     chat_cam = st.camera_input("Take a photo", key=f"chat_cam_{nkey}") if st.toggle("Use in-app camera instead", key=f"chat_cam_on_{nkey}") else None
     chat_imgs = []
     for f in ([chat_cam] if chat_cam else []) + list(chat_files):
@@ -7634,15 +8415,21 @@ Format strictly using these Markdown sections:
     if chat_imgs:
       st.image([im.convert("RGB") for im in chat_imgs], width=140)
       st.caption(f"{len(chat_imgs)} photo(s) will go with your next question. Gemini and Claude read them; DeepSeek works from your text.")
+    if chat_vids:
+      st.caption(f"🎥 {', '.join(n for n, _ in chat_vids)} will go with your next question. Gemini watches and listens to it "
+                 "and reports to the others; Claude and DeepSeek check its reasoning.")
 
-  chat_quick = st.toggle("⚡ Quick answers — one AI, a few seconds (turn off to have the whole team check every answer)",
-                         value=True, key="chat_quick")
+  chat_quick = st.toggle("⚡ Quick answer — one AI, a few seconds (off = all the AIs check each other's work, about a minute)",
+                         value=False, key="chat_quick")
   user_question = st.chat_input("Ask a question (add photos above first if you want)" if not chat_imgs else
                                 f"Ask about the {len(chat_imgs)} photo(s) — e.g. 'Which wire is the 5V reference?'")
   if user_question:
-    if chat_imgs:
-      ss.chat_photo_n = nkey + 1        # empties the photo box for the next question
-    ask_chat(user_question, chat_imgs, not chat_quick, "copilot")
+    if ss.get("_chat_pending"):
+      st.warning("Hang on — the last answer is still being worked on. Ask again when it shows up.")
+    else:
+      if chat_imgs or chat_vids:
+        ss.chat_photo_n = nkey + 1        # empties the photo box for the next question
+      ask_chat(user_question, chat_imgs, not chat_quick, "copilot", chat_vids)
 
 # ========================================================
 # --- TEST DRIVE REVIEW (saved drives from the Bluetooth dashboard) ---
