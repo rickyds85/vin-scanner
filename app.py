@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-06"
+APP_VERSION = "2026-11-07"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -88,6 +88,9 @@ WHATS_NEW = [
     "tells you out loud when to rev it, snap it or pinch a hose, then sends the results back to the AI team for a follow-up",
     "FIX: Factory (enhanced) readings that can't be right — like 138 psi barometric pressure or a 2961 gear ratio — are "
     "now hidden, and a group that disagrees with the standard readings is dropped, so they don't confuse you or the AI",
+    "NEW: 👀 Let the AI see my screen or camera (top of the page) — share your Autel / Snap-on screen from a computer, or point "
+    "the phone camera at it. The AI reads the screen every half minute and uses it in every chat answer and AI Check; "
+    "🤔 Ask the AI about this screen gets an answer about exactly what you're looking at",
 ]
 
 st.markdown(
@@ -7029,6 +7032,243 @@ def _ble_component_dir() -> str:
 _ble_dashboard = components.declare_component("ble_dashboard", path=_ble_component_dir())
 
 
+# ========================================================
+# --- 👀 AI EYES: share a screen/window (computer) or a live camera (phone) so the AI sees what you see ---
+# ========================================================
+EYE_HTML = r'''<!doctype html><html><head><meta charset="utf-8">
+<style>
+  body { margin: 0; font-family: Inter, system-ui, -apple-system, sans-serif; color: #F1F5F9; background: transparent; }
+  .bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
+  button { background: #131B2E; color: #F1F5F9; border: 1px solid rgba(255,255,255,.18); border-radius: 8px; padding: 8px 12px;
+           font-weight: 600; cursor: pointer; font-size: .9rem; }
+  button.on { border-color: #10B981; color: #10B981; }
+  button.go { background: #10B981; color: #04110c; border-color: #10B981; }
+  video { width: 100%; max-height: 260px; background: #000; border-radius: 8px; display: none; object-fit: contain; }
+  .note { color: #8B9BB4; font-size: .82rem; }
+  select { background: #131B2E; color: #F1F5F9; border: 1px solid rgba(255,255,255,.18); border-radius: 6px; padding: 3px; }
+</style></head><body>
+<div class="bar">
+  <button id="scrBtn">🖥️ Share a screen or window</button>
+  <button id="camBtn">📹 Live camera</button>
+  <button id="askBtn" class="go" hidden>🤔 Ask the AI about this screen</button>
+  <button id="stopBtn" hidden>⏹ Stop</button>
+  <span class="note" id="autoWrap" hidden>Reads it every <select id="every">
+    <option value="15">15 s</option><option value="30" selected>30 s</option><option value="60">60 s</option><option value="0">only when I ask</option>
+  </select></span>
+</div>
+<video id="v" autoplay playsinline muted></video>
+<canvas id="c" style="display:none"></canvas>
+<div class="note" id="msg"></div>
+<script>
+function toStreamlit(type, data) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type }, data || {}), "*"); }
+const sendValue = (value) => toStreamlit("streamlit:setComponentValue", { value, dataType: "json" });
+let lastH = 0;
+function fit() { const h = document.documentElement.scrollHeight; if (h !== lastH) { lastH = h; toStreamlit("streamlit:setFrameHeight", { height: h }); } }
+new ResizeObserver(fit).observe(document.body);
+window.addEventListener("message", (e) => { if (e.data && e.data.type === "streamlit:render") fit(); });
+toStreamlit("streamlit:componentReady", { apiVersion: 1 });
+
+const $ = (id) => document.getElementById(id);
+// Ask through the app's own page (it always has permission to share a screen or use the camera); fall back to this frame
+function md() { try { if (window.parent.navigator.mediaDevices) return window.parent.navigator.mediaDevices; } catch (e) {} return navigator.mediaDevices; }
+let stream = null, kind = "", timer = null, lastSig = null, n = 0;
+const canScreen = !!(md() && md().getDisplayMedia);
+function msg(t) { $("msg").textContent = t; fit(); }
+if (!canScreen) { $("scrBtn").hidden = true; msg("Screen sharing only works on a computer (Chrome or Edge). On a phone or tablet, use the live camera and point it at the scan tool screen."); }
+async function start(k) {
+  stop(true);
+  try {
+    stream = k === "screen"
+      ? await md().getDisplayMedia({ video: { frameRate: 5 }, audio: false })
+      : await md().getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+  } catch (e) { msg(k === "screen" ? "Screen sharing was cancelled or blocked." : "Couldn't open the camera — allow camera access for this site and try again."); return; }
+  kind = k;
+  const v = $("v"); v.srcObject = stream; v.style.display = "block";
+  try { await v.play(); } catch (e) {}
+  stream.getVideoTracks()[0].addEventListener("ended", () => stop());
+  ["askBtn", "stopBtn", "autoWrap"].forEach((id) => ($(id).hidden = false));
+  $(k === "screen" ? "scrBtn" : "camBtn").classList.add("on");
+  msg(k === "screen" ? "👀 The AI can see the window you shared. Ask about it in Quick help, or tap Ask the AI about this screen."
+                     : "👀 The AI can see what the camera sees — point it at the scan tool screen (or the engine).");
+  sendValue({ type: "state", on: true, kind: k, id: "st-" + Date.now() });
+  setTimeout(() => grab(true, false), 1500);
+  schedule();
+}
+function stop(quiet) {
+  if (timer) { clearInterval(timer); timer = null; }
+  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+  const v = $("v"); v.style.display = "none"; v.srcObject = null;
+  ["askBtn", "stopBtn", "autoWrap"].forEach((id) => ($(id).hidden = true));
+  ["scrBtn", "camBtn"].forEach((id) => $(id).classList.remove("on"));
+  if (!quiet) { msg(""); sendValue({ type: "state", on: false, id: "st-" + Date.now() }); }
+  fit();
+}
+function schedule() {
+  if (timer) clearInterval(timer);
+  const secs = +$("every").value;
+  timer = secs > 0 ? setInterval(() => grab(false, false), secs * 1000) : null;
+}
+$("every").addEventListener("change", schedule);
+function fingerprint(c) {   // a tiny copy of the picture: skip sending when nothing on screen changed
+  const t = document.createElement("canvas"); t.width = 32; t.height = 18;
+  const x = t.getContext("2d"); x.drawImage(c, 0, 0, 32, 18);
+  const d = x.getImageData(0, 0, 32, 18).data, out = [];
+  for (let i = 0; i < d.length; i += 4) out.push((d[i] + d[i + 1] + d[i + 2]) / 3);
+  return out;
+}
+function grab(force, ask) {
+  const v = $("v"); if (!stream || !v.videoWidth) return;
+  const w = Math.min(1600, v.videoWidth), h = Math.round(v.videoHeight * w / v.videoWidth);
+  const c = $("c"); c.width = w; c.height = h; c.getContext("2d").drawImage(v, 0, 0, w, h);
+  const f = fingerprint(c);
+  if (!force && lastSig) { let diff = 0; for (let i = 0; i < f.length; i++) diff += Math.abs(f[i] - lastSig[i]); if (diff / f.length < 0.25) return; }
+  lastSig = f;
+  const img = c.toDataURL("image/jpeg", 0.85).split(",")[1];
+  sendValue({ type: "frame", id: "f" + Date.now() + "-" + (++n), img, kind, w, h, ask: !!ask, at: new Date().toLocaleTimeString() });
+}
+$("scrBtn").onclick = () => start("screen");
+$("camBtn").onclick = () => start("camera");
+$("stopBtn").onclick = () => stop();
+$("askBtn").onclick = () => grab(true, true);
+// the picture comes through the app's page, so stop it ourselves if this panel is closed (no orphaned screen share / camera)
+window.addEventListener("pagehide", () => stop(true));
+window.addEventListener("unload", () => stop(true));
+fit();
+</script></body></html>
+'''
+
+
+def _eye_component_dir() -> str:
+  d = Path(tempfile.gettempdir()) / "ai_eyes"
+  d.mkdir(exist_ok=True)
+  f = d / "index.html"
+  if not f.exists() or f.read_text(encoding="utf-8") != EYE_HTML:
+    f.write_text(EYE_HTML, encoding="utf-8")
+  return str(d)
+
+
+_eye = components.declare_component("ai_eyes", path=_eye_component_dir())
+
+EYE_READ_PROMPT = """This is a live view of what an automotive technician is looking at right now — usually a scan tool screen
+(Autel, Snap-on, factory tool) showing live data, codes, freeze frame, Mode $06 or a scope; or a camera view of the
+engine bay or a meter.
+Read it and return JSON only:
+{"what": "<one line: what's on the screen>", "vehicle": "<vehicle if shown, else ''>",
+ "readings": [{"name": "<PID / reading name exactly as shown>", "value": "<value exactly as shown>", "unit": "<unit>"}],
+ "codes": ["<any trouble codes shown>"], "notes": "<anything that stands out (out of range, flagged red), or ''>"}
+Read every value exactly as shown, with units. Leave out anything cut off or too blurry to read — never guess a number."""
+
+
+def eye_fresh(max_age: int = 120) -> dict | None:
+  """The latest picture from the shared screen / camera, if sharing is on and it's recent."""
+  e = ss.get("eye")
+  return e if (ss.get("eye_on") and e and time.time() - e.get("at", 0) < max_age) else None
+
+
+def _eye_read(img_b64: str) -> dict:
+  try:
+    if secret("GEMINI_API_KEY"):   # quick and cheap for reading a screen every half minute
+      raw = gemini([{"text": EYE_READ_PROMPT}, {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}],
+                   json_mode=True, timeout=45)
+    else:
+      raw, _who = quick_ai(EYE_READ_PROMPT, image_b64=img_b64, max_tokens=3000, effort="low")
+  except AIError as e:
+    return {"error": str(e)}
+  obj = find_json(raw, dict) or {}
+  obj["readings"] = [r for r in (obj.get("readings") or []) if isinstance(r, dict) and str(r.get("value", "")).strip()][:120]
+  return obj
+
+
+def eye_context() -> str:
+  """What the AI read off the technician's shared scan tool screen, for the AI prompts."""
+  reads = [r for r in (ss.get("eye_reads") or []) if not r.get("error")]
+  if not reads or not ss.get("eye_on"):
+    return ""
+  last = reads[-1]
+  rows = [f"- {r.get('name')}: {r.get('value')} {r.get('unit') or ''}".rstrip() for r in last.get("readings") or []]
+  earlier = []
+  for r in reads[-4:-1]:
+    vals = "; ".join(f"{x.get('name')}={x.get('value')}{x.get('unit') or ''}" for x in (r.get("readings") or [])[:25])
+    if vals:
+      earlier.append(f"- {r.get('at_txt', '')}: {vals}")
+  return ("\n\nTHE TECHNICIAN'S OWN SCAN TOOL SCREEN — read from their live screen share / camera at "
+          f"{last.get('at_txt', '')} ({last.get('what') or 'scan tool screen'}). These come from their professional scan tool "
+          "(Autel / Snap-on), so trust them over the Bluetooth adapter's 'enhanced' readings:\n"
+          + ("\n".join(rows[:100]) or "- (no readings visible)")
+          + (f"\nCodes on that screen: {', '.join(last.get('codes') or [])}" if last.get("codes") else "")
+          + (f"\nWhat stood out: {last.get('notes')}" if last.get("notes") else "")
+          + ("\nEARLIER READS OF THE SAME SCREEN (for trends):\n" + "\n".join(earlier) if earlier else ""))
+
+
+def _eye_events():
+  ev = _eye(key="ai_eyes", default=None)
+  if not (isinstance(ev, dict) and ev.get("id") and ev["id"] != ss.get("_eye_last")):
+    return
+  ss._eye_last = ev["id"]
+  if ev.get("type") == "state":
+    ss.eye_on, ss.eye_kind = bool(ev.get("on")), ev.get("kind", "")
+    if not ss.eye_on:
+      ss.eye = None
+    return
+  if ev.get("type") != "frame" or not ev.get("img"):
+    return
+  ss.eye_on = True
+  ss.eye = {"img": ev["img"], "at": time.time(), "at_txt": ev.get("at", ""), "kind": ev.get("kind", ""), "id": ev["id"]}
+  job_id = "eye-" + ev["id"]
+  if start_ai_job(job_id, lambda b=ev["img"]: _eye_read(b)):
+    ss._eye_job = {"job": job_id, "at_txt": ev.get("at", "")}
+  else:   # older Streamlit: read it right here
+    res = _eye_read(ev["img"])
+    ss.eye_reads = (ss.get("eye_reads") or [])[-29:] + [dict(res, at_txt=ev.get("at", ""))]
+  if ev.get("ask"):
+    ss._eye_ask = True
+    st.rerun()   # the whole page: Quick help asks the AI about this screen
+
+
+def _eye_collect():
+  p = ss.get("_eye_job")
+  j = _ai_jobs().get(p["job"]) if p else None
+  if p and j is None:
+    ss._eye_job = None
+  elif j and j["state"] != "running":
+    _ai_jobs().pop(p["job"], None)
+    ss._eye_job = None
+    res = j.get("result") if j["state"] == "done" else {"error": j.get("error")}
+    ss.eye_reads = (ss.get("eye_reads") or [])[-29:] + [dict(res or {}, at_txt=p.get("at_txt", ""))]
+
+
+def _eye_show():
+  reads = ss.get("eye_reads") or []
+  if ss.get("_eye_job"):
+    st.caption("👀 Reading your screen…")
+  if not reads or not ss.get("eye_on"):
+    return
+  last = reads[-1]
+  if last.get("error"):
+    st.caption(f"⚠️ Couldn't read the screen: {last['error']}")
+    return
+  rows = last.get("readings") or []
+  st.caption(f"👀 What the AI reads on your screen ({last.get('at_txt', '')}): {last.get('what') or ''} — {len(rows)} reading(s)"
+             + (f" · codes {', '.join(last.get('codes') or [])}" if last.get("codes") else ""))
+  if rows:
+    st.dataframe([{"Reading": r.get("name"), "Value": f"{r.get('value')} {r.get('unit') or ''}".strip()} for r in rows],
+                 use_container_width=True, hide_index=True, height=min(36 * (len(rows) + 1), 220))
+
+
+if hasattr(st, "fragment"):
+  @st.fragment(run_every=3)
+  def eye_panel():
+    """Runs on its own (every few seconds and on each new picture) so sharing never reloads the whole page."""
+    _eye_events()
+    _eye_collect()
+    _eye_show()
+else:
+  def eye_panel():
+    _eye_events()
+    _eye_collect()
+    _eye_show()
+
+
 FTB_MEANINGS = {
     "01": "general electrical failure", "02": "general signal failure", "04": "internal system failure", "07": "mechanical failure",
     "11": "circuit short to ground", "12": "circuit short to battery", "13": "circuit open",
@@ -7257,7 +7497,7 @@ LIVE DATA NOW (Mode 01 + OEM enhanced PIDs; enhanced values are unverified beta)
 I/M READINESS: {ev.get('readiness') or 'Not read'}
 MODE $06 RESULTS: {ev.get('mode6') or 'Not read'}
 PLAUSIBILITY ALERTS: {"; ".join(ev.get('flags') or []) or 'none'}
-{shop_context("o2 sensor purge fuel pressure fuel trim misfire vacuum charging")}
+{shop_context("o2 sensor purge fuel pressure fuel trim misfire vacuum charging")}{eye_context()}
 
 TASK:
 1. For each test: what it proved or ruled out, in one or two lines. Say so if a result looks wrong (test not done
@@ -7286,7 +7526,7 @@ MODE $06 RESULTS (value [min..max]):
 
 GUIDED TEST RESULTS (fuel trim / VE / catalyst / charging / power & braking, if run):
 {json.dumps(ev.get('tests') or ss.test_results or {}) or 'none'}
-{shop_context("live data fuel trim misfire mode 06 readiness sensor o2 maf map charging")}
+{shop_context("live data fuel trim misfire mode 06 readiness sensor o2 maf map charging")}{eye_context()}
 
 DIAGNOSTIC TASK:
 1. Fuel control: total trim (STFT + LTFT) Bank 1 vs Bank 2; single- vs dual-bank pattern.
@@ -7302,10 +7542,15 @@ Use clean bold section headers and direct shop-floor language. Skip sections wit
     drive_mode = ev.get("mode") == "drive"
     symptoms = (ss.symptoms or "").strip()
     ran_before = [t for t in (ev.get("ran") or []) if t in AUTO_TESTS]
+    eye = None if drive_mode else eye_fresh()
+    if eye:
+      prompt += ("\n\nThe attached image is the technician's scan tool screen right now (live screen share / camera). "
+                 "Use the factory data on it.")
+    eye_img = [eye["img"]] if eye else ""
     # Live checks read the live data — no web research here (that's what the Diagnostic Tree is for), so they answer fast.
     def job():
       text, research, draft, ds_draft = team_answer(prompt, vehicle, dtcs, symptoms, use_web=False, status=None, fast=drive_mode,
-                                                    effort="low" if drive_mode else "medium")
+                                                    effort="low" if drive_mode else "medium", image_b64=eye_img)
       tests = []
       if not drive_mode and not str(text).startswith("⚠️"):
         text, tests = split_run_tests(text)
@@ -7437,6 +7682,7 @@ Recent conversation:
 {history}
 
 Earlier web research for this job (if any): {(ss.dtc_result or {}).get("research", "")[:2500] or 'none'}
+{eye_context()}
 
 Respond directly, practically, and concisely to the latest question. Focus on physical shop tests, circuit checks, and logical isolation.
 """ + (f"""
@@ -7554,7 +7800,19 @@ def ask_chat(question: str, imgs: list, team: bool, where: str, videos: list | N
   ss.chat_history = (ss.chat_history or []) + [{"role": "user", "content": question, "photos": thumbs, "chat_id": rid,
                                                 "video_names": [n for n, _ in videos], "videos": [],
                                                 "reused_video": bool(reuse)}]
-  prompt = chat_prompt_for(question, len(photos_b64), len(videos) or len(reuse))
+  eye = eye_fresh()
+  if eye:   # the shared screen / camera goes first, so the AI sees what the tech sees
+    photos_b64 = [eye["img"]] + photos_b64[:3]
+    try:
+      t = Image.open(io.BytesIO(base64.b64decode(eye["img"]))).convert("RGB"); t.thumbnail((500, 500))
+      b = io.BytesIO(); t.save(b, format="JPEG", quality=80)
+      ss.chat_history[-1]["photos"] = [b.getvalue()] + list(ss.chat_history[-1].get("photos") or [])
+      ss.chat_history[-1]["eye"] = True
+    except Exception:
+      pass
+  prompt = chat_prompt_for(question, len(photos_b64), len(videos) or len(reuse)) + (
+      "\nThe FIRST image is a live view of what the technician is looking at right now (their shared scan tool screen or "
+      "camera). Read it carefully — it is their professional scan tool's data." if eye else "")
   n_notes = len(knowledge_for_job(30, question)) if knowledge_entries() else 0
   vehicle, codes, symptoms = ss.vehicle_info or "", ", ".join(current_codes()), (ss.symptoms or "").strip()
   meta = {"id": rid, "conv": ss.chat_conv, "q": question, "at": datetime.now().strftime("%Y-%m-%d %I:%M %p"),
@@ -7799,6 +8057,13 @@ def quick_help_panel():
   box = _try(st.container, border=True, key="quickhelp", fallback_drop=("key",))
   with box:
     n_kn = len(knowledge_entries())
+    # 👀 first in the box, so it stays in the same spot and the shared screen / camera keeps running between taps
+    if st.toggle("👀 Let the AI see my screen or camera", key="eye_toggle",
+                 help="Share your scan tool's screen (from a computer) or point the phone camera at it. The AI reads it every "
+                      "half minute and uses it in every answer and AI Check — so it sees what you see."):
+      eye_panel()
+    else:
+      ss.eye_on, ss.eye = False, None
     slot = st.container()             # where a new question + answer show up
     if msgs:
       with st.expander("💬 Conversation", expanded=True):
@@ -7831,6 +8096,10 @@ def quick_help_panel():
     st.caption("Knows the open car, the codes, the scanner data, the test plan, your shop history and "
                + (f"your {n_kn} Knowledge notes" if n_kn else "your Knowledge notes")
                + " · remembers your earlier chats · every question and answer is saved")
+    if ss.pop("_eye_ask", False) and not pending and eye_fresh():
+      with slot:
+        ask_chat("Here's what I'm looking at right now. What do you see? Anything that doesn't look right, and what should I "
+                 "check next?", [], bool(ss.get("qh_team", True)), "quick")
     if go and str(q or "").strip():
       if pending:
         st.warning("Hang on — the last answer is still being worked on. Ask again when it shows up.")
