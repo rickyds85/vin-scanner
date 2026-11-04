@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-08"
+APP_VERSION = "2026-11-09"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -96,6 +96,8 @@ WHATS_NEW = [
     "NEW: 📐 The AI asks for the wiring diagram when a test needs exact pins or wire colors (it won't guess them). Add a photo, "
     "a screenshot, or one tap from your shared Topdon / Autel screen — it reads the diagram and puts the exact hookup on the "
     "test step, and every later answer uses it",
+    "EASIER: 📋 Paste a diagram — snip it (Windows+Shift+S), click the paste box, Ctrl+V. Or share the diagram's tab once (👀) "
+    "and 📺 Use my shared screen grabs a fresh, sharp picture every time you tap it",
 ]
 
 st.markdown(
@@ -2624,15 +2626,23 @@ def diagram_adder(circuit: str, step_ids: list, key: str):
   """Add the diagram: a photo or screenshot, the camera, or whatever is on the shared Topdon / Autel screen."""
   n = ss.get("diag_n", 0)
   c1, c2 = st.columns([3, 2])
-  up = c1.file_uploader("Photo or screenshot of the diagram", type=PHOTO_TYPES, key=f"dgu_{key}_{n}")
+  with c1:
+    pasted = _paste_box(key=f"dgp_{key}_{n}", default=None)
+    up = st.file_uploader("…or a photo / screenshot file", type=PHOTO_TYPES, key=f"dgu_{key}_{n}")
   with c2:
-    eye = eye_fresh()
-    if eye and st.button("📺 Use my shared screen", key=f"dge_{key}_{n}", use_container_width=True,
-                         help="Grabs what's on your shared scan tool screen right now — open the wiring diagram on it first"):
-      process_diagram(base64.b64decode(eye["img"]), circuit, step_ids)
-    elif not eye:
-      st.caption("Tip: open the diagram on your Topdon / Autel and share its screen (👀 at the top) — then one tap adds it.")
+    if ss.get("eye_on"):
+      if st.button("📺 Use my shared screen", key=f"dge_{key}_{n}", use_container_width=True,
+                   help="Takes a fresh, sharp picture of your shared screen or tab right now — open the diagram there first"):
+        rid = f"dg{time.time():.3f}"
+        ss.eye_req, ss._dg_wait = {"id": rid}, {"req": rid, "circuit": circuit, "steps": list(step_ids), "t": time.time()}
+        st.rerun()
+      if ss.get("_dg_wait"):
+        st.caption("📺 Grabbing your shared screen…")
+    else:
+      st.caption("Tip: share the tab or screen that has the diagram (👀 at the top) — then one tap adds it, every time.")
     cam = camera_shot("📷 Snap the diagram", key=f"dgc_{key}_{n}") if st.toggle("📷 Camera", key=f"dgt_{key}") else None
+  if isinstance(pasted, dict) and pasted.get("img"):
+    process_diagram(base64.b64decode(pasted["img"]), circuit, step_ids)
   for f in (up, cam):
     if f is not None:
       process_diagram(f.getvalue(), circuit, step_ids)
@@ -7309,7 +7319,13 @@ const sendValue = (value) => toStreamlit("streamlit:setComponentValue", { value,
 let lastH = 0;
 function fit() { const h = document.documentElement.scrollHeight; if (h !== lastH) { lastH = h; toStreamlit("streamlit:setFrameHeight", { height: h }); } }
 new ResizeObserver(fit).observe(document.body);
-window.addEventListener("message", (e) => { if (e.data && e.data.type === "streamlit:render") fit(); });
+let lastReq = null;
+window.addEventListener("message", (e) => {
+  if (!e.data || e.data.type !== "streamlit:render") return;
+  const r = (e.data.args || {}).req;
+  if (r && r.id && r.id !== lastReq) { lastReq = r.id; setTimeout(() => grab(true, false, r.id), 150); }   // the app wants a fresh picture now
+  fit();
+});
 toStreamlit("streamlit:componentReady", { apiVersion: 1 });
 
 const $ = (id) => document.getElementById(id);
@@ -7360,15 +7376,15 @@ function fingerprint(c) {   // a tiny copy of the picture: skip sending when not
   for (let i = 0; i < d.length; i += 4) out.push((d[i] + d[i + 1] + d[i + 2]) / 3);
   return out;
 }
-function grab(force, ask) {
-  const v = $("v"); if (!stream || !v.videoWidth) return;
-  const w = Math.min(1600, v.videoWidth), h = Math.round(v.videoHeight * w / v.videoWidth);
+function grab(force, ask, req) {
+  const v = $("v"); if (!stream || !v.videoWidth) { if (req) sendValue({ type: "nopic", id: "np" + Date.now(), req }); return; }
+  const w = Math.min(req ? 2400 : 1600, v.videoWidth), h = Math.round(v.videoHeight * w / v.videoWidth);   // sharper for a diagram
   const c = $("c"); c.width = w; c.height = h; c.getContext("2d").drawImage(v, 0, 0, w, h);
   const f = fingerprint(c);
   if (!force && lastSig) { let diff = 0; for (let i = 0; i < f.length; i++) diff += Math.abs(f[i] - lastSig[i]); if (diff / f.length < 0.25) return; }
   lastSig = f;
-  const img = c.toDataURL("image/jpeg", 0.85).split(",")[1];
-  sendValue({ type: "frame", id: "f" + Date.now() + "-" + (++n), img, kind, w, h, ask: !!ask, at: new Date().toLocaleTimeString() });
+  const img = c.toDataURL("image/jpeg", req ? 0.92 : 0.85).split(",")[1];
+  sendValue({ type: "frame", id: "f" + Date.now() + "-" + (++n), img, kind, w, h, ask: !!ask, req: req || null, at: new Date().toLocaleTimeString() });
 }
 $("scrBtn").onclick = () => start("screen");
 $("camBtn").onclick = () => start("camera");
@@ -7392,6 +7408,66 @@ def _eye_component_dir() -> str:
 
 
 _eye = components.declare_component("ai_eyes", path=_eye_component_dir())
+
+PASTE_HTML = r'''<!doctype html><html><head><meta charset="utf-8">
+<style>
+  body { margin: 0; font-family: Inter, system-ui, -apple-system, sans-serif; color: #F1F5F9; background: transparent; }
+  #box { border: 2px dashed rgba(16,185,129,.55); border-radius: 10px; padding: 14px 10px; text-align: center; cursor: text;
+         background: rgba(16,185,129,.05); outline: none; font-size: .92rem; }
+  #box:focus { border-color: #10B981; background: rgba(16,185,129,.12); }
+  .note { color: #8B9BB4; font-size: .78rem; }
+  img { max-width: 100%; max-height: 90px; margin-top: 6px; border-radius: 6px; }
+</style></head><body>
+<div id="box" tabindex="0"><b>📋 Click here, then press Ctrl+V</b> to paste a screenshot<br>
+<span class="note">Snip it first: Windows+Shift+S (Mac: Cmd+Ctrl+Shift+4) and drag around the diagram · or drag a picture file in</span>
+<div id="got"></div></div>
+<script>
+function toStreamlit(type, data) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type }, data || {}), "*"); }
+const sendValue = (value) => toStreamlit("streamlit:setComponentValue", { value, dataType: "json" });
+let lastH = 0;
+function fit() { const h = document.documentElement.scrollHeight; if (h !== lastH) { lastH = h; toStreamlit("streamlit:setFrameHeight", { height: h }); } }
+new ResizeObserver(fit).observe(document.body);
+window.addEventListener("message", (e) => { if (e.data && e.data.type === "streamlit:render") fit(); });
+toStreamlit("streamlit:componentReady", { apiVersion: 1 });
+const box = document.getElementById("box"), got = document.getElementById("got");
+function take(file) {
+  if (!file || !/^image\//.test(file.type)) { got.textContent = "That isn't a picture — snip the diagram and paste again."; fit(); return; }
+  const im = new Image();
+  im.onload = () => {
+    const s = Math.min(1, 2400 / Math.max(im.width, im.height)), c = document.createElement("canvas");
+    c.width = Math.round(im.width * s); c.height = Math.round(im.height * s);
+    const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); g.drawImage(im, 0, 0, c.width, c.height);
+    const url = c.toDataURL("image/jpeg", 0.92);
+    got.innerHTML = `<img src="${url}"><div class="note">✓ Got it — the AI is reading it…</div>`; fit();
+    sendValue({ id: "p" + Date.now(), img: url.split(",")[1], w: c.width, h: c.height });
+  };
+  im.src = URL.createObjectURL(file);
+}
+document.addEventListener("paste", (e) => {
+  const items = [...((e.clipboardData && e.clipboardData.items) || [])];
+  const it = items.find((x) => x.type && x.type.startsWith("image/"));
+  if (it) { e.preventDefault(); take(it.getAsFile()); }
+  else { got.textContent = "No picture on the clipboard — snip the diagram first (Windows+Shift+S), then Ctrl+V here."; fit(); }
+});
+box.addEventListener("dragover", (e) => { e.preventDefault(); box.focus(); });
+box.addEventListener("drop", (e) => { e.preventDefault(); take(e.dataTransfer.files && e.dataTransfer.files[0]); });
+box.addEventListener("click", () => box.focus());
+fit();
+</script></body></html>
+'''
+
+
+def _paste_component_dir() -> str:
+  d = Path(tempfile.gettempdir()) / "paste_box"
+  d.mkdir(exist_ok=True)
+  f = d / "index.html"
+  if not f.exists() or f.read_text(encoding="utf-8") != PASTE_HTML:
+    f.write_text(PASTE_HTML, encoding="utf-8")
+  return str(d)
+
+
+_paste_box = components.declare_component("paste_box", path=_paste_component_dir())
+
 
 EYE_READ_PROMPT = """This is a live view of what an automotive technician is looking at right now — usually a scan tool screen
 (Autel, Snap-on, factory tool) showing live data, codes, freeze frame, Mode $06 or a scope; or a camera view of the
@@ -7445,10 +7521,21 @@ def eye_context() -> str:
 
 
 def _eye_events():
-  ev = _eye(key="ai_eyes", default=None)
+  ev = _eye(key="ai_eyes", req=ss.get("eye_req"), default=None)
+  w = ss.get("_dg_wait")
+  if w and time.time() - w["t"] > 15:   # the picture never came (sharing stopped?)
+    ss._dg_wait = None
+    st.warning("Didn't get a picture from the shared screen — is it still sharing? Try again, or paste a screenshot.")
   if not (isinstance(ev, dict) and ev.get("id") and ev["id"] != ss.get("_eye_last")):
     return
   ss._eye_last = ev["id"]
+  if w and ev.get("req") == w.get("req"):   # the fresh picture asked for by 📺 Use my shared screen: it's a wiring diagram
+    ss._dg_wait = None
+    if ev.get("type") == "frame" and ev.get("img"):
+      process_diagram(base64.b64decode(ev["img"]), w["circuit"], w["steps"])
+    else:
+      st.warning("The shared screen isn't showing anything yet — open the diagram there and try again.")
+    return
   if ev.get("type") == "state":
     ss.eye_on, ss.eye_kind = bool(ev.get("on")), ev.get("kind", "")
     if not ss.eye_on:
