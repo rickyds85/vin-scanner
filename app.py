@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-07"
+APP_VERSION = "2026-11-08"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -91,6 +91,11 @@ WHATS_NEW = [
     "NEW: 👀 Let the AI see my screen or camera (top of the page) — share your Autel / Snap-on screen from a computer, or point "
     "the phone camera at it. The AI reads the screen every half minute and uses it in every chat answer and AI Check; "
     "🤔 Ask the AI about this screen gets an answer about exactly what you're looking at",
+    "NEW: 📖 Your own test methods from Knowledge come first — the AI uses your method (your steps and values) when it plans a "
+    "test and marks it 📖 Shop method, and each step card shows the matching note",
+    "NEW: 📐 The AI asks for the wiring diagram when a test needs exact pins or wire colors (it won't guess them). Add a photo, "
+    "a screenshot, or one tap from your shared Topdon / Autel screen — it reads the diagram and puts the exact hookup on the "
+    "test step, and every later answer uses it",
 ]
 
 st.markdown(
@@ -210,7 +215,7 @@ DEFAULTS = {
     "tech_notes": "", "customer_summary": "", "fix_part": "", "fix_test": "", "fix_notes": "",
     "customer_email": "", "odometer": "", "estimate_rows": [], "follow_up_days": 0, "follow_up_note": "",
     "follow_up_done": False, "drive_plan": "", "wave_result": None, "know_pending": None,
-    "plan_steps": None, "plan_idx": 0, "plan_done": [], "plan_notes": {}, "plan_qa": None,
+    "plan_steps": None, "plan_idx": 0, "plan_done": [], "plan_notes": {}, "plan_qa": None, "diag_requests": [],
 }
 for _k, _v in DEFAULTS.items():
     ss.setdefault(_k, copy.deepcopy(_v))
@@ -2269,7 +2274,7 @@ JOB_FIELDS = ["customer_name", "customer_phone", "customer_address", "vin_input"
               "vehicle_details", "sel_codes", "manual_dtc", "symptoms", "ble_dtcs", "scan_data", "test_results", "dtc_result",
               "scope_result", "chat_history", "tech_notes", "customer_summary", "fix_part", "fix_test", "fix_notes",
               "customer_email", "odometer", "estimate_rows", "follow_up_days", "follow_up_note", "follow_up_done",
-              "wave_result", "plan_steps", "plan_idx", "plan_done", "plan_notes"]
+              "wave_result", "plan_steps", "plan_idx", "plan_done", "plan_notes", "diag_requests"]
 
 
 def job_snapshot() -> dict:
@@ -2395,6 +2400,8 @@ def knowledge_for_job(limit: int = 30, extra: str = "") -> list[dict]:
     if named and make and not (named & same_family):
       continue   # a note for another make never goes into this car's diagnosis
     score = sum(1 for w in words if w in text) + (3 if named & same_family else 0)
+    if score > 0 and e.get("type") == "Test procedure":
+      score += 2   # the shop's own test methods matter most when planning tests
     scored.append((score, e))
   if len(scored) > limit:
     scored = [x for x in scored if x[0] > 0] or scored
@@ -2439,10 +2446,24 @@ def knowledge_block(extra: str = "", limit: int = 30) -> str:
     return ""
   if not kn:
     return ""
-  return ("THIS SHOP'S TESTING KNOWLEDGE (the technician's own notes: specs, what patterns mean, test methods). "
-          "Apply the ones that fit and say which you used; if a note conflicts with the measured data, say so:\n"
-          + "\n".join(f"- [{e.get('topic', 'General')}{(' · ' + e['applies_to']) if e.get('applies_to') and str(e['applies_to']).lower() not in ('all', 'any') else ''}] "
-                      f"{e.get('rule', '')}" for e in kn))
+  line = lambda e: (f"- [{e.get('topic', 'General')}{(' · ' + e['applies_to']) if e.get('applies_to') and str(e['applies_to']).lower() not in ('all', 'any') else ''}] "
+                    f"{e.get('rule', '')}")
+  tests = [e for e in kn if e.get("type") == "Test procedure"]
+  other = [e for e in kn if e.get("type") != "Test procedure"]
+  return ("THIS SHOP'S TESTING KNOWLEDGE (the technician's own notes). Apply the ones that fit and say which you used; "
+          "if a note conflicts with the measured data, say so."
+          + ("\nTHEIR OWN TEST METHODS — when a test you recommend matches one of these, use THEIR method (their exact steps, "
+             "hookup and values) instead of a generic one, and mark it '📖 Shop method':\n" + "\n".join(map(line, tests)) if tests else "")
+          + ("\nTHEIR SPECS, PATTERNS AND RULES OF THUMB:\n" + "\n".join(map(line, other)) if other else ""))
+
+
+def test_methods(extra: str = "", limit: int = 10) -> list[dict]:
+  """The shop's own Test procedure notes that fit this job, numbered K1, K2... for the step cards."""
+  try:
+    kn = [e for e in knowledge_for_job(60, extra) if e.get("type") == "Test procedure"][:limit]
+  except Exception:
+    return []
+  return [dict(e, kid=f"K{i + 1}") for i, e in enumerate(kn)]
 
 
 def shop_context(extra: str = "") -> str:
@@ -2477,6 +2498,189 @@ def shop_context(extra: str = "") -> str:
   except Exception as e:   # history is a bonus; never block a diagnosis over it
     log_problem("storage", "Shop history for AI", str(e))
   return ("\n\n" + "\n".join(out)) if out else ""
+
+
+# --- WIRING DIAGRAMS: the AI asks for the diagram a test needs; the tech adds a photo, screenshot or the shared screen ---
+DIAGRAM_RULE = """
+
+WIRING DIAGRAMS: never guess pin numbers, wire colors or connector IDs. If a test needs them and they aren't in the
+technician's added diagrams (below, if any), ask for the diagram: end your answer with one line exactly like
+NEED_DIAGRAM: Bank 1 Sensor 1 O2 sensor circuit, PCM to sensor; PCM power and ground circuits
+(name each circuit plainly, at most 3). If no diagram is needed, leave the line out."""
+
+DIAGRAM_READ_PROMPT = """You are a master automotive electrical diagnostician reading a wiring diagram the technician just added.
+Vehicle: {vehicle}
+The diagram is for: {circuit}
+The tests that need it:
+{tests}
+
+Read the diagram carefully and return JSON only:
+{{"summary": "<the circuit in plain words: each connector (ID / C-number) with its pin or cavity numbers, wire colors, circuit numbers or names, splices (S-numbers), grounds (G-numbers), fuses and relays, and which module pins it runs to>",
+ "tests": [{{"step": <the step number from the list above, or 0>, "hookup": "<exactly where to back-probe (connector, pin, wire color), what to measure it against, key on or engine running, and the reading that means good vs bad>"}}],
+ "unclear": "<anything too small, blurry or cut off to read — or ''>"}}
+Use only what you can read on the diagram. Never guess a pin number or wire color — put it in "unclear" instead."""
+
+
+def _norm_circ(c) -> set:
+  return set(re.findall(r"[a-z0-9]+", str(c or "").lower())) - KN_STOP - {"circuit", "wiring", "diagram", "the", "to"}
+
+
+def _circ_match(a, b) -> bool:
+  A, B = _norm_circ(a), _norm_circ(b)
+  return bool(A and B) and len(A & B) / min(len(A), len(B)) >= 0.6
+
+
+def split_need_diagram(text: str) -> tuple[str, list]:
+  """Turn the AI's NEED_DIAGRAM line into a plain note for the tech; returns (text, circuits asked for)."""
+  found = []
+  def grab(m):
+    found.extend(c.strip(" .;,-*_`") for c in re.split(r";|\s\|\s", m.group(1)))
+    return ""
+  clean = re.sub(r"(?im)^[\s*_`>-]*NEED[_ ]DIAGRAMS?\s*[:=]\s*(.*)$", grab, text or "").rstrip()
+  found = [c for c in dict.fromkeys(found) if c and c.lower() not in ("none", "n/a", "no")][:3]
+  if found:
+    clean += ("\n\n📐 **Wiring diagram needed:** " + "; ".join(found) + " — add it in 📐 Wiring diagrams on the 🔧 Diagnose "
+              "tab (photo, screenshot, or your shared screen) and the AI will give you the exact pins and wire colors.")
+  return clean, found
+
+
+def add_diagram_requests(circuits: list, source: str):
+  reqs = list(ss.get("diag_requests") or [])
+  for c in circuits or []:
+    if c and not any(_circ_match(c, r.get("circuit")) for r in reqs):
+      reqs.append({"circuit": str(c)[:160], "from": source, "at": datetime.now().strftime("%I:%M %p")})
+  ss.diag_requests = reqs[-12:]
+
+
+def job_diagrams() -> list[dict]:
+  rows = []
+  if ss.get("job_id"):
+    try:
+      rows = [dict(r.get("data") or {}, _id=r["id"]) for r in store_list("diagram", 20, {"job": ss.job_id})]
+    except Exception:
+      rows = []
+  have = {r["_id"] for r in rows}
+  return rows + [d for d in (ss.get("diagrams_nojob") or []) if d.get("_id") not in have]
+
+
+def diagram_for(circuit: str, step_idx: int | None = None) -> dict | None:
+  for d in job_diagrams():
+    if (step_idx is not None and step_idx in (d.get("steps") or [])) or _circ_match(circuit, d.get("circuit")):
+      return d
+  return None
+
+
+def diagram_context() -> str:
+  ds = job_diagrams()
+  if not ds:
+    return ""
+  out = ["\n\nWIRING DIAGRAMS THE TECHNICIAN ADDED (read from their diagram photos — use these exact connectors, pins and "
+         "wire colors; don't contradict them):"]
+  for d in ds[:4]:
+    r = d.get("read") or {}
+    out.append(f"- {d.get('circuit')}: {str(r.get('summary', ''))[:1500]}")
+    for t in (r.get("tests") or [])[:6]:
+      out.append(f"  · hookup{(' for step ' + str(t.get('step'))) if t.get('step') else ''}: {str(t.get('hookup', ''))[:400]}")
+    if r.get("unclear"):
+      out.append(f"  · couldn't read on the diagram: {r['unclear']}")
+  return "\n".join(out)
+
+
+def process_diagram(img_bytes: bytes, circuit: str, step_ids: list):
+  """The AI reads a wiring diagram the tech added and turns it into exact hookups for the tests that need it."""
+  h = hashlib.md5(img_bytes).hexdigest() + _norm_circ(circuit).__repr__()
+  if h in (ss.get("_dg_seen") or set()):
+    return
+  ss._dg_seen = set(ss.get("_dg_seen") or set()) | {h}
+  ss.diag_n = ss.get("diag_n", 0) + 1   # empties the photo boxes for the next one
+  try:
+    b64 = shrink_to_b64(img_bytes, 2000, 88)   # big enough to read pin numbers and wire colors
+  except Exception:
+    ss._toast = "Couldn't open that picture — try a JPG or PNG."
+    st.rerun()
+  ps = ss.get("plan_steps") or {}
+  steps = ps.get("steps") or [] if ps.get("_for") == _plan_sig() else []
+  match = sorted(set(step_ids) | {i for i, s_ in enumerate(steps) if s_.get("diagram") and _circ_match(circuit, s_["diagram"])})
+  tests = "\n".join(f"{i + 1}. {steps[i].get('title')}: {steps[i].get('do')}" for i in match if i < len(steps))
+  with st.spinner("📐 The AI is reading the wiring diagram..."):
+    raw, who = quick_ai(DIAGRAM_READ_PROMPT.format(vehicle=ss.vehicle_info or "not given", circuit=circuit,
+                                                   tests=tests or "(general checks of this circuit — power, ground, signal)"),
+                        image_b64=b64, max_tokens=6000, effort="medium")
+  if str(raw).startswith("⚠️"):
+    ss._toast = "Couldn't read the diagram: " + str(raw)[2:150]
+    st.rerun()
+  obj = find_json(raw, dict) or {"summary": str(raw)[:3000], "tests": [], "unclear": ""}
+  autosave_job(force=True)
+  rid = f"{ss.get('job_id') or 'nojob'}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+  rec = {"job": ss.get("job_id") or "", "vin": ss.get("active_vin") or "", "vehicle": ss.vehicle_info or "", "circuit": circuit,
+         "b64": b64, "read": obj, "steps": match, "who": who, "at": datetime.now().strftime("%Y-%m-%d %I:%M %p")}
+  store_put("diagram", rid, rec)
+  if not ss.get("job_id"):
+    ss.diagrams_nojob = (ss.get("diagrams_nojob") or []) + [dict(rec, _id=rid)]
+  queue_update(toast="📐 Diagram read — the exact pins and wire colors are on the test steps")
+
+
+def diagram_adder(circuit: str, step_ids: list, key: str):
+  """Add the diagram: a photo or screenshot, the camera, or whatever is on the shared Topdon / Autel screen."""
+  n = ss.get("diag_n", 0)
+  c1, c2 = st.columns([3, 2])
+  up = c1.file_uploader("Photo or screenshot of the diagram", type=PHOTO_TYPES, key=f"dgu_{key}_{n}")
+  with c2:
+    eye = eye_fresh()
+    if eye and st.button("📺 Use my shared screen", key=f"dge_{key}_{n}", use_container_width=True,
+                         help="Grabs what's on your shared scan tool screen right now — open the wiring diagram on it first"):
+      process_diagram(base64.b64decode(eye["img"]), circuit, step_ids)
+    elif not eye:
+      st.caption("Tip: open the diagram on your Topdon / Autel and share its screen (👀 at the top) — then one tap adds it.")
+    cam = camera_shot("📷 Snap the diagram", key=f"dgc_{key}_{n}") if st.toggle("📷 Camera", key=f"dgt_{key}") else None
+  for f in (up, cam):
+    if f is not None:
+      process_diagram(f.getvalue(), circuit, step_ids)
+
+
+def diagrams_panel():
+  ds = job_diagrams()
+  ps = ss.get("plan_steps") or {}
+  steps = ps.get("steps") or [] if ps.get("_for") == _plan_sig() else []
+  wanted = list(ss.get("diag_requests") or [])
+  for i, s_ in enumerate(steps):
+    if str(s_.get("diagram") or "").strip() and not any(_circ_match(s_["diagram"], w.get("circuit")) for w in wanted):
+      wanted.append({"circuit": s_["diagram"], "from": f"step {i + 1}"})
+  open_ = [w for w in wanted if not diagram_for(w["circuit"])]
+  if not ds and not open_ and not st.session_state.get("dg_more"):
+    if st.button("📐 Add a wiring diagram", key="dg_more_btn"):
+      ss.dg_more = True
+      st.rerun()
+    return
+  with st.expander(f"📐 Wiring diagrams for this job — {len(ds)} added" + (f", {len(open_)} the AI needs" if open_ else ""),
+                   expanded=bool(open_)):
+    st.caption("The AI asks for a diagram when a test needs exact pins or wire colors, and never guesses them. Add a photo, a "
+               "screenshot, or your shared scan tool screen — it reads the diagram and puts the exact hookup on each test step.")
+    for k, w in enumerate(open_):
+      with st.container(border=True):
+        st.markdown(f"**📐 Needed: {w['circuit']}**  \n<small>asked for by the {w.get('from', 'AI')}</small>", unsafe_allow_html=True)
+        diagram_adder(w["circuit"], [i for i, s_ in enumerate(steps) if _circ_match(w["circuit"], s_.get("diagram"))], f"r{k}")
+    for d in ds:
+      r = d.get("read") or {}
+      with st.container(border=True):
+        a, b = st.columns([1, 2])
+        try:
+          a.image(base64.b64decode(d.get("b64", "")), use_container_width=True, caption=d.get("at", ""))
+        except Exception:
+          a.caption("(picture unreadable)")
+        b.markdown(f"**📐 {d.get('circuit')}**  \n{r.get('summary', '')}")
+        for t in r.get("tests") or []:
+          b.markdown(f"- {'Step ' + str(t.get('step')) + ': ' if t.get('step') else ''}{t.get('hookup', '')}")
+        if r.get("unclear"):
+          b.caption(f"⚠️ Couldn't read: {r['unclear']}")
+        if b.button("🗑️ Remove", key=f"dgdel_{d['_id']}"):
+          store_delete("diagram", d["_id"])
+          ss.diagrams_nojob = [x for x in (ss.get("diagrams_nojob") or []) if x.get("_id") != d["_id"]]
+          st.rerun()
+    other = st.text_input("➕ Diagram for another circuit — what is it?", key="dg_other",
+                          placeholder="e.g. Fuel pump circuit, relay to pump")
+    if other.strip():
+      diagram_adder(other.strip(), [], "other")
 
 
 def save_fix():
@@ -2831,18 +3035,25 @@ Symptoms: {symptoms}
 THE TEST PLAN:
 {plan}
 
+THE SHOP'S OWN TEST METHODS (the technician's Knowledge notes). When a step is one of these tests, write the step using
+THEIR method and put its id in "methods":
+{methods}
+
 RULES:
 - 4 to 8 steps, in the same order as the plan (fastest/cheapest and most likely first).
 - Each step is ONE test with a clear pass/fail result. Plain, simple words.
 - Keep every spec, value and pin number EXACTLY as the plan gives it. Never invent a spec: if the plan has none,
   write "Look up the spec in service info".
 - Add a short safety note where it matters (hot exhaust, moving belts or fan, fuel pressure, airbags, battery).
+- If a step tests a circuit (voltage, ground, resistance, continuity, back-probing a pin, scoping a wire), set "diagram" to
+  the wiring diagram it needs, named plainly (e.g. "Bank 1 Sensor 1 O2 sensor circuit, PCM to sensor"); otherwise "".
+  Never invent pin numbers or wire colors.
 - Explain each trouble code in one plain sentence (what the computer noticed), and write a one-line plain headline.
 
 Return JSON only:
 {{"headline": "...", "codes": [{{"code": "P0171", "plain": "..."}}],
  "steps": [{{"title": "...", "do": "what to do, step by step", "where": "where on this vehicle", "tools": "tools needed",
-            "pass_fail": "what result means good vs bad", "safety": "or empty"}}]}}"""
+            "pass_fail": "what result means good vs bad", "safety": "or empty", "methods": ["K1"], "diagram": "or empty"}}]}}"""
 
 
 def _plan_sig() -> str:
@@ -2854,9 +3065,12 @@ def build_step_cards() -> bool:
   plan = (ss.get("dtc_result") or {}).get("text", "")
   if not plan.strip():
     return False
+  methods = test_methods(plan[:4000])
   with st.spinner("Turning the plan into step-by-step cards..."):
     raw, who = quick_ai(STEP_PROMPT.format(vehicle=ss.vehicle_info or "not given", codes=", ".join(current_codes()) or "none",
-                                           symptoms=(ss.symptoms or "").strip() or "not given", plan=plan[:9000]),
+                                           symptoms=(ss.symptoms or "").strip() or "not given", plan=plan[:9000],
+                                           methods="\n".join(f"- {m['kid']}: [{m.get('topic', '')}] {m.get('rule', '')}" for m in methods)
+                                           or "(none on file for this job)") + diagram_context(),
                         max_tokens=8000, effort="low")
   obj = find_json(raw, dict) or {}
   steps = [x for x in (obj.get("steps") or []) if isinstance(x, dict) and str(x.get("title") or "").strip()]
@@ -2864,6 +3078,10 @@ def build_step_cards() -> bool:
     st.error("Couldn't turn the plan into steps. " + (raw[:250] if raw.startswith("⚠️") else "Try again."))
     return False
   obj["steps"], obj["_for"], obj["_who"] = steps[:10], _plan_sig(), who
+  obj["_methods"] = {m["kid"]: {"topic": m.get("topic", ""), "rule": m.get("rule", ""), "source": m.get("source", "")} for m in methods}
+  for s_ in obj["steps"]:
+    if str(s_.get("diagram") or "").strip():
+      add_diagram_requests([s_["diagram"]], "step cards")
   ss.plan_steps, ss.plan_idx, ss.plan_done, ss.plan_notes, ss.plan_qa = obj, 0, [], {}, None
   return True
 
@@ -2909,6 +3127,26 @@ def step_cards_panel(simple: bool):
       + (f'<p class="tdg-spec"><b>📏 Pass / fail:</b> {e(str(cur.get("pass_fail")))}</p>' if cur.get("pass_fail") else "")
       + (f'<p class="tdg-safe"><b>⚠️ Safety:</b> {e(str(cur.get("safety")))}</p>' if str(cur.get("safety") or "").strip() else "")
       + "</div>", unsafe_allow_html=True)
+  for mid in cur.get("methods") or []:   # 📖 the shop's own method for this test, from Knowledge
+    mth = (ps.get("_methods") or {}).get(str(mid))
+    if mth:
+      st.markdown(f'<div class="tdg-card tdg-green"><b>📖 Your method — {e(str(mth.get("topic", "")))}:</b> {e(str(mth.get("rule", "")))}'
+                  + (f'<br><small>from {e(str(mth.get("source")))}</small>' if mth.get("source") else "") + "</div>", unsafe_allow_html=True)
+  if str(cur.get("diagram") or "").strip():   # 📐 exact pins from the tech's wiring diagram, or ask for it
+    dg = diagram_for(cur["diagram"], idx)
+    if dg:
+      rd = dg.get("read") or {}
+      hook = [t for t in rd.get("tests") or [] if str(t.get("step")) == str(idx + 1)]
+      st.markdown(f'<div class="tdg-card tdg-blue"><b>📐 From your wiring diagram ({e(str(dg.get("circuit", "")))}):</b><br>'
+                  f'{e(str(hook[0].get("hookup") if hook else str(rd.get("summary", ""))[:700]))}'
+                  + (f'<br><small>⚠️ couldn\'t read: {e(str(rd.get("unclear")))}</small>' if rd.get("unclear") else "") + "</div>",
+                  unsafe_allow_html=True)
+    else:
+      with st.container(border=True):
+        st.markdown(f"**📐 This test needs the wiring diagram for:** {cur['diagram']}  \n"
+                    "<small>Add it and the AI gives you the exact pin and wire color to test — it won't guess them.</small>",
+                    unsafe_allow_html=True)
+        diagram_adder(str(cur["diagram"]), [idx], f"s{sig}_{idx}")
   note = st.text_input("What did you find on this step? (saved with the job, and the AI uses it)",
                        value=(ss.plan_notes or {}).get(str(idx), ""), key=f"pn_{sig}_{idx}",
                        placeholder="e.g. 0.42 V on the signal wire with key on — spec 0.5 V")
@@ -2933,11 +3171,17 @@ def step_cards_panel(simple: bool):
   q = st.columns(3)
   for i_, (k, (lab, ask)) in enumerate(STEP_QUESTIONS.items()):
     if q[i_].button(lab, use_container_width=True, key=f"pq_{sig}_{k}"):
+      _dgr = diagram_for(str(cur.get("diagram") or ""), idx) if cur.get("diagram") else None
+      _dg_img = [_dgr["b64"]] if _dgr and _dgr.get("b64") else ""
       with st.spinner("Asking..."):
         ans, who = quick_ai(f"Vehicle: {ss.vehicle_info or 'not given'}. Codes: {', '.join(current_codes()) or 'none'}.\n"
                             f"Current test step: {cur.get('title')} — {cur.get('do')} (where: {cur.get('where')}; "
                             f"pass/fail: {cur.get('pass_fail')}).\n\nQuestion: {ask}\nAnswer in plain words, under 180 words.\n\n"
-                            + knowledge_block(f"{cur.get('title')} {cur.get('do')} {cur.get('where')} {cur.get('tools')}", 8),
+                            + knowledge_block(f"{cur.get('title')} {cur.get('do')} {cur.get('where')} {cur.get('tools')}", 8)
+                            + diagram_context()
+                            + ("\nThe attached image is the technician's wiring diagram for this test — use its exact pins and colors."
+                               if _dg_img else ""),
+                            image_b64=_dg_img,
                             max_tokens=3000, effort="low")
       ss.plan_qa = {"idx": idx, "q": lab, "a": ans}
   qa = ss.get("plan_qa")
@@ -7356,6 +7600,8 @@ if hasattr(st, "fragment"):
     ss._ai_pending = None
     if j["state"] == "done":
       text, research, draft, ds_draft, *more = j["result"]
+      if len(more) > 1:
+        add_diagram_requests(more[1], "AI Check")
       ss.ble_ai = {"id": p["comp_id"], "text": text, "label": " · ".join(x for x in (
           p["label"], team_names(draft, ds_draft, research), f"{int(j['finished'] - j['started'])} s") if x),
                    "tests": (more[0] if more else []) or []}
@@ -7497,7 +7743,7 @@ LIVE DATA NOW (Mode 01 + OEM enhanced PIDs; enhanced values are unverified beta)
 I/M READINESS: {ev.get('readiness') or 'Not read'}
 MODE $06 RESULTS: {ev.get('mode6') or 'Not read'}
 PLAUSIBILITY ALERTS: {"; ".join(ev.get('flags') or []) or 'none'}
-{shop_context("o2 sensor purge fuel pressure fuel trim misfire vacuum charging")}{eye_context()}
+{shop_context("o2 sensor purge fuel pressure fuel trim misfire vacuum charging")}{eye_context()}{diagram_context()}
 
 TASK:
 1. For each test: what it proved or ruled out, in one or two lines. Say so if a result looks wrong (test not done
@@ -7505,7 +7751,7 @@ TASK:
 2. The updated most likely cause(s), ranked, and how sure you are now.
 3. The next step: the single most definitive test or repair for the technician, with the tool and the pass/fail number.
 
-Use clean bold section headers and direct shop-floor language.""" + run_tests_rules(ran)
+Use clean bold section headers and direct shop-floor language.""" + run_tests_rules(ran) + DIAGRAM_RULE
       label = f"[AI follow-up on the tests - {ev.get('at')}]"
     else:
       prompt = f"""You are an expert ASE Master / L1 Diagnostic Technician.
@@ -7526,7 +7772,7 @@ MODE $06 RESULTS (value [min..max]):
 
 GUIDED TEST RESULTS (fuel trim / VE / catalyst / charging / power & braking, if run):
 {json.dumps(ev.get('tests') or ss.test_results or {}) or 'none'}
-{shop_context("live data fuel trim misfire mode 06 readiness sensor o2 maf map charging")}{eye_context()}
+{shop_context("live data fuel trim misfire mode 06 readiness sensor o2 maf map charging")}{eye_context()}{diagram_context()}
 
 DIAGNOSTIC TASK:
 1. Fuel control: total trim (STFT + LTFT) Bank 1 vs Bank 2; single- vs dual-bank pattern.
@@ -7537,7 +7783,7 @@ DIAGNOSTIC TASK:
 6. The single most definitive next physical/electrical test to confirm the root cause.
 
 Use clean bold section headers and direct shop-floor language. Skip sections with no data.""" + \
-          run_tests_rules([t for t in (ev.get("ran") or []) if t in AUTO_TESTS])
+          run_tests_rules([t for t in (ev.get("ran") or []) if t in AUTO_TESTS]) + DIAGRAM_RULE
       label = f"[Full AI Check - {ev.get('at')}]"
     drive_mode = ev.get("mode") == "drive"
     symptoms = (ss.symptoms or "").strip()
@@ -7551,19 +7797,21 @@ Use clean bold section headers and direct shop-floor language. Skip sections wit
     def job():
       text, research, draft, ds_draft = team_answer(prompt, vehicle, dtcs, symptoms, use_web=False, status=None, fast=drive_mode,
                                                     effort="low" if drive_mode else "medium", image_b64=eye_img)
-      tests = []
+      tests, diag = [], []
       if not drive_mode and not str(text).startswith("⚠️"):
         text, tests = split_run_tests(text)
+        text, diag = split_need_diagram(text)
         if tests is None:   # the reviewer dropped the line: ask which tests quickly
           tests = pick_tests(text, ran_before)
         tests = [t for t in tests if t not in ran_before]
-      return text, research, draft, ds_draft, tests
+      return text, research, draft, ds_draft, tests, diag
     if start_ai_job(ev.get("id"), job):
       ss._ai_pending = {"job": ev.get("id"), "comp_id": ev.get("id"), "label": label,
                         "what": "Live drive check" if drive_mode else ("Follow-up on the tests" if ev.get("mode") == "followup" else "AI check")}
       return
     with st.spinner("🤖 AI team is checking the live data..."):   # older Streamlit: the old way
-      text, research, draft, ds_draft, tests = job()
+      text, research, draft, ds_draft, tests, diag = job()
+    add_diagram_requests(diag, "AI Check")
     ss.ble_ai = {"id": ev.get("id"), "text": text, "label": label + " · " + team_names(draft, ds_draft, research), "tests": tests}
     st.rerun()
 
@@ -7619,14 +7867,14 @@ def scan_context(extra: str = "") -> str:
   """Everything the scanner captured + the shop's history and Knowledge notes, for the AI prompts."""
   tests = ("\nGuided test results: " + json.dumps(ss.test_results)) if ss.test_results else ""
   if not ss.ble_dtcs and not ss.scan_data:
-    return "No scanner data (codes entered by hand)." + tests + shop_context(extra)
+    return "No scanner data (codes entered by hand)." + tests + shop_context(extra) + diagram_context()
   sd = ss.scan_data or {}
   pids = json.dumps(sd.get("pids") or {}, indent=0) if sd.get("pids") else "not captured"
   return (f"Scanner codes: {_fmt_dtcs(ss.ble_dtcs)}\n"
           f"I/M readiness: {sd.get('readiness') or 'not read'}\n"
           + ("".join("PLAUSIBILITY ALERT (reading that doesn't add up): " + f + "\n" for f in (sd.get("flags") or [])))
           + f"Mode $06 results: {sd.get('mode6') or 'not read'}\n"
-          + f"Live data snapshot at sync ({sd.get('at') or '?'}): {pids}" + tests + shop_context(extra))
+          + f"Live data snapshot at sync ({sd.get('at') or '?'}): {pids}" + tests + shop_context(extra) + diagram_context())
 
 
 # ========================================================
@@ -7685,7 +7933,7 @@ Earlier web research for this job (if any): {(ss.dtc_result or {}).get("research
 {eye_context()}
 
 Respond directly, practically, and concisely to the latest question. Focus on physical shop tests, circuit checks, and logical isolation.
-""" + (f"""
+""" + DIAGRAM_RULE + (f"""
 The technician attached {n_photos} photo(s) with this question (wiring diagram, connector, part, scope or meter).
 Read them carefully: wire colors, pin/cavity numbers, splices, grounds, connector IDs, component names, readings on screen.
 Say what you can read in the photo, and say so plainly if part of it is too blurry or cut off to read.""" if n_photos else "") + ("""
@@ -7831,19 +8079,21 @@ def ask_chat(question: str, imgs: list, team: bool, where: str, videos: list | N
       reply, who, research = run_chat_ai(job_id, prompt, question, photos_b64, vrefs, team, vehicle, codes, symptoms)
     except AIError as e:
       reply, who, research = f"⚠️ {e}", "", ""
+    reply, diag = split_need_diagram(reply)
     if who and n_notes:
       who += f" · 📖 {n_notes} of your notes sent"
     ok = not str(reply).startswith("⚠️")
     store_put("chat", rid, dict(meta, a=reply, who=who, state="done" if ok else "failed",
                                 videos=[v for v in vrefs if v not in reuse], reused=bool(reuse)))
-    return reply, who, research, [v for v in vrefs if v not in reuse]
+    return reply, who, research, [v for v in vrefs if v not in reuse], diag
 
   if start_ai_job(job_id, job):
     ss._chat_pending = {"job": job_id, "rid": rid, "where": where}
     st.rerun()   # shows the question and the progress box right away
   with st.spinner("The AI is working on it..."):   # older Streamlit without background jobs: wait here
-    reply, who, research, vrefs = job()
+    reply, who, research, vrefs, diag = job()
   _chat_add_answer(rid, reply, who, research, vrefs)
+  add_diagram_requests(diag, "chat")
   st.rerun()
 
 
@@ -7869,8 +8119,10 @@ if hasattr(st, "fragment"):
     _ai_jobs().pop(p["job"], None)
     ss._chat_pending = None
     if j["state"] == "done":
-      reply, who, research, vrefs = j["result"]
+      reply, who, research, vrefs, *more = j["result"]
       _chat_add_answer(p["rid"], reply, who, research, vrefs)
+      if more:
+        add_diagram_requests(more[0], "chat")
     else:
       log_problem("ai", "Chat answer", j.get("error", "failed"))
       _chat_add_answer(p["rid"], f"⚠️ The AI couldn't answer: {j.get('error')}", "")
@@ -8457,10 +8709,12 @@ Format strictly using these Markdown sections:
 ### 5. Known Platform Pattern Failures & TSBs
 - Real-world failure patterns and TSBs for {vehicle} matching these symptoms.
 - Put any matching confirmed fix from THIS SHOP'S OWN HISTORY and any matching NHTSA recall first.
-"""
+""" + DIAGRAM_RULE
     with st.status("Working on it...", expanded=False) as status:
       text, research, draft, ds_draft = team_answer(sym_prompt, vehicle, "", symptoms, use_web, status)
       status.update(label="Done", state="complete")
+    text, _dg = split_need_diagram(text)
+    add_diagram_requests(_dg, "test plan")
     ss._auto_steps = True
     ss.dtc_result = {"title": f"Symptoms · {vehicle}", "text": text, "research": research, "draft": draft, "ds_draft": ds_draft,
                     "team": team_names(draft, ds_draft, research)}
@@ -8503,10 +8757,12 @@ Format strictly using these Markdown sections:
 ### 6. Known Platform Pattern Failures & TSBs
 - Real-world failure patterns for {vehicle} on this system.
 - Put any matching confirmed fix from THIS SHOP'S OWN HISTORY and any matching NHTSA recall first.
-"""
+""" + DIAGRAM_RULE
     with st.status("Working on it...", expanded=False) as status:
       text, research, draft, ds_draft = team_answer(dtc_prompt, vehicle, code_str, symptoms, use_web, status)
       status.update(label="Done", state="complete")
+    text, _dg = split_need_diagram(text)
+    add_diagram_requests(_dg, "test plan")
     ss._auto_steps = True
     ss.dtc_result = {"title": f"{code_str} · {vehicle}", "text": text, "research": research, "draft": draft, "ds_draft": ds_draft,
                     "team": team_names(draft, ds_draft, research)}
@@ -8532,6 +8788,9 @@ Format strictly using these Markdown sections:
     if ss.dtc_result.get("research") and not _simple:
       with st.expander("🌐 Web research Perplexity found (TSBs, recalls, known fixes, sources)"):
         st.markdown(ss.dtc_result["research"])
+
+  with guard("Wiring diagrams"):   # the diagrams the AI asked for (test plan, step cards, AI Check, chat) + ones you add
+    diagrams_panel()
 
   with pro_section("scope"):
     # ---------- 2. Scope lab ----------
@@ -9281,7 +9540,7 @@ with tab5, guard("Log tab"):
   if st.button("📦 Prepare backup file"):
     with st.spinner("Gathering everything..."):
       _bk = {"app_version": APP_VERSION, "made": datetime.now().isoformat(),
-             **{k: store_list(k, 1000) for k in ("job", "fix", "log", "drive", "jobphoto", "wave", "csvwave", "know", "chat", "sent", "problem")}}
+             **{k: store_list(k, 1000) for k in ("job", "fix", "log", "drive", "jobphoto", "diagram", "wave", "csvwave", "know", "chat", "sent", "problem")}}
       ss._backup = json.dumps(_bk)
       ss._backup_counts = " · ".join(f"{k}: {len(_bk.get(k) or [])}" for k in ("job", "fix", "log", "drive", "jobphoto", "wave"))
     st.toast("Backup ready — tap Download")
