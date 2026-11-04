@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-09"
+APP_VERSION = "2026-11-10"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -96,6 +96,8 @@ WHATS_NEW = [
     "NEW: 📐 The AI asks for the wiring diagram when a test needs exact pins or wire colors (it won't guess them). Add a photo, "
     "a screenshot, or one tap from your shared Topdon / Autel screen — it reads the diagram and puts the exact hookup on the "
     "test step, and every later answer uses it",
+    "BETTER: ⚙️ Trans → 🌀 TCC now shows TCC slip, TCC desired slip and the TCC command duty % live with a graph, and flags "
+    "commanded-on-but-slipping, slip not following desired, stuck applied, command hunting, and lock-up never commanded",
     "EASIER: 📋 Paste a diagram — snip it (Windows+Shift+S), click the paste box, Ctrl+V. Or share the diagram's tab once (👀) "
     "and 📺 Use my shared screen grabs a fresh, sharp picture every time you tap it",
 ]
@@ -4699,6 +4701,16 @@ let oemCmds = [], oemRR = 0, oemFound = 0, oemModules = {};
 function profile() { const s = $("oemSel").value; return s === "AUTO" ? (ARGS.make || "GENERIC") : s; }
 function usingModelData() { return $("oemSel").value === "AUTO" && Array.isArray(ARGS.oem) && ARGS.oem.length > 0; }
 function oemSourceName() { return usingModelData() ? (ARGS.oem_src || "").replace(/-/g, " ") : profile(); }
+// Torque converter readings the TCC test uses: actual slip, desired slip, the TCC command %, apply state, turbine speed
+function tccRole(name, unit, map) {
+  const n = String(name || "").toLowerCase();
+  if (/turbine (shaft )?speed|input shaft speed|\btss\b/.test(n) && !/desired|target/.test(n)) return "turbine";
+  if (!/torque conv|converter clutch|\btcc\b|tc slip|lock.?up/.test(n) || /temp/.test(n)) return "";
+  if (/slip/.test(n)) return /desired|target|command/.test(n) ? "tccdes" : "tcc";
+  if (/duty|pwm|percent/.test(n) || unit === "%") return "tccduty";
+  if (/command|status|state|apply|engag|mode|lock/.test(n) && (map || /onoff|yesno|noyes/.test(String(unit || "")))) return "tccstate";
+  return "";
+}
 function buildEnhanced() {
   const year = parseInt(ARGS.year, 10) || 0;
   const model = usingModelData();
@@ -4708,7 +4720,7 @@ function buildEnhanced() {
   sigs.forEach((g) => {
     g.label = cleanName(g.name);
     g.group = oemGroup(g);
-    g.watch = /torque conv|converter clutch|\btcc\b|tc slip/i.test(g.name) && !/command|desired|duty|pressure|solenoid|temp/i.test(g.name) ? "tcc" : "";
+    g.watch = tccRole(g.name, g.unit, g.map);
     const k = g.hdr + "|" + g.rax + "|" + g.req;
     if (!byCmd.has(k)) byCmd.set(k, { hdr: g.hdr, rax: g.rax, req: g.req, sigs: [], state: "new", miss: 0 });
     byCmd.get(k).sigs.push(g);
@@ -6509,20 +6521,41 @@ function transHtml() {
     <div class="note">RPM per mph over time. Flat steps = gears.</div>
     ${a ? `<div class="verdict">Gears found: ${a.gears.length ? a.gears.map((g, i) => `<b>${i + 1}</b>: ${g.ratio.toFixed(1)} rpm/mph`).join(" · ") : "not enough steady driving yet"}<br>
       ${a.flags.length ? a.flags.join("<br>") : a.gears.length >= 3 ? "<span class='grade-g'>No gear slip detected.</span>" : ""}</div>` : ""}
-    ${(() => { const c = tccAnalyze(); return c ? `<div class="verdict"><b>🌀 Torque converter:</b> ${c.g ? `<b class="${gradeCls(c.g)}">${c.g === "g" ? "OK" : c.g === "r" ? "PROBLEM" : "CHECK"}</b> — ` : ""}${esc(c.text)}${num.tccslip != null && fresh("tccslip", 3) ? `<br>Live TCC slip: <b>${Math.round(num.tccslip)} rpm</b>` : ""}${c.events.length ? "<br><span class='note'>" + c.events.slice(-5).map((e) => esc(e.at + " — " + e.text)).join("<br>") + "</span>" : ""}</div>` : ""; })()}`;
+    ${tccLiveHtml()}
+    ${(() => { const c = tccAnalyze(); return c ? `<div class="verdict"><b>🌀 Torque converter:</b> ${c.g ? `<b class="${gradeCls(c.g)}">${c.g === "g" ? "OK" : c.g === "r" ? "PROBLEM" : "CHECK"}</b> — ` : ""}${esc(c.text)}${c.events.length ? "<br><span class='note'>" + c.events.slice(-5).map((e) => esc(e.at + " — " + e.text)).join("<br>") + "</span>" : ""}</div>` : ""; })()}`;
+}
+function tccLiveHtml() {
+  const cell = (k, unit, src) => `<td class="tnum" style="font-size:1.3rem">${num[k] != null && fresh(k, 3) ? Math.round(num[k]) + unit : "—"}</td>`;
+  const has = TCC && (TCC.src || TCC.desSrc || TCC.dutySrc);
+  const st = TCC && TCC.stateSrc ? tccOnFrom(TCC.lastState) : null;
+  return `<div class="verdict" style="border-color:var(--o)"><b>🌀 TCC live</b>
+    <table class="ttab"><tr><th>TCC slip</th><th>TCC desired</th><th>TCC command</th>${TCC && TCC.stateSrc ? "<th>TCC state</th>" : ""}</tr>
+    <tr>${cell("tccslip", " rpm")}${cell("tccdes", " rpm")}${cell("tccduty", "%")}${TCC && TCC.stateSrc ? `<td class="tnum">${st == null ? "—" : st ? "ON" : "OFF"}</td>` : ""}</tr></table>
+    ${has ? `<canvas class="tplot" id="tccPlot"></canvas><div class="note">Orange = actual slip · green dashed = desired slip (rpm, left) · blue = TCC command % (right). Last 90 s.</div>`
+          : `<div class="note">Waiting for the factory TCC readings — start recording (or a test drive) with Enhanced data loaded. If your car doesn't send them to the adapter, share your scan tool screen (👀) and the AI reads them there.</div>`}
+    ${TCC && (TCC.src || TCC.desSrc || TCC.dutySrc) ? `<div class="note">From: ${[TCC.src && "slip = " + esc(TCC.src), TCC.desSrc && "desired = " + esc(TCC.desSrc), TCC.dutySrc && "command = " + esc(TCC.dutySrc), TCC.stateSrc && "state = " + esc(TCC.stateSrc)].filter(Boolean).join(" · ")}</div>` : ""}
+  </div>`;
 }
 
 
 // ---------- 🌀 Torque converter clutch (TCC) slip / shudder monitor ----------
 // Uses the factory TCC slip reading when the car has one; otherwise watches RPM vs speed at steady cruise.
 let TCC = null;
-function tccReset() { TCC = { w: [], ev: [], kinds: {}, lastChk: 0, run: 0, steadyS: 0, slipSteady: [], src: null, spokeT: {} }; }
+function tccReset() { TCC = { w: [], ev: [], kinds: {}, lastChk: 0, run: 0, runOn: 0, runErr: 0, steadyS: 0, slipSteady: [], cmdSteady: [], trace: [],
+                       src: null, desSrc: null, dutySrc: null, stateSrc: null, spokeT: {} }; }
 tccReset();
 const range = (a) => (a.length ? Math.max(...a) - Math.min(...a) : 0);
 const median = (a) => { if (!a.length) return null; const b = [...a].sort((x, y) => x - y); return b[Math.floor(b.length / 2)]; };
-function tccSlipTile() {
+function tccSig(role) {
   for (const c of oemCmds) { if (c.state !== "live") continue;
-    for (const g of c.sigs) if (g.watch === "tcc" && g.tile && fresh(g.tile, 3)) return { tile: g.tile, label: g.label }; }
+    for (const g of c.sigs) if (g.watch === role && g.tile && fresh(g.tile, 3)) return { tile: g.tile, label: g.label }; }
+  return null;
+}
+function tccSlipTile() { return tccSig("tcc"); }
+function tccOnFrom(text) {   // "ON", "Locked", "Applied" -> true; "OFF", "Unlocked", "Released" -> false
+  const t = String(text ?? "").toLowerCase();
+  if (/\b(off|no|unlocked|released|release|disengaged|open|inactive)\b/.test(t) || t === "0") return false;
+  if (/\b(on|yes|locked|lock|applied|apply|engaged|full|closed|active)\b/.test(t) || t === "1") return true;
   return null;
 }
 const TCC_SAY = {
@@ -6532,7 +6565,12 @@ const TCC_SAY = {
   surge: () => `RPM surging at steady speed. Possible torque converter shudder.`,
   flare: () => `RPM flare without a speed change. Possible converter or clutch slip.`,
 };
-const TCC_NEED = { shudder: 2, nolock: 1, flareslip: 2, surge: 3, flare: 2 };
+TCC_SAY.notholding = (e) => `Converter clutch commanded on but still slipping ${Math.round(e.slip)} RPM.`;
+TCC_SAY.offtarget = (e) => `Converter slip is ${Math.round(e.slip)}, the transmission computer wants ${Math.round(e.des)}.`;
+TCC_SAY.stuckon = () => `Converter clutch looks applied while commanded off.`;
+TCC_SAY.dutyhunt = () => `Converter clutch command is hunting at steady speed.`;
+TCC_SAY.notcmd = () => `The converter clutch isn't being commanded on at highway cruise.`;
+const TCC_NEED = { shudder: 2, nolock: 1, flareslip: 2, surge: 3, flare: 2, notholding: 1, offtarget: 2, stuckon: 2, dutyhunt: 3, notcmd: 1 };
 function tccEvent(kind, text, extra) {
   const t = nowS(), last = TCC.ev.filter((e) => e.kind === kind).pop();
   if (last && t - last.t < 6) return;                      // one event per 6 s window
@@ -6543,12 +6581,18 @@ function tccEvent(kind, text, extra) {
 }
 function tccTick() {
   if (!(T.drive.on || T.trans.on) || !fresh("rpm", 2) || !fresh("spd", 2)) return;
-  const t = nowS(), src = tccSlipTile();
-  if (src) { num.tccslip = num[src.tile]; numT.tccslip = numT[src.tile]; LABEL.tccslip = "TCC slip (rpm)"; TCC.src = src.label; }
-  const slip = src ? num[src.tile] : null;
+  const t = nowS(), src = tccSig("tcc"), dsS = tccSig("tccdes"), duS = tccSig("tccduty"), stS = tccSig("tccstate"), tuS = tccSig("turbine");
+  let slip = null;
+  if (src) { slip = num[src.tile]; TCC.src = src.label; }
+  else if (tuS) { slip = num.rpm - num[tuS.tile]; TCC.src = `engine RPM − ${tuS.label}`; }   // no slip reading: work it out
+  const des = dsS ? num[dsS.tile] : null, duty = duS ? num[duS.tile] : null, on = stS ? tccOnFrom(shown[stS.tile] ?? num[stS.tile]) : null;
+  if (dsS) TCC.desSrc = dsS.label; if (duS) TCC.dutySrc = duS.label; if (stS) { TCC.stateSrc = stS.label; TCC.lastState = shown[stS.tile] ?? num[stS.tile]; }
+  const setV = (k, v, label) => { if (v != null && isFinite(v)) { num[k] = v; numT[k] = t; LABEL[k] = label; } };
+  setV("tccslip", slip, "TCC slip (rpm)"); setV("tccdes", des, "TCC desired slip (rpm)"); setV("tccduty", duty, "TCC command (%)");
   const W = TCC.w;
-  if (!W.length || t - W[W.length - 1][0] >= 0.15) W.push([t, num.rpm, num.spd, num.tps ?? null, slip, inDecel() ? 1 : 0]);
+  if (!W.length || t - W[W.length - 1][0] >= 0.15) W.push([t, num.rpm, num.spd, num.tps ?? null, slip, inDecel() ? 1 : 0, des, duty, on]);
   while (W.length && t - W[0][0] > 12) W.shift();
+  if (!TCC.trace.length || t - TCC.trace[TCC.trace.length - 1][0] >= 0.25) { TCC.trace.push([t, slip, des, duty]); while (TCC.trace.length && t - TCC.trace[0][0] > 90) TCC.trace.shift(); }
   if (t - TCC.lastChk < 1) return; TCC.lastChk = t;
   const w = W.filter((s) => t - s[0] <= 4); if (w.length < 6) return;
   const spd = w.map((s) => s[2]), rpm = w.map((s) => s[1]), tps = w.map((s) => s[3]).filter((x) => x != null);
@@ -6563,9 +6607,33 @@ function tccTick() {
     // Locked or near-locked converter whose slip keeps swinging = shudder
     if (m > -50 && m < 250 && (p2p >= 100 || dev >= 35))
       tccEvent("shudder", `TCC slip swinging ${Math.round(Math.min(...sl))} to ${Math.round(Math.max(...sl))} rpm at a steady ${Math.round(ms)} mph`, { slip: m, p2p });
+    // What the transmission computer is asking for vs what the converter does
+    const du = w.map((s) => s[7]).filter((x) => x != null), de = w.map((s) => s[6]).filter((x) => x != null), onS = w.map((s) => s[8]).filter((x) => x != null);
+    const mdu = du.length ? median(du) : null, mde = de.length ? median(de) : null;
+    const cmdKnown = mdu != null || onS.length > 0 || mde != null;
+    const cmdOn = (mdu != null && mdu >= 80) || (onS.length && onS.filter(Boolean).length >= onS.length * 0.75) || (mde != null && mde <= 30);
+    const cmdOff = (mdu != null && mdu <= 5) || (onS.length && !onS.some(Boolean));
+    const following = mde != null && Math.abs(m - mde) <= Math.max(60, 0.5 * mde);   // the TCM wants this much slip
+    TCC.cmdSteady.push([Math.round(ms), Math.round(m), mde != null ? Math.round(mde) : null, mdu != null ? Math.round(mdu) : null]);
+    if (TCC.cmdSteady.length > 600) TCC.cmdSteady.shift();
+    if (cmdOn && m > 100) {
+      if (++TCC.runOn >= 5) { tccEvent("notholding", `TCC commanded ON${mdu != null ? ` (${Math.round(mdu)}% command)` : ""}${mde != null ? `, desired slip ${Math.round(mde)} rpm` : ""} but actual slip stays ${Math.round(m)} rpm at ${Math.round(ms)} mph — converter clutch not holding (worn lining, low line pressure, TCC solenoid/valve, fluid)`, { slip: m, duty: mdu, des: mde }); TCC.runOn = 0; }
+    } else TCC.runOn = 0;
+    if (mde != null && !cmdOn && Math.abs(m - mde) > Math.max(60, 0.5 * mde)) {
+      if (++TCC.runErr >= 6) { tccEvent("offtarget", `Slip ${Math.round(m)} rpm vs desired ${Math.round(mde)} rpm at ${Math.round(ms)} mph — the converter isn't following what the TCM asks for`, { slip: m, des: mde }); TCC.runErr = 0; }
+    } else TCC.runErr = 0;
+    if (cmdOff && m < 20 && mr > 1100 && ms < 40)
+      tccEvent("stuckon", `TCC commanded OFF but slip is only ${Math.round(m)} rpm at ${Math.round(ms)} mph — converter clutch may be stuck applied (does it stall when coming to a stop?)`, { slip: m });
+    if (du.length >= 6 && range(du) >= 35)
+      tccEvent("dutyhunt", `TCC command swinging ${Math.round(Math.min(...du))}–${Math.round(Math.max(...du))}% at a steady ${Math.round(ms)} mph — the TCM is fighting slip (common with shudder or a worn converter clutch)`, { duty: mdu });
     // Highway cruise, light steady throttle, converter still slipping 120+ rpm for 8 s = not locking / lock-up clutch slipping
-    if (ms >= 45 && m >= 120 && m <= 900) { if (++TCC.run >= 8) { tccEvent("nolock", `TCC slip held about ${Math.round(m)} rpm for 8+ s at a steady ${Math.round(ms)} mph cruise — converter not locking, or lock-up clutch slipping`, { slip: m }); TCC.run = 0; } }
-    else TCC.run = 0;
+    if (ms >= 45 && m >= 120 && m <= 900) {
+      if (++TCC.run >= 8) {
+        if (cmdKnown && cmdOff) tccEvent("notcmd", `At a steady ${Math.round(ms)} mph the TCM isn't commanding the converter clutch on (slip ${Math.round(m)} rpm) — look for a code or condition blocking lock-up (coolant temp, brake switch, TPS, a trans code)`, { slip: m });
+        else if (!cmdOn && !following) tccEvent("nolock", `TCC slip held about ${Math.round(m)} rpm for 8+ s at a steady ${Math.round(ms)} mph cruise — converter not locking, or lock-up clutch slipping`, { slip: m });
+        TCC.run = 0;
+      }
+    } else TCC.run = 0;
     // Slip jumps from locked to 150+ rpm with no extra throttle
     const first = w.slice(0, 3).map((s) => s[4]).filter((x) => x != null), lastS = w.slice(-3).map((s) => s[4]).filter((x) => x != null);
     if (first.length && lastS.length && Math.max(...first) < 60 && Math.min(...lastS) > 150)
@@ -6582,8 +6650,8 @@ function tccTick() {
 function tccAnalyze() {
   if (!TCC) return null;
   const k = TCC.kinds, n = (x) => k[x] || 0, hasSlip = !!TCC.src;
-  const bad = n("nolock") >= 1 || n("shudder") >= 3 || n("flareslip") >= 3;
-  const warn = bad || n("shudder") + n("flareslip") + n("surge") + n("flare") >= 2;
+  const bad = n("nolock") >= 1 || n("notholding") >= 1 || n("stuckon") >= 2 || n("shudder") >= 3 || n("flareslip") >= 3;
+  const warn = bad || n("offtarget") >= 2 || n("dutyhunt") >= 2 || n("notcmd") >= 1 || n("shudder") + n("flareslip") + n("surge") + n("flare") >= 2;
   const g = bad ? "r" : warn ? "y" : TCC.steadyS >= 30 ? "g" : null;
   const cr = TCC.slipSteady.filter((s) => s[0] >= 45), typ = cr.length ? median(cr.map((s) => s[1])) : null;
   const parts = [];
@@ -6592,13 +6660,44 @@ function tccAnalyze() {
   if (n("flareslip")) parts.push(`${n("flareslip")}× slip jumped with no extra throttle`);
   if (n("surge")) parts.push(`${n("surge")}× RPM surging at steady speed`);
   if (n("flare")) parts.push(`${n("flare")}× RPM flare with no speed change`);
+  if (n("notholding")) parts.push(`${n("notholding")}× commanded ON but still slipping (clutch not holding)`);
+  if (n("offtarget")) parts.push(`${n("offtarget")}× actual slip not following the desired slip`);
+  if (n("stuckon")) parts.push(`${n("stuckon")}× looks applied while commanded OFF`);
+  if (n("dutyhunt")) parts.push(`${n("dutyhunt")}× TCC command hunting at steady speed`);
+  if (n("notcmd")) parts.push(`${n("notcmd")}× TCC not commanded on at highway cruise`);
   let text = !g ? "Not enough steady cruising yet (need ~30 s total at a steady 25+ mph)." :
     g === "g" ? `No converter slip or shudder seen in ${TCC.steadyS} s of steady driving.` :
     parts.join("; ") + ". " + (bad ? "Likely torque converter clutch problem." : "Possible torque converter clutch problem.") +
-    " Next: check fluid level/condition and for TSBs (fluid exchange / TCM reflash for shudder), then command TCC on with a scan tool and watch slip.";
-  text += hasSlip ? ` Using factory reading: ${TCC.src}${typ != null ? ` (typical slip at 45+ mph cruise: ${typ} rpm; locked is about 0–40)` : ""}.`
+    (n("notcmd") && !bad ? " Next: the TCM is choosing not to lock it — check for trans/engine codes and the lock-up conditions (coolant temp, brake switch, TPS, vehicle speed), then command TCC on with your scan tool to see if it can lock."
+     : n("stuckon") ? " Next: check whether it stalls coming to a stop; command TCC off with your scan tool and watch slip — a stuck TCC solenoid/valve or a converter clutch that won't release."
+     : " Next: check fluid level/condition and for TSBs (fluid exchange / TCM reflash for shudder), then command TCC on with a scan tool and watch slip.");
+  const cc = TCC.cmdSteady.filter((s) => s[0] >= 45);
+  const typical = cc.length ? { slip_rpm: median(cc.map((s) => s[1])), desired_rpm: median(cc.map((s) => s[2]).filter((x) => x != null)),
+                                command_pct: median(cc.map((s) => s[3]).filter((x) => x != null)) } : null;
+  text += hasSlip ? ` Using factory reading: ${TCC.src}${typ != null ? ` (typical slip at 45+ mph cruise: ${typ} rpm${typical && typical.desired_rpm != null ? `, desired ${typical.desired_rpm}` : ""}${typical && typical.command_pct != null ? `, command ${typical.command_pct}%` : ""}; locked is about 0–40)` : ""}.`
     : " No factory TCC slip reading on this car — judged from RPM vs speed, which only catches bigger slip/shudder.";
-  return { g, text, kinds: k, hasSlip, steadyS: TCC.steadyS, events: TCC.ev.slice(-20) };
+  if (hasSlip && !TCC.desSrc && !TCC.dutySrc && !TCC.stateSrc) text += " This car doesn't send the TCC desired slip or command to the adapter — share your scan tool screen (👀) to see them.";
+  return { g, text, kinds: k, hasSlip, steadyS: TCC.steadyS, events: TCC.ev.slice(-20), typical,
+           sources: { slip: TCC.src, desired: TCC.desSrc, command: TCC.dutySrc, state: TCC.stateSrc } };
+}
+
+function tccPlot() {
+  const P = plotSetup("tccPlot"); if (!P || !TCC) return;
+  const { g, c } = P, tr = TCC.trace;
+  if (tr.length < 2) { g.fillStyle = c("--muted"); g.font = "12px sans-serif"; g.fillText("Waiting for TCC readings…", 44, 60); return; }
+  const t0 = tr[0][0], t1 = Math.max(tr[tr.length - 1][0], t0 + 1);
+  const vals = tr.flatMap((p) => [p[1], p[2]]).filter((x) => x != null);
+  const hi = Math.max(150, ...vals.map((x) => x + 20)), lo = Math.min(0, ...vals);
+  const A = axes(P, t0, t1, lo, hi, 40, 18), R = (pct) => 8 + (1 - pct / 100) * A.ph;   // right axis: 0-100 %
+  for (let k = 0; k <= 2; k++) { const v = lo + (hi - lo) * k / 2; g.beginPath(); g.moveTo(A.L, A.Y(v)); g.lineTo(A.L + A.pw, A.Y(v)); g.stroke(); g.textAlign = "right"; g.fillText(Math.round(v) + "", A.L - 4, A.Y(v) + 3); }
+  g.textAlign = "left"; [0, 50, 100].forEach((p) => g.fillText(p + "%", A.L + A.pw - 26, R(p) + 3));
+  const line = (i, col, dash, y) => { const pts = tr.filter((p) => p[i] != null); if (pts.length < 2) return;
+    g.strokeStyle = c(col); g.lineWidth = 2; g.setLineDash(dash); g.beginPath();
+    pts.forEach((p, j) => { const X = A.X(p[0]), Y = y(p[i]); j ? g.lineTo(X, Y) : g.moveTo(X, Y); }); g.stroke(); g.setLineDash([]); };
+  line(3, "--b", [], (v) => R(Math.max(0, Math.min(100, v))));
+  line(2, "--g", [6, 4], A.Y);
+  line(1, "--o", [], A.Y);
+  g.fillStyle = c("--muted"); g.textAlign = "left"; g.fillText("rpm", 4, 12);
 }
 
 // ---------- signal tools: FFT + microphone ----------
@@ -6813,7 +6912,7 @@ function drawExtraPlots() {
   if (testTab === "vac") linePlot("vacPlot", T.vac.trace, "--b", "inHg", { lo: 0, hi: 25, refs: [[17, "rgba(0,255,102,.5)"], [21, "rgba(0,255,102,.5)"]], xLabel: "last 40 s" });
   if (testTab === "warm") linePlot("warmPlot", T.warm.pts.map((p) => [p[0], p[1]]), "--o", "°F", { refs: [[195, "rgba(0,255,102,.5)"], [230, "rgba(239,68,68,.6)"]], empty: "Tap Start with a cold engine." });
   if (testTab === "crank") linePlot("crankPlot", T.crank.pts.filter((p) => p[1] != null).map((p) => [p[0], p[1]]), "--y", "Volts", { refs: [[9.6, "rgba(239,68,68,.6)"]], xLabel: "seconds", empty: "Arm the test and crank." });
-  if (testTab === "trans") linePlot("transPlot", T.trans.pts.map((p) => [p[0], p[1]]), "--p", "rpm/mph", { empty: "Drive to record." });
+  if (testTab === "trans") { linePlot("transPlot", T.trans.pts.map((p) => [p[0], p[1]]), "--p", "rpm/mph", { empty: "Drive to record." }); tccPlot(); }
   if (testTab === "nvh") { const S = T.nvh.spec, R = T.nvh.res; specPlot("nvhPlot", S && S.spec, S && S.fs, S && S.n, S ? S.fmax : 30, R && R.orders ? R.orders.map((o) => [o[1], o[0].split(" ")[0]]) : []); }
   if (testTab === "tail") {
     const P = plotSetup("tailPlot"), R = T.tail.res; if (!P) return; const { g, c } = P;
@@ -7187,7 +7286,8 @@ function extraReportRows(add) {
   if (a) add("⚙️ Transmission", `${a.gears.length} gears found`, a.flags.length ? "y" : a.gears.length >= 3 ? "g" : null, a.flags.length ? a.flags.map((f) => f.replace(/<[^>]+>/g, "")).join(" ").slice(0, 160) : "");
   const tc = tccAnalyze();
   if (tc && tc.g) { add("🌀 Torque converter", tc.g === "g" ? "no slip/shudder" : tc.g === "r" ? "problem" : "check", tc.g, tc.text.slice(0, 220));
-    reportTest("Torque converter clutch", { grade: tc.g === "g" ? "GOOD" : tc.g === "r" ? "BAD" : "MARGINAL", verdict: tc.text, factory_slip_pid: tc.hasSlip, events: tc.events.map((e) => e.at + " " + e.text) }, true); }
+    reportTest("Torque converter clutch", { grade: tc.g === "g" ? "GOOD" : tc.g === "r" ? "BAD" : "MARGINAL", verdict: tc.text, factory_slip_pid: tc.hasSlip,
+      readings_used: tc.sources, typical_at_45mph_plus: tc.typical, events: tc.events.map((e) => e.at + " " + e.text) }, true); }
   if (T.warm.result) add("🌡️ Warm-up", T.warm.result.g === "g" ? "normal" : "check", T.warm.result.g, T.warm.result.text.replace(/<[^>]+>/g, "").slice(0, 160));
   if (r41) { const rows = readinessRows(r41.B, r41.C, r41.D, true), left = rows.filter((r) => !r.done); add("📋 Monitors (this drive)", `${rows.length - left.length}/${rows.length} complete`, left.length ? "y" : "g", left.length ? "still running: " + left.map((r) => r.n).join(", ") : ""); }
   if (misAnalyze().all) reportTest("Misfire monitor", { total_new: m.all, worst_cylinder: m.worst && m.worst[0], verdict: m.text.replace(/<[^>]+>/g, "") }, true);
