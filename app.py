@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-10"
+APP_VERSION = "2026-11-12"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -98,6 +98,14 @@ WHATS_NEW = [
     "test step, and every later answer uses it",
     "BETTER: ⚙️ Trans → 🌀 TCC now shows TCC slip, TCC desired slip and the TCC command duty % live with a graph, and flags "
     "commanded-on-but-slipping, slip not following desired, stuck applied, command hunting, and lock-up never commanded",
+    "NEW: 🧠 Meaning search — Knowledge notes, past fixes (from ANY vehicle) and old chats are found by what they mean, not just "
+    "matching words; the Knowledge search box works that way too, and new book-page notes that repeat ones you have are flagged",
+    "NEW: 📲 Phone alerts (ntfy) when an AI answer, AI Check, test follow-up, test plan or test drive review is ready",
+    "FIX: The chat always knows the car that's open (VIN + engine, drive, transmission) and won't ask for it again; opening the "
+    "app on another device picks up the car you were working on in the last few hours",
+    "NEW LOOK: 🏠 Home opens on the AI chat (type it or 🎙️ say it), with the car you're on and the cars in the shop below; "
+    "the screens moved to a bar along the bottom (Home · Car · Scan · Diagnose · Log · Notes); settings are under ⚙️ top right",
+    "FIX: Knowledge now loads ALL your notes (it stopped at 1,000 before)",
     "EASIER: 📋 Paste a diagram — snip it (Windows+Shift+S), click the paste box, Ctrl+V. Or share the diagram's tab once (👀) "
     "and 📺 Use my shared screen grabs a fresh, sharp picture every time you tap it",
 ]
@@ -105,76 +113,104 @@ WHATS_NEW = [
 st.markdown(
     f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap');
-.stApp {{ font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }}
-.block-container {{ padding-top: 4.5rem !important; padding-bottom: 3rem !important; max-width: 1440px !important; }}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+:root {{ --tdg-cyan: #22D3EE; --tdg-teal: #14B8A6; --tdg-green: #34D399; --tdg-card: rgba(22,25,30,.92); --tdg-line: rgba(255,255,255,.08);
+         --tdg-muted: #9AA3AD; }}
+.stApp {{ font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: radial-gradient(900px 520px at 0% 0%, rgba(20,184,166,.13), transparent 62%),
+              radial-gradient(900px 700px at 100% 100%, rgba(16,185,129,.12), transparent 60%), #0b0e12 !important; }}
+.block-container {{ position: relative; padding-top: 3.6rem !important; padding-bottom: 120px !important; max-width: 1100px !important; }}
 #MainMenu, footer {{ visibility: hidden; }}
-/* segmented pill tabs */
-div[data-baseweb="tab-list"] {{ background: rgba(17,24,39,.55); border: 1px solid rgba(255,255,255,.08); border-radius: 12px;
-  padding: 5px; gap: 6px; margin-bottom: .6rem; overflow-x: auto; }}
-button[data-baseweb="tab"] {{ border-radius: 8px !important; padding: 9px 16px !important; font-weight: 600 !important;
-  font-size: .92rem !important; border: none !important; background: transparent !important; transition: all .18s ease !important; }}
-button[data-baseweb="tab"]:hover {{ background: rgba(255,255,255,.05) !important; }}
-button[data-baseweb="tab"][aria-selected="true"] {{ background: linear-gradient(180deg, rgba(16,185,129,.18) 0%, rgba(16,185,129,.06) 100%) !important;
-  color: #10B981 !important; box-shadow: inset 0 0 0 1px rgba(16,185,129,.35), 0 2px 8px rgba(0,0,0,.25) !important; }}
-div[data-baseweb="tab-highlight"], div[data-baseweb="tab-border"] {{ display: none !important; }}
-[data-testid="stTabs"] [role="tablist"] {{ background: rgba(17,24,39,.55); border: 1px solid rgba(255,255,255,.08) !important; border-radius: 12px;
-  padding: 5px; gap: 6px; margin-bottom: .6rem; overflow-x: auto; }}
+h1, h2, h3, .tdg-title {{ font-family: 'Space Grotesk', 'Inter', sans-serif !important; letter-spacing: -.01em; }}
+/* top bar */
+.tdg-top {{ display: flex; align-items: center; gap: 12px; margin: 0 0 .4rem; min-height: 46px; }}
+.tdg-top .t1 {{ font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 1.15rem; line-height: 1.1; }}
+.tdg-top .t2 {{ font-family: 'JetBrains Mono', monospace; font-size: .68rem; color: var(--tdg-muted); letter-spacing: .18em; }}
+.st-key-gear {{ position: absolute !important; top: calc(3.6rem + 4px); right: 1rem; width: auto !important; z-index: 60; }}
+/* "Today" header + section labels + cards */
+.tdg-today h1 {{ font-size: 2.6rem !important; font-weight: 700 !important; margin: .2rem 0 0 !important; padding: 0 !important; }}
+.tdg-today .sub {{ color: var(--tdg-muted); font-size: 1.02rem; margin: .1rem 0 1rem; }}
+.tdg-label {{ font-family: 'JetBrains Mono', monospace; color: var(--tdg-muted); letter-spacing: .32em; font-size: .78rem;
+  text-transform: uppercase; margin: 1.3rem 0 .55rem; }}
+.tdg-hero {{ display: flex; align-items: center; gap: 16px; margin-bottom: .6rem; }}
+.tdg-hero .ic {{ width: 54px; height: 54px; border-radius: 16px; background: #0d1116; border: 1px solid rgba(34,211,238,.45);
+  box-shadow: 0 0 22px rgba(34,211,238,.25); display: flex; align-items: center; justify-content: center; flex: none; }}
+.tdg-hero .k {{ font-family: 'JetBrains Mono', monospace; letter-spacing: .3em; font-size: .72rem; color: var(--tdg-muted); }}
+.tdg-hero .h {{ font-family: 'Space Grotesk', sans-serif; font-size: 1.55rem; font-weight: 700; line-height: 1.15; }}
+.tdg-hero .h b {{ color: var(--tdg-cyan); }}
+.tdg-hero .s {{ color: var(--tdg-muted); font-size: .95rem; }}
+.st-key-quickhelp {{ background: linear-gradient(135deg, rgba(34,211,238,.07), rgba(22,25,30,.92) 45%) !important;
+  border: 1px solid rgba(34,211,238,.38) !important; border-radius: 22px !important; padding: 18px 16px !important;
+  box-shadow: 0 0 34px -12px rgba(34,211,238,.35); }}
+[class*="st-key-jobcard_"], .st-key-carnow {{ background: var(--tdg-card) !important; border: 1px solid var(--tdg-line) !important;
+  border-left: 4px solid var(--tdg-teal) !important; border-radius: 20px !important; padding: 14px 16px !important; }}
+.tdg-car .v {{ font-family: 'Space Grotesk', sans-serif; font-size: 1.2rem; font-weight: 600; }}
+.tdg-car .m {{ font-family: 'JetBrains Mono', monospace; font-size: .74rem; letter-spacing: .14em; color: var(--tdg-muted); text-transform: uppercase; }}
+.tdg-car .codes {{ font-family: 'JetBrains Mono', monospace; color: var(--tdg-green); font-weight: 600; }}
+/* bottom tab bar (the app's tabs, moved to the bottom like a phone app) */
+[data-testid="stTabs"] > div:first-child {{ position: static; }}
+[data-testid="stTabs"] [role="tablist"], div[data-baseweb="tab-list"] {{ position: fixed !important; left: 50%; bottom: 0; transform: translateX(-50%);
+  width: min(100%, 760px); z-index: 999; margin: 0 !important; display: flex !important; justify-content: space-around; gap: 0 !important;
+  background: rgba(12,15,19,.97) !important; border: none !important; border-top: 1px solid var(--tdg-line) !important; border-radius: 0 !important;
+  padding: 4px 2px calc(6px + env(safe-area-inset-bottom)) !important; overflow: visible !important; backdrop-filter: blur(10px); }}
 [data-testid="stTabs"] [role="tablist"]::after {{ display: none !important; content: none !important; }}
-[data-testid="stTabs"] [role="tab"] {{ border-radius: 8px !important; padding: 8px 16px !important; border: none !important;
-  background: transparent !important; transition: all .18s ease; height: auto !important; }}
-[data-testid="stTabs"] [role="tab"] p {{ font-size: .92rem !important; font-weight: 600 !important; }}
-[data-testid="stTabs"] [role="tab"]:hover {{ background: rgba(255,255,255,.05) !important; }}
-[data-testid="stTabs"] [role="tab"][aria-selected="true"] {{ background: linear-gradient(180deg, rgba(16,185,129,.18) 0%, rgba(16,185,129,.06) 100%) !important;
-  box-shadow: inset 0 0 0 1px rgba(16,185,129,.35), 0 2px 8px rgba(0,0,0,.25) !important; }}
-[data-testid="stTabs"] [role="tab"][aria-selected="true"] p {{ color: #10B981 !important; }}
-[data-testid="stTabs"] .react-aria-SelectionIndicator {{ display: none !important; }}
-/* dark-glass expanders & inputs */
-div[data-testid="stExpander"] {{ border: 1px solid rgba(255,255,255,.08) !important; border-radius: 10px !important; overflow: hidden; }}
-div[data-baseweb="input"] > div, div[data-baseweb="select"] > div, div[data-baseweb="textarea"] > div {{ border-radius: 8px !important; }}
-/* HUD context bar */
-.tdg-bar {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:rgba(15,22,35,.85); border:1px solid rgba(255,255,255,.08);
-  padding:9px 14px; border-radius:10px; margin-bottom:12px; font-size:.85rem; }}
-.tdg-bar .pill {{ background:rgba(255,255,255,.05); color:#E2E8F0; padding:3px 10px; border-radius:6px; font-weight:600; }}
-.tdg-bar .dtc {{ font-family:'JetBrains Mono',monospace; font-weight:600; padding:3px 10px; border-radius:6px; }}
+[data-testid="stTabs"] [role="tab"], button[data-baseweb="tab"] {{ position: relative; flex: 1 1 0 !important; flex-direction: column !important;
+  justify-content: center; align-items: center; gap: 3px; min-width: 0 !important; padding: 7px 2px 4px !important; border: none !important;
+  background: transparent !important; box-shadow: none !important; height: auto !important; color: var(--tdg-muted) !important; }}
+[data-testid="stTabs"] [role="tab"]::before {{ content: ""; width: 25px; height: 25px; background-color: currentColor;
+  -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat; -webkit-mask-position: center; mask-position: center;
+  -webkit-mask-size: contain; mask-size: contain; }}
+[data-testid="stTabs"] [role="tab"]:nth-child(1)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z'/></svg>"); }}
+[data-testid="stTabs"] [role="tab"]:nth-child(2)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M3 16v-3l2-6h14l2 6v3z'/><path d='M3 16v3h3v-3M18 16v3h3v-3'/><circle cx='7.5' cy='13' r='1'/><circle cx='16.5' cy='13' r='1'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M3 16v-3l2-6h14l2 6v3z'/><path d='M3 16v3h3v-3M18 16v3h3v-3'/><circle cx='7.5' cy='13' r='1'/><circle cx='16.5' cy='13' r='1'/></svg>"); }}
+[data-testid="stTabs"] [role="tab"]:nth-child(3)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M3 12h4l3 8 4-16 3 8h4'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M3 12h4l3 8 4-16 3 8h4'/></svg>"); }}
+[data-testid="stTabs"] [role="tab"]:nth-child(4)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z'/></svg>"); }}
+[data-testid="stTabs"] [role="tab"]:nth-child(5)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='5' y='4' width='14' height='17' rx='2'/><path d='M9 3h6v3H9zM9 11h6M9 15h6'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='5' y='4' width='14' height='17' rx='2'/><path d='M9 3h6v3H9zM9 11h6M9 15h6'/></svg>"); }}
+[data-testid="stTabs"] [role="tab"]:nth-child(6)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z'/><path d='M4 19V5'/><path d='M9 7h6'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z'/><path d='M4 19V5'/><path d='M9 7h6'/></svg>"); }}
+[data-testid="stTabs"] [role="tab"] p {{ font-size: .66rem !important; font-weight: 600 !important; letter-spacing: .12em; text-transform: uppercase;
+  color: var(--tdg-muted) !important; margin: 0 !important; white-space: nowrap; }}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] {{ color: var(--tdg-cyan) !important; }}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] p {{ color: #F1F5F9 !important; }}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"]::after {{ content: ""; position: absolute; top: 0; left: 28%; right: 28%; height: 3px;
+  border-radius: 0 0 3px 3px; background: var(--tdg-cyan); }}
+div[data-baseweb="tab-highlight"], div[data-baseweb="tab-border"], [data-testid="stTabs"] .react-aria-SelectionIndicator {{ display: none !important; }}
+/* cards, expanders, inputs, buttons */
+div[data-testid="stExpander"] {{ border: 1px solid var(--tdg-line) !important; border-radius: 18px !important; overflow: hidden;
+  background: rgba(22,25,30,.7); }}
+div[data-baseweb="input"] > div, div[data-baseweb="select"] > div, div[data-baseweb="textarea"] > div {{ border-radius: 12px !important; }}
+button[kind="primary"], button[data-testid="stBaseButton-primary"], button[data-testid="stFormSubmitButton"] {{
+  background: linear-gradient(135deg, #14B8A6, #22D3EE) !important; color: #04131a !important; border: none !important; font-weight: 700 !important; }}
+.stButton > button, .stDownloadButton > button {{ border-radius: 12px !important; }}
+/* context bar on each screen */
+.tdg-bar {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; background: var(--tdg-card); border:1px solid var(--tdg-line);
+  padding:10px 14px; border-radius:18px; margin-bottom:12px; font-size:.85rem; }}
+.tdg-bar .pill {{ background:rgba(255,255,255,.05); color:#E2E8F0; padding:3px 10px; border-radius:8px; font-weight:600; }}
+.tdg-bar .dtc {{ font-family:'JetBrains Mono',monospace; font-weight:600; padding:3px 10px; border-radius:8px; }}
 .tdg-next {{ flex-basis:100%; color:#8B9BB4; font-size:.8rem; }}
-.tdg-next b {{ color:#10B981; }}
-.st-key-quickhelp {{ border-color: rgba(16,185,129,.45) !important; background: rgba(16,185,129,.04); }}
+.tdg-next b {{ color: var(--tdg-cyan); }}
 /* simple view: big status cards + step cards */
-.tdg-card {{ border-radius:12px; padding:12px 14px; margin-bottom:10px; border:1px solid rgba(255,255,255,.08); color:#F1F5F9; }}
+.tdg-card {{ border-radius:16px; padding:12px 14px; margin-bottom:10px; border:1px solid var(--tdg-line); color:#F1F5F9; }}
 .tdg-card small {{ color:rgba(241,245,249,.8); }}
 .tdg-big {{ font-size:1.45rem; font-weight:800; margin:2px 0; font-family:'JetBrains Mono',monospace; }}
 .tdg-green {{ background:linear-gradient(135deg,#064E3B,#065F46); border-left:6px solid #10B981; }}
 .tdg-yellow {{ background:linear-gradient(135deg,#713F12,#854D0E); border-left:6px solid #F59E0B; }}
 .tdg-red {{ background:linear-gradient(135deg,#7F1D1D,#991B1B); border-left:6px solid #EF4444; }}
-.tdg-blue {{ background:linear-gradient(135deg,#1E3A8A,#1D4ED8); border-left:6px solid #60A5FA; }}
+.tdg-blue {{ background:linear-gradient(135deg,#0E3A4A,#0E5266); border-left:6px solid var(--tdg-cyan); }}
 .tdg-gray {{ background:rgba(51,65,85,.55); border-left:6px solid #64748B; }}
-.tdg-step {{ background:#152033; border:2px solid #38BDF8; border-radius:16px; padding:16px 18px; margin:8px 0 10px; color:#F1F5F9; }}
-.tdg-step h3 {{ margin:.2rem 0 .4rem; color:#38BDF8; }}
+.tdg-step {{ background:#121a24; border:2px solid var(--tdg-cyan); border-radius:20px; padding:16px 18px; margin:8px 0 10px; color:#F1F5F9; }}
+.tdg-step h3 {{ margin:.2rem 0 .4rem; color: var(--tdg-cyan); }}
 .tdg-step p {{ margin:.25rem 0; font-size:1.02rem; line-height:1.5; }}
-.tdg-badge {{ display:inline-block; background:#38BDF8; color:#0F172A; font-weight:800; padding:2px 10px; border-radius:999px; font-size:.8rem; }}
+.tdg-badge {{ display:inline-block; background: var(--tdg-cyan); color:#0F172A; font-weight:800; padding:2px 10px; border-radius:999px; font-size:.8rem; }}
 .tdg-spec {{ color:#FDE68A; }}
 .tdg-safe {{ color:#FCA5A5; }}
 </style>
 
-<div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px; padding:12px 18px;
-  background:linear-gradient(90deg, rgba(16,185,129,.10) 0%, rgba(17,24,39,.55) 55%); border:1px solid rgba(255,255,255,.08);
-  border-radius:14px; margin-bottom:1rem; box-shadow:0 10px 30px -10px rgba(0,0,0,.5);">
-  <div style="display:flex; align-items:center; gap:14px;">
-    <div style="background:rgba(16,185,129,.12); border:1px solid rgba(16,185,129,.3); padding:7px 9px; border-radius:10px; display:flex; align-items:center;">
-      <svg width="46" height="28" viewBox="0 0 120 70" fill="none" xmlns="http://www.w3.org/2000/svg">
-        <path d="M 5 45 L 22 45 L 24 60 L 42 60 L 43 5 L 46 36 Q 48 34 54 36 T 64 36 T 74 35 T 80 36 Q 84 18 88 50 Q 92 24 96 44 Q 100 32 104 42 L 118 42"
-              stroke="#10B981" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"
-              style="filter: drop-shadow(0px 0px 6px rgba(16,185,129,.6));"/>
-      </svg>
-    </div>
-    <div>
-      <h1 style="margin:0; padding:0; font-size:1.55rem; font-weight:700; letter-spacing:-.02em;">Test Don't Guess</h1>
-      <div style="font-size:.74rem; color:#8B9BB4; font-weight:500; letter-spacing:.05em; text-transform:uppercase;">Telemetry &amp; AI diagnostics</div>
-    </div>
-  </div>
-  <div style="font-family:'JetBrains Mono',monospace; font-size:.72rem; color:#10B981; background:rgba(16,185,129,.1);
-    border:1px solid rgba(16,185,129,.25); padding:4px 10px; border-radius:999px;">v{APP_VERSION}</div>
+<div class="tdg-top">
+  <svg width="30" height="34" viewBox="0 0 30 34" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 0 6px rgba(34,211,238,.55));">
+    <defs><linearGradient id="tdgG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#22D3EE"/><stop offset="1" stop-color="#14B8A6"/></linearGradient></defs>
+    <rect x="1" y="12" width="4" height="10" rx="2" fill="url(#tdgG)"/><rect x="8" y="5" width="4" height="22" rx="2" fill="url(#tdgG)"/>
+    <rect x="15" y="9" width="4" height="16" rx="2" fill="url(#tdgG)"/><rect x="22" y="1" width="4" height="32" rx="2" fill="url(#tdgG)"/>
+  </svg>
+  <div><div class="t1">Test Don't Guess</div><div class="t2">AI DIAGNOSTICS · v{APP_VERSION}</div></div>
 </div>
 """,
     unsafe_allow_html=True,
@@ -382,6 +418,56 @@ def _store_versions() -> dict:
   return {}
 
 
+# ---- 📲 Phone alerts through ntfy (free app: subscribe to your NTFY_TOPIC) ----
+def ntfy_ready() -> bool:
+  return bool(secret("NTFY_TOPIC"))
+
+
+def app_link(job_id: str | None = None, chat: str | None = None) -> str:
+  """A link back into the app (tapping the phone alert opens this job / conversation)."""
+  base = secret("APP_URL") or ""
+  if not base:
+    try:
+      host = st.context.headers.get("host") or ""
+      base = f"https://{host}" if host else ""
+    except Exception:
+      base = ""
+  if not base:
+    return ""
+  q = "&".join(x for x in (f"job={job_id}" if job_id else "", f"chat={chat}" if chat else "") if x)
+  return base.rstrip("/") + ("/?" + q if q else "/")
+
+
+def notify(title: str, message: str, tags: str = "wrench", priority: int = 3, click: str = "") -> bool:
+  """Push a phone alert (never customer names or numbers — just the car and the result). Sent in the background."""
+  topic = (secret("NTFY_TOPIC") or "").strip()
+  if not topic:
+    return False
+  server = (secret("NTFY_SERVER") or "https://ntfy.sh").rstrip("/")
+  body = {"topic": topic, "title": str(title)[:120], "message": str(message)[:900] or " ",
+          "tags": [t for t in str(tags).split(",") if t], "priority": int(priority)}
+  if click:
+    body["click"] = click
+  headers = {"Authorization": f"Bearer {secret('NTFY_TOKEN')}"} if secret("NTFY_TOKEN") else {}
+  def send():
+    try:
+      r = requests.post(server, json=body, headers=headers, timeout=15)
+      if r.status_code >= 300:
+        log_problem("alerts", "Phone alert (ntfy)", f"HTTP {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+      log_problem("alerts", "Phone alert (ntfy)", str(e))
+  threading.Thread(target=send, daemon=True).start()
+  return True
+
+
+def first_line(text: str, n: int = 160) -> str:
+  for ln in str(text or "").splitlines():
+    ln = re.sub(r"[#*_`>|]+", "", ln).strip(" -•")
+    if len(ln) > 3:
+      return ln[:n]
+  return ""
+
+
 # ---- Background AI jobs: a long AI answer can't be cut off by a page refresh, a tap, or the phone locking ----
 @st.cache_resource
 def _ai_jobs() -> dict:
@@ -492,6 +578,65 @@ def _store_list(kind: str, limit: int, where_json: str, ver: int, online: bool) 
     pass
   rows.sort(key=lambda r: str(r.get("updated_at", "")), reverse=True)
   return rows[:limit]
+
+
+def store_put_many(kind: str, rows: list) -> bool:
+  """Save many records in one request: rows = [(id, data), ...]."""
+  if not rows:
+    return True
+  _bump(kind)
+  if store_on():
+    try:
+      now = datetime.now(timezone.utc).isoformat()
+      for i in range(0, len(rows), 200):
+        r = http().post(_supa_url(), timeout=30, json=[{"kind": kind, "id": rid, "data": _clean(d), "updated_at": now}
+                                                         for rid, d in rows[i:i + 200]],
+                        headers=_supa_headers({"Prefer": "resolution=merge-duplicates,return=minimal"}))
+        if r.status_code >= 300:
+          _store_error(f"Saving {kind} failed: HTTP {r.status_code} {r.text[:200]}")
+          break
+      else:
+        return True
+    except requests.RequestException as e:
+      _store_error(f"Saving {kind} failed: {e}")
+  for rid, d in rows:   # no permanent storage (or it failed): keep them on the temporary disk
+    try:
+      with open(os.path.join(_local_dir(kind), re.sub(r"[^\w\-]", "", rid) + ".json"), "w", encoding="utf-8") as f:
+        json.dump({"id": rid, "data": _clean(d), "updated_at": datetime.now(timezone.utc).isoformat()}, f)
+    except OSError:
+      pass
+  return False
+
+
+def store_list_all(kind: str, where: dict | None = None) -> list[dict]:
+  """Every record of a kind (pages past the database's 1,000-row limit)."""
+  return _store_list_all(kind, json.dumps(where or {}, sort_keys=True), _store_versions().get(kind, 0), store_on())
+
+
+@st.cache_data(ttl=600, show_spinner=False, max_entries=40)
+def _store_list_all(kind: str, where_json: str, ver: int, online: bool) -> list[dict]:
+  where = json.loads(where_json)
+  if not online:
+    return _store_list(kind, 100000, where_json, ver, online)
+  rows, off = [], 0
+  while True:
+    params = {"kind": f"eq.{kind}", "select": "id,data", "order": "id.asc", "limit": "1000", "offset": str(off)}
+    for k, v in where.items():
+      params[f"data->>{k}"] = f"eq.{v}"
+    try:
+      r = http().get(_supa_url(), headers=_supa_headers(), params=params, timeout=30)
+    except requests.RequestException as e:
+      _store_error(f"Listing {kind} failed: {e}")
+      break
+    if r.status_code != 200:
+      _store_error(f"Listing {kind} failed: HTTP {r.status_code}")
+      break
+    page = r.json()
+    rows += page
+    if len(page) < 1000:
+      break
+    off += 1000
+  return rows
 
 
 def store_delete(kind: str, rid: str | None = None):
@@ -610,6 +755,190 @@ def gemini_upload(data: bytes, mime: str, name: str = "video", wait: int = 240) 
   if f.get("state") != "ACTIVE" or not f.get("uri"):
     raise AIError(f"Gemini couldn't process the video (state: {f.get('state') or 'unknown'}). Try a shorter clip (under a minute works best).")
   return {"uri": f["uri"], "mime": f.get("mimeType") or mime, "name": str(name), "at": time.time()}
+
+
+# ========================================================
+# --- 🧠 MEANING SEARCH (embeddings): notes, past fixes and chats found by what they MEAN, not just matching words ---
+# Uses a free model on this server if fastembed is installed (pip install fastembed), otherwise Gemini's embedding
+# model (same Gemini key), or Hugging Face if HF_TOKEN is set. EMBED_PROVIDER = "local" / "gemini" / "hf" forces one.
+# ========================================================
+GEMINI_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
+HF_EMBED_URL = "https://router.huggingface.co/hf-inference/models/{model}/pipeline/feature-extraction"
+
+
+@st.cache_resource
+def _local_embedder():
+  try:
+    from fastembed import TextEmbedding
+    return TextEmbedding(secret("LOCAL_EMBED_MODEL") or "BAAI/bge-small-en-v1.5")
+  except Exception:
+    return None
+
+
+@st.cache_resource
+def _embed_state() -> dict:
+  return {}
+
+
+def embed_provider() -> str:
+  want = (secret("EMBED_PROVIDER") or "").strip().lower()
+  if want == "local" or (not want and _local_embedder() is not None):
+    if _local_embedder() is not None:
+      return "local"
+  if want in ("", "gemini") and secret("GEMINI_API_KEY") and not _embed_state().get("gemini_off"):
+    return "gemini"
+  if want in ("", "hf") and secret("HF_TOKEN"):
+    return "hf"
+  return ""
+
+
+def _gemini_embed_model() -> str:
+  st_ = _embed_state()
+  if secret("EMBED_MODEL"):
+    return secret("EMBED_MODEL")
+  if st_.get("gemini_model"):
+    return st_["gemini_model"]
+  model = "gemini-embedding-001"
+  try:   # pick the newest embedding model this key has (they get renamed over time)
+    r = http().get(GEMINI_MODELS_URL, headers={"x-goog-api-key": secret("GEMINI_API_KEY")}, params={"pageSize": 200}, timeout=15)
+    names = [m["name"].split("/")[-1] for m in (r.json().get("models") or [])
+             if "embedContent" in (m.get("supportedGenerationMethods") or []) and "embedding" in m.get("name", "")
+             and "exp" not in m.get("name", "")]
+    best = sorted([n for n in names if n.startswith("gemini-embedding")], reverse=True) or names
+    if best:
+      model = best[0]
+  except Exception:
+    pass
+  st_["gemini_model"] = model
+  return model
+
+
+def embed_model_key() -> str:
+  p = embed_provider()
+  if p == "local":
+    return "local:" + (secret("LOCAL_EMBED_MODEL") or "BAAI/bge-small-en-v1.5")
+  if p == "gemini":
+    return "gemini:" + _gemini_embed_model()
+  if p == "hf":
+    return "hf:" + (secret("HF_EMBED_MODEL") or "BAAI/bge-small-en-v1.5")
+  return ""
+
+
+def embed_texts(texts: list[str], kind: str = "doc") -> np.ndarray:
+  """Meaning fingerprints for these texts (one normalized row each). kind: doc = stored item, query = a search."""
+  p = embed_provider()
+  texts = [str(t or " ")[:6000] for t in texts]
+  if not p or not texts:
+    raise AIError("No meaning-search engine set up.")
+  if p == "local":
+    m = _local_embedder()
+    vecs = list(m.query_embed(texts) if kind == "query" else m.embed(texts))
+    out = np.array(vecs, dtype=np.float32)
+  elif p == "gemini":
+    model, out_rows = _gemini_embed_model(), []
+    task = "RETRIEVAL_QUERY" if kind == "query" else "RETRIEVAL_DOCUMENT"
+    for i in range(0, len(texts), 100):
+      body = {"requests": [{"model": f"models/{model}", "content": {"parts": [{"text": t}]}, "taskType": task,
+                            "outputDimensionality": 768} for t in texts[i:i + 100]]}
+      try:
+        r = http().post(f"{GEMINI_MODELS_URL}/{model}:batchEmbedContents", headers={"x-goog-api-key": secret("GEMINI_API_KEY")},
+                        json=body, timeout=60)
+        if r.status_code == 400 and "imensionality" in r.text:   # an older model without the size option
+          for q in body["requests"]:
+            q.pop("outputDimensionality", None)
+          r = http().post(f"{GEMINI_MODELS_URL}/{model}:batchEmbedContents", headers={"x-goog-api-key": secret("GEMINI_API_KEY")},
+                          json=body, timeout=60)
+      except requests.RequestException as e:
+        raise AIError(f"Meaning search (Gemini) connection error: {e}") from e
+      if r.status_code in (403, 404):
+        _embed_state().pop("gemini_model", None)
+      if r.status_code != 200:
+        raise AIError(f"Meaning search (Gemini) error {r.status_code}: {r.text[:200]}")
+      out_rows += [e_.get("values") or [] for e_ in r.json().get("embeddings") or []]
+    out = np.array(out_rows, dtype=np.float32)
+  else:
+    try:
+      r = http().post(HF_EMBED_URL.format(model=secret("HF_EMBED_MODEL") or "BAAI/bge-small-en-v1.5"), timeout=60,
+                      headers={"Authorization": f"Bearer {secret('HF_TOKEN')}"}, json={"inputs": texts, "normalize": True})
+    except requests.RequestException as e:
+      raise AIError(f"Meaning search (Hugging Face) connection error: {e}") from e
+    if r.status_code != 200:
+      raise AIError(f"Meaning search (Hugging Face) error {r.status_code}: {r.text[:200]}")
+    out = np.array(r.json(), dtype=np.float32)
+    if out.ndim == 3:   # token vectors: average them
+      out = out.mean(axis=1)
+  if out.ndim != 2 or out.shape[0] != len(texts):
+    raise AIError("Meaning search returned the wrong number of results.")
+  return out / np.maximum(np.linalg.norm(out, axis=1, keepdims=True), 1e-9)
+
+
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=500)
+def _query_vec(model_key: str, text: str) -> np.ndarray:
+  return embed_texts([text], "query")[0]
+
+
+def _vpack(v: np.ndarray) -> str:
+  return base64.b64encode(np.asarray(v, dtype=np.float16).tobytes()).decode()
+
+
+def _vunpack(s: str) -> np.ndarray:
+  return np.frombuffer(base64.b64decode(s), dtype=np.float16).astype(np.float32)
+
+
+def ensure_vectors(src: str, items: list) -> dict:
+  """Fingerprints for these (id, text) items, making and saving any that are missing or out of date. {} if unavailable."""
+  mkey = embed_model_key()
+  if not mkey or not items:
+    return {}
+  have = {}
+  for r in store_list_all("emb", {"model": mkey, "src": src}):
+    d = r.get("data") or {}
+    if d.get("sid") and d.get("v"):
+      have[d["sid"]] = (d.get("h"), d["v"])
+  todo = [(sid, t) for sid, t in items if have.get(sid, (None,))[0] != hashlib.md5(t.encode()).hexdigest()[:12]]
+  if todo:   # a big library is built a few hundred at a time (each batch is saved, so nothing is redone)
+    with st.spinner(f"🧠 Building meaning search for {len(todo)} item(s) — one time…" if len(todo) > 20 else "🧠 …"):
+      for i in range(0, min(len(todo), 400), 100):
+        chunk = todo[i:i + 100]
+        try:
+          vecs = embed_texts([t for _, t in chunk], "doc")
+        except Exception as e:
+          if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):   # going too fast for the free tier: finish next time
+            break
+          if not _embed_state().get("warned"):
+            _embed_state()["warned"] = True
+            log_problem("ai", "Meaning search", str(e))
+          break
+        rows = []
+        for (sid, t), v in zip(chunk, vecs):
+          packed = _vpack(v)
+          have[sid] = (hashlib.md5(t.encode()).hexdigest()[:12], packed)
+          rows.append((hashlib.md5(f"{mkey}|{src}|{sid}".encode()).hexdigest(),
+                       {"model": mkey, "src": src, "sid": sid, "h": have[sid][0], "v": packed}))
+        store_put_many("emb", rows)
+  wanted = {sid for sid, _ in items}
+  return {sid: _vunpack(v) for sid, (h, v) in have.items() if sid in wanted}
+
+
+def meaning_scores(query: str, src: str, items: list) -> dict:
+  """How close in meaning each (id, text) item is to the query: {id: 0..1}. {} when meaning search isn't available."""
+  if not str(query or "").strip() or not items:
+    return {}
+  try:
+    vecs = ensure_vectors(src, items)
+    if not vecs:
+      return {}
+    q = _query_vec(embed_model_key(), str(query)[:2000])
+  except Exception as e:
+    if not _embed_state().get("warned"):
+      _embed_state()["warned"] = True
+      log_problem("ai", "Meaning search", str(e))
+    return {}
+  return {sid: float(np.dot(v[:len(q)], q[:len(v)])) for sid, v in vecs.items()}
+
+
+def note_text(e: dict) -> str:
+  return f"{e.get('topic', '')} ({e.get('type', '')}; applies to {e.get('applies_to') or 'All'}): {e.get('rule', '')}"
 
 
 def video_parts(refs: list) -> list:
@@ -2366,7 +2695,7 @@ CODE_WORDS = [
 
 
 def knowledge_entries() -> list[dict]:
-  return [dict(r.get("data") or {}, _id=r["id"]) for r in store_list("know", 1000)]
+  return [dict(r.get("data") or {}, _id=r["id"]) for r in store_list_all("know")]
 
 
 KN_STOP = {"the", "and", "for", "with", "what", "that", "this", "does", "have", "from", "when", "where", "which", "how", "why",
@@ -2396,6 +2725,10 @@ def knowledge_for_job(limit: int = 30, extra: str = "") -> list[dict]:
   same_family = ({m.lower() for m, f in MAKE_PROFILES.items() if f.lower() == fam} | {fam, make}) if make else set()
   all_makes = {m.lower() for m in MAKE_PROFILES} | {f.lower() for f in MAKE_PROFILES.values()} | \
       {m.lower() for m in MANUAL_MAKES if m != "Other..."}
+  # 🧠 meaning: how close each note is to this job (codes, symptoms, vehicle, the question) even with different words
+  query = " ".join([", ".join(current_codes()), " ".join(sorted(words)), ss.vehicle_info or "", (ss.symptoms or ""), extra or ""])
+  sem = meaning_scores(query, "know", [(e["_id"], note_text(e)) for e in entries]) if len(entries) > 8 else {}
+  base = sorted(sem.values())[len(sem) // 2] if sem else 0.0   # typical closeness: only notes above it get credit
   scored = []
   for e in entries:
     text = f"{e.get('topic', '')} {e.get('rule', '')} {e.get('applies_to', '')}".lower()
@@ -2403,14 +2736,39 @@ def knowledge_for_job(limit: int = 30, extra: str = "") -> list[dict]:
     named = {m for m in all_makes if re.search(rf"\b{re.escape(m)}\b", applies)}
     if named and make and not (named & same_family):
       continue   # a note for another make never goes into this car's diagnosis
-    score = sum(1 for w in words if w in text) + (3 if named & same_family else 0)
-    if score > 0 and e.get("type") == "Test procedure":
+    kw = sum(1 for w in words if w in text)
+    near = max(0.0, sem.get(e["_id"], 0.0) - base) * 40   # 0 .. ~10
+    score = kw + near + (3 if named & same_family else 0)
+    if (kw > 0 or near > 2) and e.get("type") == "Test procedure":
       score += 2   # the shop's own test methods matter most when planning tests
     scored.append((score, e))
   if len(scored) > limit:
     scored = [x for x in scored if x[0] > 0] or scored
   scored.sort(key=lambda x: -x[0])
   return [e for _, e in scored[:limit]]
+
+
+def similar_cases(query: str, limit: int = 4) -> list[dict]:
+  """🧠 Confirmed fixes from ANY vehicle that match this problem by meaning (same-car and same-model ones are shown elsewhere)."""
+  try:
+    fixes = [dict(r.get("data") or {}, _id=r["id"]) for r in store_list("fix", 400)]
+  except Exception:
+    return []
+  fixes = [f for f in fixes if f.get("fix") and f.get("_id") != ss.get("job_id")]
+  if len(fixes) < 2:
+    return []
+  sem = meaning_scores(query, "fix", [(f["_id"], f"{f.get('vehicle', '')} {f.get('engine', '')} | codes {', '.join(f.get('codes') or [])} | "
+                                                   f"complaint: {f.get('complaint', '')} | fixed by: {f.get('fix', '')} | proved by: "
+                                                   f"{f.get('confirmed_by', '')}") for f in fixes])
+  if not sem:
+    return []
+  ranked = sorted(fixes, key=lambda f: -sem.get(f["_id"], 0))
+  best = sem.get(ranked[0]["_id"], 0)
+  vd = ss.vehicle_details or {}
+  same_model = (str(vd.get("Make", "")).upper(), str(vd.get("Model", "")).upper())
+  out = [f for f in ranked if sem.get(f["_id"], 0) >= best - 0.08 and (f.get("make"), f.get("model")) != same_model
+         and f.get("vin") != ss.get("active_vin")]
+  return out[:limit]
 
 
 # --- SHOP HISTORY: earlier visits + this shop's confirmed fixes, fed to the AI ---
@@ -2499,6 +2857,12 @@ def shop_context(extra: str = "") -> str:
     kb = knowledge_block(extra)
     if kb:
       out.append(kb)
+    if ss.get("vehicle_info") or current_codes() or (ss.get("symptoms") or "").strip():
+      sim = similar_cases(" ".join([", ".join(current_codes()), ss.symptoms or "", ss.vehicle_info or "", extra or ""]))
+      if sim:
+        out.append("SIMILAR CASES THIS SHOP FIXED ON OTHER VEHICLES (matched by meaning — leads to check, not proof):")
+        out += [f"- {f.get('vehicle', '')}: codes {', '.join(f.get('codes') or []) or 'none'}; complaint: {(f.get('complaint') or '-')[:120]} "
+                f"-> FIXED BY {f.get('fix')} (proved by: {f.get('confirmed_by') or '-'})" for f in sim]
   except Exception as e:   # history is a bonus; never block a diagnosis over it
     log_problem("storage", "Shop history for AI", str(e))
   return ("\n\n" + "\n".join(out)) if out else ""
@@ -2937,6 +3301,19 @@ elif "job_id" not in ss:
   if _qj := st.query_params.get("job"):
     if not load_job(_qj):   # e.g. the link is from before permanent storage was set up
       del st.query_params["job"]
+  elif store_on():   # opened on another device: pick up the car you were working on in the last few hours
+    with guard("Pick up where you left off"):
+      _now = datetime.now(timezone.utc)
+      for _r in store_list("job", 20, {"status": "open"}):
+        try:
+          _age = (_now - datetime.fromisoformat(str(_r.get("updated_at")).replace("Z", "+00:00"))).total_seconds()
+        except ValueError:
+          continue
+        _d = _r.get("data") or {}
+        if _age < 4 * 3600 and (not ss.get("tech_user") or _d.get("tech") in ("", None, ss.get("tech_user"))):
+          if load_job(_r["id"]):
+            st.toast(f"🚗 Picked up where you left off: {_d.get('vehicle_info') or _d.get('customer_name') or 'your last car'} — switch in 🚗 Cars in the shop")
+          break
 ss.active_dtc = ", ".join(current_codes())
 
 
@@ -2990,7 +3367,8 @@ def setup_panel():
       ("🔑 Shop login", bool(shop_users())), ("💾 Permanent storage", store_on()),
       ("✨ Gemini (main AI)", bool(secret("GEMINI_API_KEY"))), ("🧠 Claude review", has_claude()),
       ("🐋 DeepSeek 2nd opinion", has_deepseek()), ("🌐 Perplexity research", bool(secret("PERPLEXITY_API_KEY"))),
-      ("📧 Email reports", email_ready()), ("💬 Text customers", sms_ready()),
+      ("📧 Email reports", email_ready()), ("💬 Text customers", sms_ready()), ("📲 Phone alerts (ntfy)", ntfy_ready()),
+      ("🧠 Meaning search", bool(embed_provider())),
   ]
   on = sum(1 for _, ok in checks if ok)
   with st.expander(("⚙️" if on == len(checks) else "🟡") + f" Setup — {on}/{len(checks)} connected"):
@@ -3006,35 +3384,42 @@ def setup_panel():
                  "storage → SUPABASE_URL + SUPABASE_KEY  \n"
                  "AIs → GEMINI_API_KEY · ANTHROPIC_API_KEY · DEEPSEEK_API_KEY · PERPLEXITY_API_KEY  \n"
                  "email → SMTP_USER + SMTP_PASSWORD (Gmail app password)  \n"
-                 "texting → TWILIO_SID + TWILIO_TOKEN + TWILIO_FROM")
+                 "texting → TWILIO_SID + TWILIO_TOKEN + TWILIO_FROM  \n"
+                 "phone alerts → NTFY_TOPIC (make up a long name, subscribe to it in the free ntfy app)  \n"
+                 "meaning search → on automatically with the Gemini key (or HF_TOKEN, or fastembed installed on your server)")
+    if ntfy_ready() and st.button("📲 Send a test alert to my phone", key="ntfy_test"):
+      notify("✅ Test Don't Guess", "Phone alerts are working. You'll get one when an AI answer, AI Check or test drive "
+             "review is ready.", "white_check_mark", 3, app_link())
+      st.toast("Sent — check your phone")
+    if embed_provider():
+      st.caption(f"🧠 Meaning search: {embed_model_key()}")
 
 
-with guard("Cars in the shop"):
-  _topL, _topM, _topR = st.columns([2.4, 1.2, 1.2])
-  with _topL:
-    jobs_panel()
-  with _topM:
-    setup_panel()
-  with _topR:
-    if "simple_view" not in ss:
-      ss.simple_view = st.query_params.get("view") == "simple"
-    st.toggle("🌟 Simple view", key="simple_view",
-              help="Big status cards, the plan one test at a time, plain-English codes. Hides the pro sections "
-                   "(scope math, report, estimate, confirmed fix) — nothing is lost, switch it off to see them.")
-    if ss.simple_view and st.query_params.get("view") != "simple":
-      st.query_params["view"] = "simple"
-    elif not ss.simple_view and "view" in st.query_params:
-      del st.query_params["view"]
-    st.toggle("🔆 Keep screen on", value=True, key="keep_on",
-              help="Stops the phone from locking while the app is open, so it doesn't reset in the middle of a job. "
-                   "Uses a little more battery — turn it off when you don't need it.")
-    keep_screen_on(bool(ss.get("keep_on", True)))
-    with st.expander("🆕 What's new"):
-      st.markdown("\n".join(f"- {w}" for w in WHATS_NEW))
-
-# 💬 Quick help sits here, above the tabs, on every page. It's filled in at the very end of the script (it needs the
-# scanner, plan and knowledge helpers defined further down), but Streamlit shows it in this spot.
-_quick_box = st.container()
+# ⚙️ Settings sit in the top-right corner (setup, Simple view, keep screen on, what's new)
+with guard("Settings"):
+  if "simple_view" not in ss:
+    ss.simple_view = st.query_params.get("view") == "simple"
+  try:
+    _gear = st.container(key="gear")
+  except TypeError:   # older Streamlit
+    _gear = st.container()
+  with _gear:
+    _pop = getattr(st, "popover", None)
+    with (_pop("⚙️") if _pop else st.expander("⚙️ Settings")):
+      setup_panel()
+      st.toggle("🌟 Simple view", key="simple_view",
+                help="Big status cards, the plan one test at a time, plain-English codes. Hides the pro sections "
+                     "(scope math, report, estimate, confirmed fix) — nothing is lost, switch it off to see them.")
+      st.toggle("🔆 Keep screen on", value=True, key="keep_on",
+                help="Stops the phone from locking while the app is open, so it doesn't reset in the middle of a job. "
+                     "Uses a little more battery — turn it off when you don't need it.")
+      st.markdown("**🆕 What's new**")
+      st.markdown("\n".join(f"- {w}" for w in WHATS_NEW[-8:]))
+  if ss.simple_view and st.query_params.get("view") != "simple":
+    st.query_params["view"] = "simple"
+  elif not ss.simple_view and "view" in st.query_params:
+    del st.query_params["view"]
+  keep_screen_on(bool(ss.get("keep_on", True)))
 
 
 STEP_PROMPT = """Turn this diagnostic test plan into step-by-step cards a technician (or a helper learning the trade) can
@@ -3278,13 +3663,87 @@ def pro_section(name: str):
     return st.container()
 
 
-tab1, tab2, tab3, tab5, tab6 = st.tabs([
-    "📷 Vehicle & Customer",
-    "📊 Scanner & Live Data",
-    "🔧 Diagnose",
-    "📋 Log & History",
-    "📖 Knowledge",
-])
+tab0, tab1, tab2, tab3, tab5, tab6 = st.tabs(["Home", "Car", "Scan", "Diagnose", "Log", "Notes"])
+
+# ========================================================
+# --- 🏠 HOME: the AI chat first, then the car you're on and the cars in the shop ---
+# ========================================================
+def _local_now() -> datetime:
+  try:
+    from zoneinfo import ZoneInfo
+    tz = getattr(st.context, "timezone", None) or secret("TIMEZONE") or "America/New_York"
+    return datetime.now(ZoneInfo(tz))
+  except Exception:
+    return datetime.now()
+
+
+def home_cars():
+  """🚗 Cars in the shop as cards — open one, start a new one, close the one you're on, reopen a closed one."""
+  e = html_lib.escape
+  if not store_on():
+    st.warning("⚠️ Permanent storage isn't set up yet, so jobs are erased when the app restarts. Add SUPABASE_URL and "
+               "SUPABASE_KEY to Secrets (⚙️ top right).")
+  elif ss.get("_store_err"):
+    st.warning(f"⚠️ Last save had a problem: {ss._store_err} (details in 📋 Log → 🐞 Problem log)")
+  cur = ss.get("job_id")
+  st.markdown('<div class="tdg-label">Current car</div>', unsafe_allow_html=True)
+  with st.container(key="carnow"):
+    if job_has_content(job_snapshot()):
+      st.markdown(f'<div class="tdg-car"><div class="m">{e(ss.customer_name or "no customer")}'
+                  f'{(" · " + e(ss.odometer) + " mi") if (ss.odometer or "").strip() else ""}</div>'
+                  f'<div class="v">{e(ss.vehicle_info or "Vehicle not set")}</div>'
+                  f'<div class="codes">{e(ss.active_dtc or "no codes")}</div></div>', unsafe_allow_html=True)
+      c1, c2 = st.columns(2)
+      if c1.button("➕ Start a new car", use_container_width=True, key="home_new"):
+        ss._job_request = "new"
+        st.rerun()
+      if cur and c2.button("✅ Car is done — close it", use_container_width=True, key="home_close"):
+        ss.job_status = "closed"
+        autosave_job(force=True)
+        ss._job_request = "new"
+        ss._toast = "Job closed"
+        st.rerun()
+    else:
+      st.markdown('<div class="tdg-car"><div class="v">No car open</div><div class="m">Ask the AI anything above — or open the '
+                  'Car screen below to add a VIN, or connect the scanner on Scan</div></div>', unsafe_allow_html=True)
+  jobs = [r for r in store_list("job", 60, {"status": "open"}) if r["id"] != cur]
+  if jobs:
+    st.markdown(f'<div class="tdg-label">Cars in the shop · {len(jobs) + (1 if cur else 0)} open</div>', unsafe_allow_html=True)
+    for r in jobs[:12]:
+      d = r.get("data") or {}
+      with st.container(key=f"jobcard_{re.sub(r'[^A-Za-z0-9_-]', '', r['id'])}"):
+        a, b = st.columns([5, 1.3])
+        a.markdown(f'<div class="tdg-car"><div class="v">{e(d.get("vehicle_info") or "Vehicle not set")}</div>'
+                   f'<div class="m">{e(d.get("customer_name") or "no name")} · updated {e(d.get("updated", ""))}</div>'
+                   f'<div class="codes">{e(d.get("codes") or "no codes")}</div></div>', unsafe_allow_html=True)
+        if b.button("Open →", key=f"open_{r['id']}", use_container_width=True):
+          ss._job_request = r["id"]
+          st.rerun()
+  closed = store_list("job", 25, {"status": "closed"})
+  if closed:
+    with st.expander(f"Closed jobs ({len(closed)})"):
+      pick = st.selectbox("Reopen a closed job", [r["id"] for r in closed], index=None, placeholder="Recently closed jobs…",
+                          format_func=lambda i: next(f"{(r.get('data') or {}).get('updated', '')} · "
+                                                     f"{(r.get('data') or {}).get('vehicle_info') or 'vehicle'} · "
+                                                     f"{(r.get('data') or {}).get('customer_name') or 'no name'}"
+                                                     for r in closed if r["id"] == i), key=f"reopen_{ss.get('job_n', 0)}")
+      if pick and st.button("↩️ Reopen it"):
+        rec = store_get("job", pick) or {}
+        rec["status"] = "open"
+        store_put("job", pick, rec)
+        ss._job_request = pick
+        st.rerun()
+
+
+with tab0, guard("Home"):
+  _now = _local_now()
+  st.markdown(f'<div class="tdg-today"><h1>Today</h1><div class="sub">{_now.strftime("%A, %B")} {_now.day}'
+              f'{(" · Welcome back, " + html_lib.escape(ss.tech_user)) if ss.get("tech_user") else " · Welcome back"}</div></div>',
+              unsafe_allow_html=True)
+  # 💬 the AI chat — filled in at the very end of the script (it needs helpers defined further down), shown right here
+  _quick_box = st.container()
+  home_cars()
+
 
 # ========================================================
 # --- TAB 1: VIN & CUSTOMER INFO ---
@@ -7975,6 +8434,7 @@ Use clean bold section headers and direct shop-floor language. Skip sections wit
     drive_mode = ev.get("mode") == "drive"
     symptoms = (ss.symptoms or "").strip()
     ran_before = [t for t in (ev.get("ran") or []) if t in AUTO_TESTS]
+    link_now = app_link(ss.get("job_id"))
     eye = None if drive_mode else eye_fresh()
     if eye:
       prompt += ("\n\nThe attached image is the technician's scan tool screen right now (live screen share / camera). "
@@ -7985,6 +8445,9 @@ Use clean bold section headers and direct shop-floor language. Skip sections wit
       text, research, draft, ds_draft = team_answer(prompt, vehicle, dtcs, symptoms, use_web=False, status=None, fast=drive_mode,
                                                     effort="low" if drive_mode else "medium", image_b64=eye_img)
       tests, diag = [], []
+      if not drive_mode:
+        notify("🧪 Test follow-up ready" if ev.get("mode") == "followup" else "🤖 AI Check done", f"{vehicle} — {first_line(text)}",
+               "robot", 3, link_now)
       if not drive_mode and not str(text).startswith("⚠️"):
         text, tests = split_run_tests(text)
         text, diag = split_need_diagram(text)
@@ -8078,13 +8541,17 @@ def chat_memory(question: str) -> str:
           and not str(d.get("a")).startswith("⚠️") and d.get("id") not in in_convo]
   same = [d for d in rows if ss.active_vin and d.get("vin") == ss.active_vin][:4]
   words = {w for w in re.findall(r"[a-z0-9]+", question.lower()) if len(w) >= 3} - KN_STOP
+  sem = meaning_scores(f"{ss.vehicle_info or ''} {question}", "chat",
+                       [(d["id"], f"{d.get('vehicle', '')}: {d.get('q', '')} — {str(d.get('a', ''))[:400]}") for d in rows if d.get("id")])
+  top = max(sem.values()) if sem else 0
   scored = []
   for d in rows:
     if d in same:
       continue
     hit = len(words & set(re.findall(r"[a-z0-9]+", f"{d.get('q', '')} {d.get('vehicle', '')}".lower())))
-    if hit >= 2:
-      scored.append((hit, d))
+    near = sem.get(d.get("id"), 0)
+    if hit >= 2 or (sem and near >= top - 0.05 and near >= 0.6):
+      scored.append((hit + near * 10, d))
   scored.sort(key=lambda x: -x[0])
   pick = same + [d for _, d in scored[:3]]
   if not pick:
@@ -8095,6 +8562,16 @@ def chat_memory(question: str) -> str:
                       + " ".join(str(d.get("a", "")).split())[:450] for d in pick))
 
 
+def vehicle_facts() -> str:
+  """The car that's open, as the AI should know it: VIN plus the decoded details."""
+  vd = ss.vehicle_details or {}
+  keys = [("Model Year", ""), ("Make", ""), ("Model", ""), ("Trim", ""), ("Displacement (L)", "L"), ("Engine Number of Cylinders", " cyl"),
+          ("Engine Model", ""), ("Fuel Type - Primary", ""), ("Drive Type", ""), ("Transmission Style", ""), ("Transmission Speeds", "-speed")]
+  parts = [f"{vd.get(k)}{u}" for k, u in keys if str(vd.get(k) or "").strip() and str(vd.get(k)) not in ("Not Applicable", "0")]
+  vin = ss.get("active_vin") or ""
+  return " · ".join(([f"VIN {vin}"] if vin else []) + parts + ([f"odometer {ss.odometer}"] if str(ss.get("odometer") or "").strip() else []))
+
+
 def chat_prompt_for(question: str, n_photos: int, n_videos: int = 0) -> str:
   history = "\n".join(f"{m['role'].upper()}: {m['content']}" + (f" [attached {len(m['photos'])} photo(s)]" if m.get("photos") else "")
                       for m in (ss.chat_history or [])[-6:])
@@ -8102,7 +8579,8 @@ def chat_prompt_for(question: str, n_photos: int, n_videos: int = 0) -> str:
   sr = ss.scope_result
   return f"""
 You are an expert automotive diagnostic technician assisting a mechanic in the field.
-Vehicle: {ss.vehicle_info or 'none open — answer in general, and ask for the vehicle if the answer depends on it'}
+Vehicle: {(ss.vehicle_info + (" — " + vehicle_facts() if vehicle_facts() else "")) if ss.vehicle_info else 'none open — answer in general, and ask for the vehicle if the answer depends on it'}
+{"The technician already identified this vehicle in the app (VIN decoded) — use it, don't ask for it again. If a photo shows a different VIN or vehicle, point that out." if ss.vehicle_info else ""}
 Fault codes being worked: {", ".join(current_codes()) or 'None'}
 Symptoms / complaint: {(ss.symptoms or '').strip() or 'not given'}
 {scan_context(question)}
@@ -8256,6 +8734,7 @@ def ask_chat(question: str, imgs: list, team: bool, where: str, videos: list | N
           "team": bool(team)}
   store_put("chat", rid, dict(meta, a="", state="working"))
   job_id = "chat-" + rid
+  link, t_start = app_link(ss.get("job_id"), ss.chat_conv), time.time()
 
   def job():
     vrefs = list(reuse)
@@ -8272,6 +8751,9 @@ def ask_chat(question: str, imgs: list, team: bool, where: str, videos: list | N
     ok = not str(reply).startswith("⚠️")
     store_put("chat", rid, dict(meta, a=reply, who=who, state="done" if ok else "failed",
                                 videos=[v for v in vrefs if v not in reuse], reused=bool(reuse)))
+    if time.time() - t_start > 20:   # long enough that you may have put the phone down
+      notify("💬 Answer ready" if ok else "⚠️ Chat answer failed", f"{vehicle or 'Quick help'} — {question[:70]}\n{first_line(reply)}",
+             "speech_balloon", 3, link)
     return reply, who, research, [v for v in vrefs if v not in reuse], diag
 
   if start_ai_job(job_id, job):
@@ -8472,6 +8954,19 @@ def _try(fn, *a, fallback_drop=(), **kw):
     return fn(*a, **{k: v for k, v in kw.items() if k not in fallback_drop})
 
 
+def transcribe_audio(data: bytes, mime: str = "audio/wav") -> str:
+  """🎙️ What the tech said, as text (Gemini listens). Keeps codes, VINs and numbers exactly."""
+  if not secret("GEMINI_API_KEY"):
+    raise AIError("voice needs the Gemini key (GEMINI_API_KEY).")
+  mime = mime if str(mime).startswith("audio/") else "audio/wav"
+  txt = gemini([{"text": "Transcribe exactly what this auto technician says. Keep trouble codes (like P0300), VINs, part "
+                         "names, numbers and units exactly as spoken (write codes as P0300, not 'P zero three hundred'). "
+                         "Return only their words — no notes. If there is no speech, return the single word NONE."},
+                {"inline_data": {"mime_type": mime, "data": base64.b64encode(data).decode()}}], timeout=60)
+  txt = txt.strip().strip('"')
+  return "" if txt.upper().startswith("NONE") else txt
+
+
 def chat_files_split(files: list) -> tuple[list, list]:
   """Uploaded files -> (photos as images, videos as (name, bytes))."""
   imgs, vids = [], []
@@ -8496,6 +8991,12 @@ def quick_help_panel():
   box = _try(st.container, border=True, key="quickhelp", fallback_drop=("key",))
   with box:
     n_kn = len(knowledge_entries())
+    st.markdown('<div class="tdg-hero"><div class="ic"><svg width="26" height="30" viewBox="0 0 30 34"><g fill="#22D3EE">'
+                '<rect x="1" y="12" width="4" height="10" rx="2"/><rect x="8" y="5" width="4" height="22" rx="2"/>'
+                '<rect x="15" y="9" width="4" height="16" rx="2"/><rect x="22" y="1" width="4" height="32" rx="2"/></g></svg></div>'
+                '<div><div class="k">TEST DON\'T GUESS</div><div class="h">Ask the <b>AI</b></div>'
+                '<div class="s">Repair questions, codes, specs, how to test anything — type it or say it</div></div></div>',
+                unsafe_allow_html=True)
     # 👀 first in the box, so it stays in the same spot and the shared screen / camera keeps running between taps
     if st.toggle("👀 Let the AI see my screen or camera", key="eye_toggle",
                  help="Share your scan tool's screen (from a computer) or point the phone camera at it. The AI reads it every "
@@ -8522,6 +9023,9 @@ def quick_help_panel():
                                 "shake or scope screen; sound is included)",
                                 type=PHOTO_TYPES + list(VIDEO_TYPES), accept_multiple_files=True, key="qh_files") or []
                if ss.get("qh_photos") else [])
+    voice = None
+    if hasattr(st, "audio_input"):   # 🎙️ talk instead of typing (greasy hands)
+      voice = st.audio_input("🎙️ Or say it — tap the mic, talk, tap stop. It asks right away.", key=f"qh_mic_{ss.get('qh_mic_n', 0)}")
     o1, o2, o3, o4 = st.columns(4)
     o1.toggle("📷 🎥 Add photos / video", key="qh_photos")
     o2.checkbox("🤝 All AIs check each other", value=True, key="qh_team",
@@ -8539,6 +9043,22 @@ def quick_help_panel():
       with slot:
         ask_chat("Here's what I'm looking at right now. What do you see? Anything that doesn't look right, and what should I "
                  "check next?", [], bool(ss.get("qh_team", True)), "quick")
+    if voice is not None and not pending:
+      vb = voice.getvalue()
+      if vb and hashlib.md5(vb).hexdigest() != ss.get("_qh_mic_seen"):
+        ss._qh_mic_seen = hashlib.md5(vb).hexdigest()
+        ss.qh_mic_n = ss.get("qh_mic_n", 0) + 1   # a fresh mic for next time
+        try:
+          with st.spinner("🎙️ Listening to what you said…"):
+            said = transcribe_audio(vb, getattr(voice, "type", "") or "audio/wav")
+        except AIError as e_:
+          said = None
+          st.warning(f"Couldn't hear that: {e_}")
+        if said:
+          with slot:
+            ask_chat(said, [], bool(ss.get("qh_team", True)), "quick")
+        elif said == "":
+          st.warning("Didn't catch any words — try again a little closer to the phone.")
     if go and str(q or "").strip():
       if pending:
         st.warning("Hang on — the last answer is still being worked on. Ask again when it shows up.")
@@ -8950,6 +9470,7 @@ Format strictly using these Markdown sections:
       status.update(label="Done", state="complete")
     text, _dg = split_need_diagram(text)
     add_diagram_requests(_dg, "test plan")
+    notify("📋 Test plan ready", f"{code_str} · {vehicle} — {first_line(text)}", "clipboard", 3, app_link(ss.get("job_id")))
     ss._auto_steps = True
     ss.dtc_result = {"title": f"{code_str} · {vehicle}", "text": text, "research": research, "draft": draft, "ds_draft": ds_draft,
                     "team": team_names(draft, ds_draft, research)}
@@ -9511,6 +10032,8 @@ def review_drive(rec: dict, status_label: str = "Reviewing the drive...") -> str
                                                  ss.active_dtc, ss.symptoms.strip(), False, status)
     status.update(label="Done", state="complete")
   ss.setdefault("drive_reviews", {})[rec["id"]] = ans + f"\n\n_{team_names(draft, ds_draft, research)}_"
+  notify("🚗 Test drive review ready", f"{rec.get('vehicle') or ss.vehicle_info or 'Test drive'} — {first_line(ans)}", "car", 3,
+         app_link(ss.get("job_id")))
   return ans
 
 
@@ -9727,7 +10250,8 @@ with tab5, guard("Log tab"):
   if st.button("📦 Prepare backup file"):
     with st.spinner("Gathering everything..."):
       _bk = {"app_version": APP_VERSION, "made": datetime.now().isoformat(),
-             **{k: store_list(k, 1000) for k in ("job", "fix", "log", "drive", "jobphoto", "diagram", "wave", "csvwave", "know", "chat", "sent", "problem")}}
+             **{k: store_list(k, 1000) for k in ("job", "fix", "log", "drive", "jobphoto", "diagram", "wave", "csvwave", "know", "chat", "sent", "problem")
+                if k != "know"}, "know": store_list_all("know")}
       ss._backup = json.dumps(_bk)
       ss._backup_counts = " · ".join(f"{k}: {len(_bk.get(k) or [])}" for k in ("job", "fix", "log", "drive", "jobphoto", "wave"))
     st.toast("Backup ready — tap Download")
@@ -9816,10 +10340,30 @@ with tab6, guard("Knowledge tab"):
                               "Applies to": str(x.get("applies_to") or "All")[:60], "Note": str(x.get("rule")).strip()[:600]}
                              for x in found]
           ss.know_pending_src, ss.know_pending_who = src.strip(), who
+          try:   # 🧠 mark notes that say the same thing as one you already have
+            have = knowledge_entries()
+            vecs = ensure_vectors("know", [(e["_id"], note_text(e)) for e in have]) if have else {}
+            if vecs:
+              ids = list(vecs)
+              M = np.stack([vecs[i] for i in ids])
+              new = embed_texts([f"{r['Topic']} ({r['Type']}; applies to {r['Applies to']}): {r['Note']}" for r in ss.know_pending], "doc")
+              byid = {e["_id"]: e for e in have}
+              for r, v in zip(ss.know_pending, new):
+                sims = M[:, :len(v)] @ v[:M.shape[1]]
+                j = int(np.argmax(sims))
+                if sims[j] >= 0.93:
+                  r["Keep"] = False
+                  r["Already have?"] = f"≈ {byid[ids[j]].get('topic', '')}: {str(byid[ids[j]].get('rule', ''))[:80]}"
+          except Exception:
+            pass
           ss.know_cam_pages = cam_pages[max(0, 6 - len(pages)):]   # keep any camera pages that didn't fit in this batch
     if ss.get("know_pending"):
       st.markdown(f"**{len(ss.know_pending)} note(s) found** — fix anything that's off, untick what you don't want, then save. "
                   f"<small>({ss.get('know_pending_who', '')})</small>", unsafe_allow_html=True)
+      _rep = sum(1 for r in ss.know_pending if r.get("Already have?"))
+      if _rep:
+        st.caption(f"🧠 {_rep} of these say the same thing as a note you already have — they're unticked (see 'Already have?'). "
+                   "Tick any you still want.")
       edited = st.data_editor(ss.know_pending, use_container_width=True, hide_index=True, num_rows="dynamic",
                               key=f"know_edit_{ss.get('know_n', 0)}",
                               column_config={"Note": st.column_config.TextColumn(width="large"),
@@ -9872,9 +10416,17 @@ with tab6, guard("Knowledge tab"):
   if not entries:
     st.info("No notes yet. Add some from book pages or by hand above.")
   else:
-    q = st.text_input("🔎 Search notes", key="know_q", placeholder="e.g. burn time, injector, GM, pressure transducer")
+    q = st.text_input("🔎 Search notes", key="know_q", placeholder="e.g. intermittent stall when warm, Honda · burn time · injector")
     shown_e = [e for e in entries if not q.strip() or q.strip().lower() in
                f"{e.get('topic')} {e.get('rule')} {e.get('applies_to')} {e.get('source')}".lower()]
+    if q.strip():   # 🧠 also find notes that mean the same thing in different words
+      sem = meaning_scores(q, "know", [(e["_id"], note_text(e)) for e in entries])
+      if sem:
+        top = max(sem.values())
+        extra_hits = [e for e in sorted(entries, key=lambda e: -sem.get(e["_id"], 0))
+                      if e not in shown_e and sem.get(e["_id"], 0) >= top - 0.1][:15]
+        shown_e = shown_e + extra_hits
+        st.caption(f"🧠 Searching by meaning too — {len(extra_hits)} note(s) found that use different words.")
     topics = {}
     for e in shown_e:
       topics.setdefault(e.get("topic") or "General", []).append(e)
