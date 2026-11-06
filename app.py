@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-17"
+APP_VERSION = "2026-11-18"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -120,6 +120,10 @@ WHATS_NEW = [
     "NEW: 🔎 Find every reading this car has (🚗 Vehicle Scan → scanner → OEM enhanced data): tries every factory request "
     "on file for the make and its sister brands, plus every standard reading, keeps what the car answers, and remembers it "
     "for that year / make / model / engine — so the next one shows them right away",
+    "NEW: 🔗 Sites on the bottom bar — one tap opens ALLDATA, ProDemand, Identifix, MOTOLOGIC or any link you add (you log in "
+    "yourself; the app only opens the page). The open car's VIN is right there to copy",
+    "NEW: 📄 PDFs — tap ＋ in the chat box to add a PDF (service info, wiring diagram, TSB, manual) and ask about it; and "
+    "📖 Knowledge → Learn from book pages or a PDF turns a PDF into notes (pick the pages if it's a big one)",
 ]
 
 st.markdown(
@@ -177,7 +181,8 @@ h1, h2, h3, .tdg-title {{ font-family: 'Space Grotesk', 'Inter', sans-serif !imp
 [data-testid="stTabs"] [role="tab"]:nth-child(3)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z'/></svg>"); }}
 [data-testid="stTabs"] [role="tab"]:nth-child(4)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='2.5' y='4' width='19' height='14' rx='2'/><path d='M5 12c1.4-4 2.8-4 4.2 0s2.8 4 4.2 0 2.8-4 4.2 0'/><path d='M8 21h8'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='2.5' y='4' width='19' height='14' rx='2'/><path d='M5 12c1.4-4 2.8-4 4.2 0s2.8 4 4.2 0 2.8-4 4.2 0'/><path d='M8 21h8'/></svg>"); }}
 [data-testid="stTabs"] [role="tab"]:nth-child(5)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='5' y='4' width='14' height='17' rx='2'/><path d='M9 3h6v3H9zM9 11h6M9 15h6'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='5' y='4' width='14' height='17' rx='2'/><path d='M9 3h6v3H9zM9 11h6M9 15h6'/></svg>"); }}
-[data-testid="stTabs"] [role="tab"]:nth-child(6)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 7h16M4 12h16M4 17h16'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 7h16M4 12h16M4 17h16'/></svg>"); }}
+[data-testid="stTabs"] [role="tab"]:nth-child(6)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M10 14a4.5 4.5 0 0 0 6.4 0l3.2-3.2a4.5 4.5 0 0 0-6.4-6.4l-1.1 1.1'/><path d='M14 10a4.5 4.5 0 0 0-6.4 0l-3.2 3.2a4.5 4.5 0 0 0 6.4 6.4l1.1-1.1'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M10 14a4.5 4.5 0 0 0 6.4 0l3.2-3.2a4.5 4.5 0 0 0-6.4-6.4l-1.1 1.1'/><path d='M14 10a4.5 4.5 0 0 0-6.4 0l-3.2 3.2a4.5 4.5 0 0 0 6.4 6.4l1.1-1.1'/></svg>"); }}
+[data-testid="stTabs"] [role="tab"]:nth-child(7)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 7h16M4 12h16M4 17h16'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 7h16M4 12h16M4 17h16'/></svg>"); }}
 [data-testid="stTabs"] [role="tab"] p {{ font-size: .6rem !important; font-weight: 600 !important; letter-spacing: .07em; text-transform: uppercase;
   color: var(--tdg-muted) !important; margin: 0 !important; white-space: normal; text-align: center; line-height: 1.15 !important; }}
 [data-testid="stTabs"] [role="tab"][aria-selected="true"] {{ color: var(--tdg-cyan) !important; }}
@@ -215,7 +220,9 @@ div[data-baseweb="tab-highlight"], div[data-baseweb="tab-border"], [data-testid=
 .st-key-jobbar [data-testid="stColumn"], .st-key-jobbar [data-testid="column"] {{ min-width: 0 !important; }}
 .st-key-jobbar button p {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
 @media (max-width: 520px) {{
-  [data-testid="stTabs"] [role="tab"] p {{ text-transform: none; letter-spacing: 0; font-size: .66rem !important; }}
+  [data-testid="stTabs"] [role="tab"] p {{ text-transform: none; letter-spacing: 0; font-size: .64rem !important; }}
+  [data-testid="stTabs"] [role="tab"], button[data-baseweb="tab"] {{ flex: 1 1 0 !important; min-width: min-content !important;
+    padding-left: 1px !important; padding-right: 1px !important; }}
   .tdg-greet {{ margin-top: 5vh; }}
   .tdg-greet h1 {{ font-size: 1.7rem !important; }}
 }}
@@ -765,6 +772,18 @@ def video_mime(name: str) -> str:
 
 def is_video(name: str) -> bool:
   return str(name).rsplit(".", 1)[-1].lower() in VIDEO_TYPES
+
+
+DOC_TYPES = {"pdf": "application/pdf"}
+
+
+def is_doc(name: str) -> bool:
+  return str(name).rsplit(".", 1)[-1].lower() in DOC_TYPES
+
+
+def media_mime(name: str) -> str:
+  """Videos and PDFs both go to Gemini's file store; this is the type to send."""
+  return DOC_TYPES.get(str(name).rsplit(".", 1)[-1].lower()) or video_mime(name)
 
 
 def gemini_upload(data: bytes, mime: str, name: str = "video", wait: int = 240) -> dict:
@@ -3750,8 +3769,8 @@ def pro_section(name: str):
     return st.container()
 
 
-tab0, tab1, tab3, tab_scope, tab_ro, tab_more = st.tabs(["Chat", "Vehicle Scan", "Diagnostics", "Scope & Tests",
-                                                          "Customer & RO", "More"])
+tab0, tab1, tab3, tab_scope, tab_ro, tab_sites, tab_more = st.tabs(["Chat", "Vehicle Scan", "Diagnostics", "Scope & Tests",
+                                                                     "Customer & RO", "Sites", "More"])
 
 
 def _keyed_box(k: str):
@@ -3877,6 +3896,87 @@ with tab0, guard("Chat"):
 
 with tab_cars, guard("Cars in the shop"):
   home_cars()
+
+
+# ========================================================
+# --- 🔗 SITES: one tap to your repair sites (you log in yourself — the app only opens the link) ---
+# ========================================================
+DEFAULT_LINKS = [("ALLDATA", "https://www.alldata.com"), ("ProDemand", "https://www.prodemand.com"),
+                 ("Identifix", "https://www.identifix.com"), ("MOTOLOGIC", "https://www.motologic.com")]
+
+
+def _clean_url(u: str) -> str:
+  u = str(u or "").strip()
+  if u and not re.match(r"(?i)^https?://", u):
+    u = "https://" + u
+  return u if re.match(r"(?i)^https?://[^\s/$.?#][^\s]*$", u) else ""
+
+
+def repair_links() -> list[dict]:
+  """The shop's saved links, in order. The first time, the four repair sites are filled in so you can edit them."""
+  rows = [dict(r.get("data") or {}, _id=r["id"]) for r in store_list("link", 100)]
+  if not rows and not ss.get("_links_seeded"):
+    ss._links_seeded = True
+    if store_get("setting", "links_seeded"):   # filled in once already; you removed them, so they stay removed
+      return []
+    store_put("setting", "links_seeded", {"at": datetime.now().strftime("%Y-%m-%d")})
+    for i, (n, u) in enumerate(DEFAULT_LINKS):
+      store_put("link", f"L{i:02d}", {"name": n, "url": u, "order": i})
+    rows = [dict(r.get("data") or {}, _id=r["id"]) for r in store_list("link", 100)] or \
+           [{"name": n, "url": u, "order": i, "_id": f"L{i:02d}"} for i, (n, u) in enumerate(DEFAULT_LINKS)]
+  return sorted((r for r in rows if r.get("url")), key=lambda r: (r.get("order", 99), str(r.get("name", "")).lower()))
+
+
+with tab_sites, guard("Sites"):
+  st.subheader("🔗 Sites")
+  if ss.get("active_vin"):
+    st.caption("This car's VIN — tap the copy icon, then paste it into the site:")
+    st.code(ss.active_vin, language=None)
+  _links = repair_links()
+  for _l in _links:
+    st.link_button(f"🔗 {_l.get('name') or _l['url']}", _l["url"], use_container_width=True)
+  if not _links:
+    st.caption("No links yet — add one below.")
+  st.caption("Each one opens in a new browser tab and you log in yourself, same as always. The app keeps this page open.")
+  with st.expander("➕ Add a link", expanded=not _links):
+    with st.form("add_link", clear_on_submit=True):
+      _ln = st.text_input("Name", placeholder="e.g. Mitchell 1 TruckSeries, Ford PTS, Tech Authority")
+      _lu = st.text_input("Web address", placeholder="e.g. www.motorcraftservice.com")
+      if st.form_submit_button("💾 Save link", type="primary"):
+        _u = _clean_url(_lu)
+        if not _u:
+          st.warning("That web address doesn't look right — copy it from the browser's address bar.")
+        else:
+          store_put("link", "L" + datetime.now().strftime("%Y%m%d%H%M%S%f"),
+                    {"name": (_ln or "").strip() or re.sub(r"(?i)^https?://(www\.)?", "", _u).split("/")[0], "url": _u,
+                     "order": max([int(x.get("order", 0) or 0) for x in _links] + [0]) + 1})
+          queue_update(toast="🔗 Link saved")
+  if _links:
+    with st.expander("✏️ Change, reorder or remove links"):
+      for _i, _l in enumerate(_links):
+        with st.container(border=True):
+          _n2 = st.text_input("Name", value=_l.get("name", ""), key=f"lk_n_{_l['_id']}")
+          _u2 = st.text_input("Web address", value=_l.get("url", ""), key=f"lk_u_{_l['_id']}")
+          _c1, _c2, _c3, _c4 = st.columns(4)
+          if _c1.button("💾 Save", key=f"lk_s_{_l['_id']}", use_container_width=True):
+            if _clean_url(_u2):
+              store_put("link", _l["_id"], {"name": _n2.strip() or _l.get("name", ""), "url": _clean_url(_u2), "order": _l.get("order", _i)})
+              queue_update(toast="🔗 Link updated")
+            else:
+              st.warning("That web address doesn't look right.")
+          if _c2.button("⬆️ Up", key=f"lk_up_{_l['_id']}", use_container_width=True, disabled=_i == 0):
+            _o = _links[_i - 1]
+            store_put("link", _l["_id"], {k: v for k, v in _l.items() if k != "_id"} | {"order": _i - 1})
+            store_put("link", _o["_id"], {k: v for k, v in _o.items() if k != "_id"} | {"order": _i})
+            st.rerun()
+          if _c3.button("⬇️ Down", key=f"lk_dn_{_l['_id']}", use_container_width=True, disabled=_i == len(_links) - 1):
+            _o = _links[_i + 1]
+            store_put("link", _l["_id"], {k: v for k, v in _l.items() if k != "_id"} | {"order": _i + 1})
+            store_put("link", _o["_id"], {k: v for k, v in _o.items() if k != "_id"} | {"order": _i})
+            st.rerun()
+          if _c4.button("🗑️ Remove", key=f"lk_d_{_l['_id']}", use_container_width=True):
+            store_delete("link", _l["_id"])
+            st.rerun()
 
 
 # ========================================================
@@ -9002,7 +9102,7 @@ def vehicle_facts() -> str:
   return " · ".join(([f"VIN {vin}"] if vin else []) + parts + ([f"odometer {ss.odometer}"] if str(ss.get("odometer") or "").strip() else []))
 
 
-def chat_prompt_for(question: str, n_photos: int, n_videos: int = 0) -> str:
+def chat_prompt_for(question: str, n_photos: int, n_videos: int = 0, n_docs: int = 0) -> str:
   history = "\n".join(f"{m['role'].upper()}: {m['content']}" + (f" [attached {len(m['photos'])} photo(s)]" if m.get("photos") else "")
                       for m in (ss.chat_history or [])[-6:])
   plan = (ss.dtc_result or {}).get("text", "")[:3000]
@@ -9034,7 +9134,10 @@ Read them carefully: wire colors, pin/cavity numbers, splices, grounds, connecto
 Say what you can read in the photo, and say so plainly if part of it is too blurry or cut off to read.""" if n_photos else "") + ("""
 The technician attached a VIDEO (with sound). If you can watch it, watch and listen to the whole thing. If you can't, work
 from the VIDEO REPORT below, written by the team member who watched it. Base anything about sounds or movement on the video,
-and say plainly what can't be judged from a phone video (e.g. a noise that needs a stethoscope or a pressure test).""" if n_videos else "")
+and say plainly what can't be judged from a phone video (e.g. a noise that needs a stethoscope or a pressure test).""" if n_videos else "") + ("""
+The technician attached a PDF (service information, a wiring diagram, a TSB, a manual or a scan report). If you can read it,
+read the parts that matter to the question. If you can't, work from the PDF REPORT below, written by the team member who read
+it. Use its exact specs, pin numbers, wire colors and steps, say which page they're on, and never fill a gap with a guess.""" if n_docs else "")
 
 
 VIDEO_WATCH_PROMPT = """You are a master automotive technician. The technician recorded this video (with sound) and asks:
@@ -9051,6 +9154,19 @@ Watch and listen to the WHOLE video and write a VIDEO REPORT for the rest of the
 - What can't be judged from this video (camera too far, wind noise, too short, too dark) — say so plainly.
 Facts only: describe what you see and hear. Don't diagnose beyond pointing out what stands out."""
 
+DOC_READ_PROMPT = """You are a master automotive technician. The technician attached this PDF and asks:
+{question}
+Vehicle: {vehicle} · Codes: {codes} · Symptoms: {symptoms}
+
+Read the PDF and write a PDF REPORT for the rest of the diagnostic team, who cannot open it:
+- What the document is (service procedure, wiring diagram, TSB, owner's or training manual, scan or inspection report) and
+  which vehicle(s) it covers.
+- Everything in it that bears on the question: specs and known-good values (with their conditions), test steps, connector
+  pin numbers and wire colors, component locations, part numbers, DTC setting criteria, readings — copied exactly, each with
+  its page number.
+- Anything the question needs that the PDF does NOT cover — say so plainly.
+Facts only, exactly as written in the document. Don't diagnose beyond pointing out what stands out."""
+
 
 class _JobStatus:
   """Lets the AI team report its progress ("Claude is checking...") to the screen from a background job."""
@@ -9066,17 +9182,31 @@ def run_chat_ai(job_id: str, prompt: str, question: str, photos_b64: list, vrefs
                 vehicle: str, codes: str, symptoms: str) -> tuple[str, str, str]:
   """The AI part of one chat answer (runs in the background). Returns (answer, who answered, web research)."""
   status = _JobStatus(job_id)
+  docs = [v for v in vrefs or [] if v.get("mime") in DOC_TYPES.values()]
+  vids = [v for v in vrefs or [] if v not in docs]
   vparts = video_parts(vrefs)
   if vparts and not secret("GEMINI_API_KEY"):
-    return "⚠️ Videos need the Gemini key (GEMINI_API_KEY) — Gemini is the AI that watches and listens to them.", "", ""
+    return ("⚠️ Videos and PDFs need the Gemini key (GEMINI_API_KEY) — Gemini is the AI that watches videos and reads PDFs.",
+            "", "")
   research = ""
   if team:
-    if vparts:
+    if docs:
+      status.update(label="📄 ✨ Gemini is reading the PDF...")
+      try:
+        report = gemini([{"text": DOC_READ_PROMPT.format(question=question, vehicle=vehicle or "not given",
+                                                          codes=codes or "none", symptoms=symptoms or "not given")}]
+                        + video_parts(docs), timeout=240)
+        prompt += ("\n\nPDF REPORT (✨ Gemini read the technician's PDF; the other team members can't open it and work from "
+                   "this report):\n" + report)
+      except AIError as e:
+        log_problem("ai", "PDF report", str(e))
+        prompt += f"\n\nPDF REPORT: not available ({e}). Say that the PDF couldn't be read."
+    if vids:
       status.update(label="🎥 ✨ Gemini is watching and listening to the video...")
       try:
         report = gemini([{"text": VIDEO_WATCH_PROMPT.format(question=question, vehicle=vehicle or "not given",
-                                                             codes=codes or "none", symptoms=symptoms or "not given")}] + vparts,
-                        timeout=180)
+                                                             codes=codes or "none", symptoms=symptoms or "not given")}]
+                        + video_parts(vids), timeout=180)
         prompt += ("\n\nVIDEO REPORT (✨ Gemini watched and listened to the technician's video; the other team members "
                    "can't see or hear it and work from this report):\n" + report)
       except AIError as e:
@@ -9085,13 +9215,13 @@ def run_chat_ai(job_id: str, prompt: str, question: str, photos_b64: list, vrefs
     reply, research, draft, ds_draft = team_answer(prompt, vehicle or "General vehicle", codes, symptoms,
                                                    bool(secret("PERPLEXITY_API_KEY")), status, question=question,
                                                    image_b64=photos_b64, extra_parts=vparts)
-    who = ("🎥 " if vparts else "") + team_names(draft, ds_draft, research) + " · all checked each other"
-  elif vparts:   # quick answer about a video: Gemini is the one that can watch it
-    status.update(label="🎥 ✨ Gemini is watching and listening to the video...")
+    who = ("🎥 " if vids else "") + ("📄 " if docs else "") + team_names(draft, ds_draft, research) + " · all checked each other"
+  elif vparts:   # quick answer about a video or PDF: Gemini is the one that can watch / read it
+    status.update(label="📄 ✨ Gemini is reading the PDF..." if docs and not vids else "🎥 ✨ Gemini is watching and listening to the video...")
     try:
       reply = gemini([{"text": prompt}] + [{"inline_data": {"mime_type": "image/jpeg", "data": b}} for b in photos_b64] + vparts,
-                     timeout=180)
-      who = f"✨ {gemini_label()} · watched the video · quick answer"
+                     timeout=240)
+      who = f"✨ {gemini_label()} · " + " and ".join((["watched the video"] if vids else []) + (["read the PDF"] if docs else [])) + " · quick answer"
     except AIError as e:
       reply, who = f"⚠️ {e}", ""
   else:
@@ -9130,7 +9260,7 @@ def _chat_add_answer(rid: str, reply: str, who: str = "", research: str = "", vr
 def ask_chat(question: str, imgs: list, team: bool, where: str, videos: list | None = None):
   """Ask one question. The answer is worked out in the background (so locking the phone or switching tabs can't lose
   it), saved to permanent memory when it's done, and shown by the progress box (_chat_watch)."""
-  videos = list(videos or [])[:2]   # [(file name, bytes)]
+  videos = list(videos or [])[:3]   # videos and PDFs: [(file name, bytes)]
   photos_b64 = [_jpeg_b64(im, 2000) for im in imgs]      # big enough to read wire colors and pin numbers
   thumbs = []
   for im in imgs:
@@ -9153,7 +9283,9 @@ def ask_chat(question: str, imgs: list, team: bool, where: str, videos: list | N
       ss.chat_history[-1]["eye"] = True
     except Exception:
       pass
-  prompt = chat_prompt_for(question, len(photos_b64), len(videos) or len(reuse)) + (
+  n_doc = sum(1 for n, _ in videos if is_doc(n)) or sum(1 for v in reuse if v.get("mime") in DOC_TYPES.values())
+  n_vid = sum(1 for n, _ in videos if not is_doc(n)) or sum(1 for v in reuse if v.get("mime") not in DOC_TYPES.values())
+  prompt = chat_prompt_for(question, len(photos_b64), n_vid, n_doc) + (
       "\nThe FIRST image is a live view of what the technician is looking at right now (their shared scan tool screen or "
       "camera). Read it carefully — it is their professional scan tool's data." if eye else "")
   n_notes = len(knowledge_for_job(30, question)) if knowledge_entries() else 0
@@ -9170,8 +9302,9 @@ def ask_chat(question: str, imgs: list, team: bool, where: str, videos: list | N
     vrefs = list(reuse)
     try:
       for name, data in videos:
-        _JobStatus(job_id).update(label=f"📤 Sending the video to Gemini ({len(data) / 1e6:.0f} MB)...")
-        vrefs.append(gemini_upload(data, video_mime(name), name))
+        _JobStatus(job_id).update(label=f"📤 Sending the {'PDF' if is_doc(name) else 'video'} to Gemini "
+                                        f"({max(len(data) / 1e6, 0.1):.1f} MB)...")
+        vrefs.append(gemini_upload(data, media_mime(name), name))
       reply, who, research = run_chat_ai(job_id, prompt, question, photos_b64, vrefs, team, vehicle, codes, symptoms)
     except AIError as e:
       reply, who, research = f"⚠️ {e}", "", ""
@@ -9328,7 +9461,8 @@ def chat_messages(msgs: list, where: str, start: int = 0):
         st.image(thumb, width=220)
       vnames = msg.get("video_names") or [v.get("name", "video") for v in msg.get("videos") or []]
       if msg.get("role") == "user" and (vnames or msg.get("reused_video")):
-        st.caption("🎥 " + (", ".join(vnames) if vnames else "about the same video as before"))
+        st.caption(" · ".join(("📄 " if is_doc(n) else "🎥 ") + n for n in vnames) if vnames
+                   else "🎥 📄 about the same video / PDF as before")
       if msg.get("who"):
         st.caption(msg["who"])
       st.markdown(msg.get("content") or "")
@@ -9398,12 +9532,12 @@ def transcribe_audio(data: bytes, mime: str = "audio/wav") -> str:
 
 
 def chat_files_split(files: list) -> tuple[list, list]:
-  """Uploaded files -> (photos as images, videos as (name, bytes))."""
+  """Uploaded files -> (photos as images, videos and PDFs as (name, bytes))."""
   imgs, vids = [], []
   for f in files or []:
     name = getattr(f, "name", "file")
-    if is_video(name):
-      if len(vids) < 2:
+    if is_video(name) or is_doc(name):
+      if len(vids) < 3:
         vids.append((name, f.getvalue()))
       continue
     try:
@@ -9417,8 +9551,8 @@ def chat_files_split(files: list) -> tuple[list, list]:
 def _chat_input_box(placeholder: str):
   """The message box at the bottom: type, 📎 attach photos / video, or 🎙️ talk (newer Streamlit) — older ones get a plain box.
   Returns (what was sent, can it take files)."""
-  tries = (dict(accept_file="multiple", file_type=PHOTO_TYPES + list(VIDEO_TYPES), accept_audio=True),
-           dict(accept_file="multiple", file_type=PHOTO_TYPES + list(VIDEO_TYPES)),
+  tries = (dict(accept_file="multiple", file_type=PHOTO_TYPES + list(VIDEO_TYPES) + list(DOC_TYPES), accept_audio=True),
+           dict(accept_file="multiple", file_type=PHOTO_TYPES + list(VIDEO_TYPES) + list(DOC_TYPES)),
            {})
   for kw in tries:
     try:
@@ -9474,7 +9608,8 @@ def chat_home():
     sent, can_attach = _chat_input_box("Ask anything — codes, specs, how to test it…" if not msgs else "Reply…")
     if not can_attach:   # older Streamlit: photos / video go in through 📎
       with (_pop("📎") if _pop else st.expander("📎 Photos / video")):
-        old_files = st.file_uploader("📷 🎥 Photos or a video for your next question", type=PHOTO_TYPES + list(VIDEO_TYPES),
+        old_files = st.file_uploader("📷 🎥 📄 Photos, a video or a PDF for your next question",
+                                     type=PHOTO_TYPES + list(VIDEO_TYPES) + list(DOC_TYPES),
                                      accept_multiple_files=True, key=upl_key) or []
 
   # ---------- top: the greeting on a fresh chat, a slim header once you're talking ----------
@@ -9499,7 +9634,7 @@ def chat_home():
                   '<path d="M 5 45 L 22 45 L 24 60 L 42 60 L 43 5 L 46 36 Q 48 34 54 36 T 64 36 T 74 35 T 80 36 Q 84 18 88 50 Q 92 24 96 44 Q 100 32 104 42 L 118 42" '
                   'stroke="#22D3EE" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
                   f'</div><h1>{hi}{(", " + who) if who else ""}</h1><div class="q">What are we working on?</div>'
-                  '<div class="tip">Type it, tap ＋ in the box to add a photo or a video, or tap 🎙️ and just talk.</div></div>',
+                  '<div class="tip">Type it, tap ＋ in the box to add a photo, a video or a PDF, or tap 🎙️ and just talk.</div></div>',
                   unsafe_allow_html=True)
 
   # ---------- 👀 the shared screen / camera ----------
@@ -9547,7 +9682,9 @@ def chat_home():
     if old_files:
       ss.qh_files_n = ss.get("qh_files_n", 0) + 1   # empty the picker for the next question
     if not text and (imgs or vids):
-      text = ("What do you see in this video (and hear)? Anything that doesn't look or sound right, and what should I check "
+      text = ("What's in this PDF that matters for this car? Pull out the specs, test steps and pinouts I need."
+              if vids and all(is_doc(n) for n, _ in vids) else
+              "What do you see in this video (and hear)? Anything that doesn't look or sound right, and what should I check "
               "next?" if vids else "What do you see here? Anything that doesn't look right, and what should I check next?")
     if text:
       _go(text, imgs, vids)
@@ -10810,16 +10947,50 @@ Return JSON only: a list of objects with keys
 "applies_to" (e.g. "All", "GM 3.6L", "COP ignition", "Port injection"),
 "rule" (the note itself, in your own words)."""
 
+def know_pending_from(found: list, src: str, who: str):
+  """Notes the AI pulled from pages or a PDF -> the review table (nothing is saved until you tap Save)."""
+  ss.know_pending = [{"Keep": True, "Topic": str(x.get("topic") or "General")[:60],
+                      "Type": x.get("type") if x.get("type") in KNOW_KINDS else "Rule of thumb",
+                      "Applies to": str(x.get("applies_to") or "All")[:60], "Note": str(x.get("rule")).strip()[:600]}
+                     for x in found]
+  ss.know_pending_src, ss.know_pending_who = src, who
+  try:   # 🧠 mark notes that say the same thing as one you already have
+    have = knowledge_entries()
+    vecs = ensure_vectors("know", [(e["_id"], note_text(e)) for e in have]) if have else {}
+    if vecs:
+      ids = list(vecs)
+      M = np.stack([vecs[i] for i in ids])
+      new = embed_texts([f"{r['Topic']} ({r['Type']}; applies to {r['Applies to']}): {r['Note']}" for r in ss.know_pending], "doc")
+      byid = {e["_id"]: e for e in have}
+      for r, v in zip(ss.know_pending, new):
+        sims = M[:, :len(v)] @ v[:M.shape[1]]
+        j = int(np.argmax(sims))
+        if sims[j] >= 0.93:
+          r["Keep"] = False
+          r["Already have?"] = f"≈ {byid[ids[j]].get('topic', '')}: {str(byid[ids[j]].get('rule', ''))[:80]}"
+  except Exception:
+    pass
+
+
+def know_pdf_prompt(pages: str) -> str:
+  p = KNOW_EXTRACT_PROMPT.replace("These are photos of pages from an automotive diagnostics book the technician owns.",
+                                  "This is a PDF the technician owns (a diagnostics book, training manual or service information).")
+  rng = re.sub(r"[^0-9,\- ]", "", pages or "").strip(" ,-")
+  if rng:
+    p += f"\nOnly read pages {rng} of the PDF (the page numbers of the PDF file itself)."
+  return p + "\nIf the document is long, keep the most useful notes — at most 150."
+
+
 with tab6, guard("Knowledge tab"):
   st.subheader("📖 Shop knowledge")
   context_bar()
   st.caption("Testing facts you've learned — specs, what patterns mean, test methods — written as short notes in plain words. "
              "The AI team checks these on every diagnosis, scope analysis and chat question, using the ones that fit "
-             "the car and the codes. Book pages are only read, never saved: only the notes are kept.")
+             "the car and the codes. Book pages and PDFs are only read, never saved: only the notes are kept.")
   entries = knowledge_entries()
 
   # ---- learn from book pages ----
-  with st.expander("📸 Learn from book pages", expanded=not entries):
+  with st.expander("📸 📄 Learn from book pages or a PDF", expanded=not entries):
     st.caption("Lay the page flat in good light, whole page in the frame. A few pages at a time works best "
                "(up to 6 per batch). You'll check every note before it's saved.")
     kc1, kc2 = st.columns([2, 1])
@@ -10862,28 +11033,28 @@ with tab6, guard("Knowledge tab"):
           st.error("No testing info came back. " + (raw_ans[:300] if raw_ans.startswith("⚠️") else
                                                     "Try sharper photos, or pages with specs and test steps."))
         else:
-          ss.know_pending = [{"Keep": True, "Topic": str(x.get("topic") or "General")[:60],
-                              "Type": x.get("type") if x.get("type") in KNOW_KINDS else "Rule of thumb",
-                              "Applies to": str(x.get("applies_to") or "All")[:60], "Note": str(x.get("rule")).strip()[:600]}
-                             for x in found]
-          ss.know_pending_src, ss.know_pending_who = src.strip(), who
-          try:   # 🧠 mark notes that say the same thing as one you already have
-            have = knowledge_entries()
-            vecs = ensure_vectors("know", [(e["_id"], note_text(e)) for e in have]) if have else {}
-            if vecs:
-              ids = list(vecs)
-              M = np.stack([vecs[i] for i in ids])
-              new = embed_texts([f"{r['Topic']} ({r['Type']}; applies to {r['Applies to']}): {r['Note']}" for r in ss.know_pending], "doc")
-              byid = {e["_id"]: e for e in have}
-              for r, v in zip(ss.know_pending, new):
-                sims = M[:, :len(v)] @ v[:M.shape[1]]
-                j = int(np.argmax(sims))
-                if sims[j] >= 0.93:
-                  r["Keep"] = False
-                  r["Already have?"] = f"≈ {byid[ids[j]].get('topic', '')}: {str(byid[ids[j]].get('rule', ''))[:80]}"
-          except Exception:
-            pass
+          know_pending_from(found, src.strip(), who)
           ss.know_cam_pages = cam_pages[max(0, 6 - len(pages)):]   # keep any camera pages that didn't fit in this batch
+    # 📄 a PDF: Gemini reads the file itself (a manual, a training book chapter, service info saved as a PDF)
+    st.markdown("**📄 Or a PDF** — a manual, a training book chapter, or service info you saved as a PDF")
+    pc1, pc2 = st.columns([2, 1])
+    kpdf = pc1.file_uploader("PDF file", type=["pdf"], key=f"know_pdf_{ss.get('know_n', 0)}")
+    kpages = pc2.text_input("Pages to read (optional)", key="know_pdf_pages", placeholder="e.g. 12-30 — empty = all")
+    if kpdf is not None and st.button("🧠 Pull the testing info from this PDF", type="primary", key="know_pdf_go"):
+      try:
+        with st.spinner("Sending the PDF to Gemini and reading it — a big file can take a couple of minutes..."):
+          ref = gemini_upload(kpdf.getvalue(), "application/pdf", getattr(kpdf, "name", "book.pdf"), wait=300)
+          raw_ans = gemini([{"text": know_pdf_prompt(kpages)}] + video_parts([ref]), json_mode=True, timeout=420)
+        who = f"✨ {gemini_label()} read the PDF"
+      except AIError as e_:
+        raw_ans, who = f"⚠️ {e_}", ""
+      found = [x for x in (find_json(raw_ans, list) or []) if isinstance(x, dict) and str(x.get("rule") or "").strip()]
+      if not found:
+        st.error("No testing info came back. " + (raw_ans[:300] if raw_ans.startswith("⚠️") else
+                                                  "Try the pages with specs and test steps (Pages to read)."))
+      else:
+        know_pending_from(found, (src.strip() or getattr(kpdf, "name", "PDF")) +
+                          (f", pages {kpages.strip()}" if (kpages or "").strip() else ""), who)
     if ss.get("know_pending"):
       st.markdown(f"**{len(ss.know_pending)} note(s) found** — fix anything that's off, untick what you don't want, then save. "
                   f"<small>({ss.get('know_pending_who', '')})</small>", unsafe_allow_html=True)
