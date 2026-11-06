@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-13"
+APP_VERSION = "2026-11-16"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -109,11 +109,14 @@ WHATS_NEW = [
     "EASIER: 📋 Paste a diagram — snip it (Windows+Shift+S), click the paste box, Ctrl+V. Or share the diagram's tab once (👀) "
     "and 📺 Use my shared screen grabs a fresh, sharp picture every time you tap it",
     "NEW LOOK: 💬 The app opens on just the chat — type, 📎 add a photo or video, or 🎙️ talk right in the box at the bottom "
-    "(＋ has screen share, all-AIs, past chats, new chat). Buttons along the bottom: 🚗 Vehicle Scan (VIN search, then the "
+    "(⋯ has screen share, all-AIs, past chats; 🧹 New chat is pinned at the top). Buttons along the bottom: 🚗 Vehicle Scan (VIN search, then the "
     "scanner) · 🔧 Diagnostics · 🔬 Scope & Tests (wiring diagrams, scope, test results, test drive review) · 🧾 Customer & "
     "RO · ☰ More (cars in the shop, log, Knowledge)",
     "NEW: ✍️ RO write-up — one tap writes the Concern / Cause / Correction from the job (only what you actually did); it "
     "prints on the repair order with the estimate and goes out with the email",
+    "FIX: 🚗 Vehicle Scan's VIN search works again (it crashed on a button name); 🔬 Scope & Tests now opens on the scope, "
+    "with wiring diagrams under it; 💬 Chat is just the conversation now — no car bubble",
+    "FIX: The ⚡ firing-line logo is back (top left and above the greeting)",
 ]
 
 st.markdown(
@@ -181,7 +184,7 @@ h1, h2, h3, .tdg-title {{ font-family: 'Space Grotesk', 'Inter', sans-serif !imp
 div[data-baseweb="tab-highlight"], div[data-baseweb="tab-border"], [data-testid="stTabs"] .react-aria-SelectionIndicator {{ display: none !important; }}
 /* 💬 chat front screen: greeting, conversation, and the message bar pinned above the bottom buttons */
 .tdg-greet {{ text-align: center; margin: 8vh auto 1rem; max-width: 560px; }}
-.tdg-greet .ic {{ width: 62px; height: 62px; margin: 0 auto 16px; border-radius: 18px; background: #0d1116;
+.tdg-greet .ic {{ width: 86px; height: 62px; margin: 0 auto 16px; border-radius: 18px; background: #0d1116;
   border: 1px solid rgba(34,211,238,.45); box-shadow: 0 0 26px rgba(34,211,238,.28); display: flex; align-items: center; justify-content: center; }}
 .tdg-greet h1 {{ font-size: 2.05rem !important; font-weight: 600 !important; margin: 0 !important; padding: 0 !important; line-height: 1.2 !important; }}
 .tdg-greet .q {{ color: var(--tdg-muted); font-size: 1.15rem; margin-top: .35rem; }}
@@ -191,6 +194,10 @@ div[data-baseweb="tab-highlight"], div[data-baseweb="tab-border"], [data-testid=
 .tdg-chathead {{ font-family: 'JetBrains Mono', monospace; font-size: .75rem; letter-spacing: .08em; color: var(--tdg-muted);
   text-align: center; margin: 0 0 .4rem; }}
 .tdg-chatpad {{ height: 64px; }}
+.st-key-newchat {{ position: fixed !important; top: calc(11px + env(safe-area-inset-top)); right: 12px; width: auto !important;
+  z-index: 1000001; }}
+.st-key-newchat button {{ min-height: 38px !important; border-radius: 999px !important; padding: 0 16px !important;
+  background: rgba(13,17,22,.96) !important; border: 1px solid rgba(34,211,238,.5) !important; box-shadow: 0 0 16px rgba(34,211,238,.18); }}
 .st-key-chatbar {{ position: fixed !important; left: 0; right: 0; margin: 0 auto !important; bottom: calc(76px + env(safe-area-inset-bottom));
   width: min(calc(100% - 20px), 740px) !important; max-width: none !important; z-index: 998; display: flex !important;
   flex-direction: row !important; flex-wrap: nowrap !important; align-items: flex-end !important; gap: 8px !important;
@@ -241,10 +248,9 @@ button[kind="primary"], button[data-testid="stBaseButton-primary"], button[data-
 </style>
 
 <div class="tdg-top">
-  <svg width="30" height="34" viewBox="0 0 30 34" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 0 6px rgba(34,211,238,.55));">
-    <defs><linearGradient id="tdgG" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#22D3EE"/><stop offset="1" stop-color="#14B8A6"/></linearGradient></defs>
-    <rect x="1" y="12" width="4" height="10" rx="2" fill="url(#tdgG)"/><rect x="8" y="5" width="4" height="22" rx="2" fill="url(#tdgG)"/>
-    <rect x="15" y="9" width="4" height="16" rx="2" fill="url(#tdgG)"/><rect x="22" y="1" width="4" height="32" rx="2" fill="url(#tdgG)"/>
+  <svg width="50" height="30" viewBox="0 0 120 70" fill="none" xmlns="http://www.w3.org/2000/svg" style="filter: drop-shadow(0 0 6px rgba(34,211,238,.55));">
+    <defs><linearGradient id="tdgG" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#14B8A6"/><stop offset="1" stop-color="#22D3EE"/></linearGradient></defs>
+    <path d="M 5 45 L 22 45 L 24 60 L 42 60 L 43 5 L 46 36 Q 48 34 54 36 T 64 36 T 74 35 T 80 36 Q 84 18 88 50 Q 92 24 96 44 Q 100 32 104 42 L 118 42" stroke="url(#tdgG)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>
   <div><div class="t1">Test Don't Guess</div><div class="t2">AI DIAGNOSTICS · v{APP_VERSION}</div></div>
 </div>
@@ -3050,7 +3056,7 @@ def diagram_adder(circuit: str, step_ids: list, key: str):
       process_diagram(f.getvalue(), circuit, step_ids)
 
 
-def diagrams_panel():
+def diagrams_panel(fold: bool = False):
   ds = job_diagrams()
   ps = ss.get("plan_steps") or {}
   steps = ps.get("steps") or [] if ps.get("_for") == _plan_sig() else []
@@ -3065,7 +3071,7 @@ def diagrams_panel():
       st.rerun()
     return
   with st.expander(f"📐 Wiring diagrams for this job — {len(ds)} added" + (f", {len(open_)} the AI needs" if open_ else ""),
-                   expanded=bool(open_)):
+                   expanded=bool(open_) and not fold):
     st.caption("The AI asks for a diagram when a test needs exact pins or wire colors, and never guesses them. Add a photo, a "
                "screenshot, or your shared scan tool screen — it reads the diagram and puts the exact hookup on each test step.")
     for k, w in enumerate(open_):
@@ -3796,7 +3802,7 @@ def job_bar():
   has_car = job_has_content(job_snapshot())
   with _keyed_box("jobbar"):
     c1, c2, c3 = st.columns([1.1, 2.2, 1.2])
-    if c1.button("➕ New car", key="home_new", use_container_width=True, disabled=not has_car,
+    if c1.button("➕ New car", key="jb_new", use_container_width=True, disabled=not has_car,
                  help="Saves this car and starts a clean one"):
       ss._job_request = "new"
       st.rerun()
@@ -3811,7 +3817,7 @@ def job_bar():
         st.rerun()
     else:
       c2.caption("No other cars open — all the cars in the shop are under ☰ More")
-    if cur and has_car and c3.button("✅ Car is done", key="home_close", use_container_width=True,
+    if cur and has_car and c3.button("✅ Car is done", key="jb_close", use_container_width=True,
                                      help="Closes this job (reopen it any time under ☰ More → 🚗 Cars in the shop)"):
       ss.job_status = "closed"
       autosave_job(force=True)
@@ -9109,7 +9115,8 @@ def _chat_scroll_down(n: int):
 
 def chat_home():
   """💬 The front screen: just the conversation with the AI, like a chat app. Type, 📎 attach or 🎙️ talk in the bar at the
-  bottom; ＋ holds the extras (show the AI your screen, all the AIs checking each other, past chats, new chat)."""
+  bottom; ⋯ holds the extras (show the AI your screen, all the AIs checking each other, past chats). 🧹 New chat is pinned
+  at the top of the screen."""
   msgs = ss.chat_history or []
   pending = ss.get("_chat_pending")
   # fixed spots, in this order, so the shared screen (👀) never reloads when messages come in
@@ -9120,7 +9127,7 @@ def chat_home():
   # ---------- the bar at the bottom: ＋ extras and the message box ----------
   with bar:
     _pop = getattr(st, "popover", None)
-    with (_pop("＋") if _pop else st.expander("＋ More")):
+    with (_pop("⋯") if _pop else st.expander("⋯ More")):
       st.toggle("👀 Let the AI see my screen or camera", key="eye_toggle",
                 help="Share your scan tool's screen (from a computer) or point the phone camera at it. The AI reads it every "
                      "half minute and uses it in every answer and AI Check — so it sees what you see.")
@@ -9128,10 +9135,6 @@ def chat_home():
                   help="On: Perplexity researches, Gemini and DeepSeek each answer, and Claude checks them against each other. "
                        "Off: one AI answers in a few seconds.")
       st.toggle("🕘 Past chats", key="qh_past")
-      if msgs and st.button("🧹 New chat", key="qh_new", use_container_width=True,
-                            help="Starts fresh. Earlier chats stay saved and the AI still remembers them."):
-        new_chat()
-        st.rerun()
       n_kn = len(knowledge_entries())
       st.caption("The AI knows the open car, the codes, the scanner data, the test plan, your shop history and "
                  + (f"your {n_kn:,} Knowledge notes" if n_kn else "your Knowledge notes")
@@ -9139,13 +9142,19 @@ def chat_home():
       upl_key = f"qh_files_{ss.get('qh_files_n', 0)}"
       old_files = []
     sent, can_attach = _chat_input_box("Ask anything — codes, specs, how to test it…" if not msgs else "Reply…")
-    if not can_attach:   # older Streamlit: photos / video go in through ＋
+    if not can_attach:   # older Streamlit: photos / video go in through 📎
       with (_pop("📎") if _pop else st.expander("📎 Photos / video")):
         old_files = st.file_uploader("📷 🎥 Photos or a video for your next question", type=PHOTO_TYPES + list(VIDEO_TYPES),
                                      accept_multiple_files=True, key=upl_key) or []
 
   # ---------- top: the greeting on a fresh chat, a slim header once you're talking ----------
   with top:
+    if msgs:   # 🧹 New chat — pinned at the very top of the screen, so it's always one tap away
+      with _keyed_box("newchat"):
+        if st.button("🧹 New chat", key="qh_new",
+                     help="Starts fresh. Earlier chats stay saved and the AI still remembers them."):
+          new_chat()
+          st.rerun()
     if not store_on():
       st.warning("⚠️ Permanent storage isn't set up yet, so jobs and chats are erased when the app restarts. Add SUPABASE_URL "
                  "and SUPABASE_KEY to Secrets (⚙️ top right).")
@@ -9155,19 +9164,13 @@ def chat_home():
       _now = _local_now()
       hi = "Good morning" if _now.hour < 12 else ("Good afternoon" if _now.hour < 17 else "Good evening")
       who = html_lib.escape(ss.get("tech_user") or "")
-      car = ""
-      if ss.vehicle_info:
-        car = (f'<div class="car">🚗 {html_lib.escape(ss.vehicle_info)}'
-               f'{(" · " + html_lib.escape(ss.active_dtc)) if ss.active_dtc else ""} — the AI already knows this car</div>')
-      st.markdown('<div class="tdg-greet"><div class="ic"><svg width="28" height="32" viewBox="0 0 30 34"><g fill="#22D3EE">'
-                  '<rect x="1" y="12" width="4" height="10" rx="2"/><rect x="8" y="5" width="4" height="22" rx="2"/>'
-                  '<rect x="15" y="9" width="4" height="16" rx="2"/><rect x="22" y="1" width="4" height="32" rx="2"/></g></svg>'
-                  f'</div><h1>{hi}{(", " + who) if who else ""}</h1><div class="q">What are we working on?</div>{car}'
-                  '<div class="tip">Type it, tap 📎 to add a photo or a video, or tap 🎙️ and just talk.</div></div>',
+      who = "" if who.lower() == "shop" else who   # the shared shop login has no person's name
+      st.markdown('<div class="tdg-greet"><div class="ic"><svg width="62" height="36" viewBox="0 0 120 70" fill="none">'
+                  '<path d="M 5 45 L 22 45 L 24 60 L 42 60 L 43 5 L 46 36 Q 48 34 54 36 T 64 36 T 74 35 T 80 36 Q 84 18 88 50 Q 92 24 96 44 Q 100 32 104 42 L 118 42" '
+                  'stroke="#22D3EE" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+                  f'</div><h1>{hi}{(", " + who) if who else ""}</h1><div class="q">What are we working on?</div>'
+                  '<div class="tip">Type it, tap ＋ in the box to add a photo or a video, or tap 🎙️ and just talk.</div></div>',
                   unsafe_allow_html=True)
-    elif ss.vehicle_info:
-      st.markdown(f'<div class="tdg-chathead">🚗 {html_lib.escape(ss.vehicle_info)}'
-                  f'{(" · " + html_lib.escape(ss.active_dtc)) if ss.active_dtc else ""}</div>', unsafe_allow_html=True)
 
   # ---------- 👀 the shared screen / camera ----------
   with eye_box:
@@ -9696,12 +9699,8 @@ Format strictly using these Markdown sections:
 with tab_scope, guard("Scope & Tests"):
   st.subheader("🔬 Scope & Tests")
   context_bar()
-  with guard("Wiring diagrams"):   # the diagrams the AI asked for (test plan, step cards, AI Check, chat) + ones you add
-    diagrams_panel()
-
   with st.container():
     # ---------- Scope lab ----------
-    st.write("---")
     st.markdown("#### 〰️ Scope & test readings")
     with guard("Scope data file"):
       scope_data_section()
@@ -9817,6 +9816,10 @@ with tab_scope, guard("Scope & Tests"):
 
   with guard("Test results"):
     test_results_panel()
+  st.write("---")
+  st.markdown("#### 📐 Wiring diagrams")
+  with guard("Wiring diagrams"):   # the diagrams the AI asked for (test plan, step cards, AI Check, chat) + ones you add
+    diagrams_panel(fold=True)
 
 # ========================================================
 # --- TEST DRIVE REVIEW (saved drives from the Bluetooth dashboard) ---
