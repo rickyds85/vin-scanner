@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-16"
+APP_VERSION = "2026-11-17"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -117,6 +117,9 @@ WHATS_NEW = [
     "FIX: 🚗 Vehicle Scan's VIN search works again (it crashed on a button name); 🔬 Scope & Tests now opens on the scope, "
     "with wiring diagrams under it; 💬 Chat is just the conversation now — no car bubble",
     "FIX: The ⚡ firing-line logo is back (top left and above the greeting)",
+    "NEW: 🔎 Find every reading this car has (🚗 Vehicle Scan → scanner → OEM enhanced data): tries every factory request "
+    "on file for the make and its sister brands, plus every standard reading, keeps what the car answers, and remembers it "
+    "for that year / make / model / engine — so the next one shows them right away",
 ]
 
 st.markdown(
@@ -1690,6 +1693,48 @@ def obdb_signals(make: str, model: str, year: str) -> tuple[str, list[dict]]:
     if out:
       return repo, out
   return "", []
+
+
+def learned_key(vd: dict) -> str:
+  """Year + make + model + engine size: cars that match share what 🔎 Find every reading learned."""
+  y, mk, md = (str(vd.get(k) or "").strip() for k in ("Model Year", "Make", "Model"))
+  if not (y and mk and md):
+    return ""
+  eng = re.search(r"\d+(\.\d+)?", str(vd.get("Displacement (L)") or vd.get("Engine") or ""))
+  return re.sub(r"[^a-z0-9]+", "-", f"{y} {mk} {md} {eng.group(0) if eng else ''}".lower()).strip("-")
+
+
+def learned_readings(vd: dict) -> dict:
+  k = learned_key(vd)
+  if not k:
+    return {}
+  cache = ss.setdefault("_learned", {})
+  if k not in cache:
+    cache[k] = store_get("oemmap", k) or {}
+  return cache[k]
+
+
+def save_learned(ev: dict):
+  """🔎 Find every reading finished: keep every factory request this car answered, merged with what was learned before."""
+  vd = ss.vehicle_details or {}
+  k = learned_key(vd)
+  new = [g for g in (ev.get("sigs") or []) if isinstance(g, dict) and g.get("req") and g.get("hdr")]
+  if not k:
+    ss._toast = "Set the vehicle first (VIN search) so the readings it found can be saved for this car."
+    return
+  if not new:
+    return
+  old = learned_readings(vd)
+  key = lambda g: (g.get("hdr"), g.get("rax", ""), g.get("req"))
+  keys = {key(g) for g in new}
+  merged = [g for g in (old.get("sigs") or []) if key(g) not in keys] + new
+  rec = {"vehicle": ss.vehicle_info, "vin": ss.active_vin, "sigs": merged[:6000], "lid": str(ev.get("id") or ""),
+         "requests": len({key(g) for g in merged}), "readings": len(merged), "tech": ss.get("tech_user") or "",
+         "at": datetime.now().strftime("%Y-%m-%d %I:%M %p")}
+  store_put("oemmap", k, rec)
+  ss.setdefault("_learned", {})[k] = rec
+  ss._toast = (f"🔎 Learned {int(ev.get('found') or len(new))} factory readings for this {ss.vehicle_info or 'car'} — "
+               "saved, so next time they show up right away")
 
 
 def make_profile() -> str:
@@ -4170,8 +4215,12 @@ canvas.tplot { background: rgba(15,22,36,.85); border: 1px solid var(--line); bo
   <div id="histGrid" class="grid"></div>
 
   <h3 style="color:var(--p)">🏭 OEM ENHANCED DATA <span id="enhNote" class="note">connect to scan this vehicle's modules</span></h3>
+  <div class="bar" style="margin-bottom:6px"><button id="huntBtn" class="tbtn" disabled>🔎 Find every reading this car has</button>
+    <span class="note">Tries every factory request on file for this make and its sister brands, plus every standard reading, and keeps
+    the ones this car answers. About 2–5 minutes with the key on (engine running is best). What it finds is saved for next time.</span></div>
+  <div id="huntBox" class="box" hidden></div>
   <div id="enhBox" class="enh"><div class="box">Factory-level readings appear here as each module answers.</div></div>
-  <div class="note" style="margin:-10px 0 16px">Definitions from the open OBD database (OBDb, github.com/OBDb). Some are model-year specific, so sanity-check new readings against a factory scan tool.</div>
+  <div class="note" style="margin:-10px 0 16px">Definitions from the open OBD database (OBDb, github.com/OBDb). Some are model-year specific, so sanity-check new readings against a factory scan tool. ≈ = from a sister model's list.</div>
 
   <h3 style="color:var(--b)">📋 I/M READINESS</h3>
   <div id="readyBox" class="box">Loads automatically on connect.</div>
@@ -4197,7 +4246,8 @@ let lastAiShown = null;
 window.addEventListener("message", (e) => {
   if (!e.data || e.data.type !== "streamlit:render") return;
   const a = e.data.args || {};
-  const changed = a.make !== ARGS.make || String(a.year) !== String(ARGS.year) || a.oem_src !== ARGS.oem_src;
+  const changed = a.make !== ARGS.make || String(a.year) !== String(ARGS.year) || a.oem_src !== ARGS.oem_src ||
+    ((a.learned_id || "") !== (ARGS.learned_id || "") && a.learned_id !== myLearnedId);
   ARGS = a;
   if (changed && connected) buildEnhanced();
   if (a.ai && a.ai.id && a.ai.id !== lastAiShown) {
@@ -5242,9 +5292,10 @@ const PATH_GROUP = {
   "Movement": "Wheel speeds & motion", "Orientation": "Wheel speeds & motion", "Climate": "Climate & A/C",
 };
 const GROUP_ORDER = ["Engine", "Transmission", "Misfire counters", "Fuel & air", "Electrical", "Tire pressure (TPMS)",
-  "Chassis, ABS & steering", "Wheel speeds & motion", "Climate & A/C", "Other"];
-const GROUP_CLOSED = new Set(["Chassis, ABS & steering", "Wheel speeds & motion", "Climate & A/C", "Other"]);
+  "Chassis, ABS & steering", "Wheel speeds & motion", "Climate & A/C", "More standard readings", "Other"];
+const GROUP_CLOSED = new Set(["Chassis, ABS & steering", "Wheel speeds & motion", "Climate & A/C", "More standard readings", "Other"]);
 function oemGroup(sig) {
+  if (sig.grp) return sig.grp;
   if (sig.path) return PATH_GROUP[sig.path] || "Other";
   const n = sig.name;
   if (/misfire/i.test(n)) return "Misfire counters";
@@ -5272,13 +5323,13 @@ function tccRole(name, unit, map) {
 function buildEnhanced() {
   const year = parseInt(ARGS.year, 10) || 0;
   const model = usingModelData();
-  const sigs = !isCan ? [] : model ? ARGS.oem.map((g) => Object.assign({}, g))
-    : (OEM_DB[profile()] || []).filter((g) => yearOk(g.yrs, year)).map((g) => Object.assign({}, g));
+  const base = !isCan ? [] : model ? ARGS.oem : (OEM_DB[profile()] || []).filter((g) => yearOk(g.yrs, year));
+  const learned = isCan && Array.isArray(ARGS.learned) ? ARGS.learned : [];   // what 🔎 Find every reading found on this car before
+  const lkeys = new Set(learned.map((g) => g.hdr + "|" + g.rax + "|" + g.req));
+  const sigs = [...learned, ...base.filter((g) => !lkeys.has(g.hdr + "|" + g.rax + "|" + g.req))].map((g) => Object.assign({}, g));
   const byCmd = new Map();
   sigs.forEach((g) => {
-    g.label = cleanName(g.name);
-    g.group = oemGroup(g);
-    g.watch = tccRole(g.name, g.unit, g.map);
+    prepSig(g);
     const k = g.hdr + "|" + g.rax + "|" + g.req;
     if (!byCmd.has(k)) byCmd.set(k, { hdr: g.hdr, rax: g.rax, req: g.req, sigs: [], state: "new", miss: 0 });
     byCmd.get(k).sigs.push(g);
@@ -5296,8 +5347,8 @@ function buildEnhanced() {
   oemCmds.sort((a, b) => rank(a) - rank(b));
   oemRR = 0; oemFound = 0; oemModules = {}; oemTile.n = 0;
   $("enhBox").innerHTML = '<div class="box">' + (oemCmds.length
-    ? `Checking ${oemCmds.length} factory data requests (${esc(oemSourceName())})…`
-    : (isCan ? "No factory definitions for this vehicle yet. Pick a make in OEM Profile above to try the make-level list."
+    ? `Checking ${oemCmds.length} factory data requests (${esc(oemSourceName())}${learned.length ? " + what this car taught the app" : ""})…`
+    : (isCan ? "No factory definitions for this exact vehicle yet. Tap 🔎 Find every reading this car has to try every list for this make."
              : "OEM data needs a CAN vehicle (most 2008+).")) + "</div>";
   updateEnhNote();
 }
@@ -5398,6 +5449,278 @@ async function pollEnhanced() {
   if (oemCmds.length && !oemFound && oemCmds.every((c) => c.state !== "new"))
     $("enhBox").innerHTML = '<div class="box">This vehicle did not answer any of the factory requests on file for it.</div>';
 }
+
+// ===================== 🔎 Find every reading this car has =====================
+// The open OBD database (OBDb) keeps a factory data list for each model. This downloads the lists for every model of this
+// make and its sister brands (plus the full standard list), tries every request on the car, keeps each one it answers,
+// and sends them to the app to save — so next time this car (or one just like it) shows them right away.
+const OBDB_INDEX = `Acura:CSX|ILX|Integra|MDX|RDX|TL|TLX|TSX|ZDX
+Aiways:U5
+Alfa-Romeo:
+Audi:A1|A3|A3-e-tron|A4|A5|A6|A7|Q2|Q3|Q4-e-tron|Q5|Q7|Q8|Q8-e-tron|RS-3|RS-5|RS-e-tron|S3|S4|S5|S6|SQ2|SQ5|SQ7|SQ8|TT|TTS|e-tron|e-tron-GT
+BMW:1-Series|2-Series|2-Series-Plug-in-Hybrid|3-Series|3-Series-eDrive|4-Series|5-Series|6-Series|6-Series-Gran-Coupe|6-Series-Gran-Turismo|7-Series|ALPINA-XB7|I3s|M2|M3|M3-CS|M4|M5|X1|X2|X3|X4|X5|X5-M|X6|X7|XM|Z4|i3|i3s|i4|i5|i8|iX|iX1|iX3
+BYD:Sealion-6
+Bentley:Bentayga
+Buick:Enclave|Encore|Envision|LaCrosse
+Cadillac:CT4|CT5|CT6|CTS|DTS|ELR|Escalade|LYRIQ|SRX|XT5
+Chevrolet:Avalanche|Aveo|Blazer|Bolt-EUV|Bolt-EV|Camaro|Caprice|Cobalt|Colorado|Corvette|Cruze|Cruze-Limited|Equinox|Equinox-EV|Express|Express-Cargo|HHR|Impala|Impala-Limited|Malibu|Orlando|S-10|Sail|Silverado|Silverado-1500|Silverado-2500|Silverado-3500|Sonic|Spark|Spin|Tahoe|Trailblazer|Traverse|Trax|Volt
+Chrysler:200|300|Pacifica
+Citroen:eC4-X
+Cupra:Born|Formentor|Leon|Tavascan|Terramar
+Dacia:Dokker|Duster|Sandero|Spring
+Daihatsu:|Hijet|Terios
+Dodge:Caliber|Challenger|Charger|Dakota|Dart|Durango|Grand-Caravan|Hornet|Journey
+FIAT:500|500X|500e|Bravo|Fastback|Panda|Qubo
+Ford:B-Max|Bronco|Bronco-Sport|C-Max|C-Max-Energi|C-Max-Hybrid|Crown-Victoria|E-Series|E-Series-Wagon|EcoSport|Edge|Escape|Everest|Expedition|Explorer|Explorer-Sport-Trac|F-150|F-150-Lightning|F-250|F-350|Fiesta|Flex|Focus|Focus-Electric|Focus-RS|Focus-ST|Fusion|Fusion-Energi|Fusion-Hybrid|Kuga|Maverick|Mondeo|Mustang|Mustang-Mach-E|Puma|Ranger|S-Max|Taurus|Taurus-X|Territory|Tourneo|Transit|Transit-Connect
+GMC:Acadia|Canyon|Sierra-1500|Sierra-2500HD|Sierra-3500HD|Terrain|Yukon|Yukon-XL
+Genesis:G70|G80|GV60|GV80
+Haval:H6-HEV|Jolion|Jolion-HEV
+Holden:Colorado|Commodore|Cruze
+Honda:Accord|Accord-Hybrid|CR-V|CR-V-Hybrid|CR-Z|City|Civic|Clarity|Crosstour|Element|Fit|HR-V|Insight|Jazz|Odyssey|Pilot|Prelude|Prologue|Ridgeline|S2000|Shuttle|ZR-V
+Hyundai:Accent|Avante|Azera|Elantra|HB20|HB20S|IONIQ-5|IONIQ-6|IONIQ-9|IONIQ-Electric|IONIQ-PlugIn-Hybrid|Kona|Kona-Electric|Palisade|Santa-Cruz|Santa-Fe|Santa-Fe-Hybrid|Sonata|Tucson|Tucson-Hybrid|Veloster|Venue|Veracruz|Verna|i10|i20|i30|i40
+INFINITI:Q50|Q60|QX50|QX55|QX60|QX70|QX80
+Jaguar:E-PACE|F-PACE|F-TYPE|I-PACE
+Jeep:Avenger|Cherokee|Compass|Gladiator|Grand-Cherokee|Grand-Wagoneer|Patriot|Renegade|Wagoneer-L|Wrangler|Wrangler-4xe|Wrangler-JK
+Kia:Cadenza|Carens|Carnival|Ceed|Cerato|EV3|EV6|EV9|Forte|K4|K5|Niro|Niro-EV|Optima|Picanto|Rio|Seltos|Sonet|Sorento|Soul|Soul-EV|Sportage|Sportage-HEV|Stinger|Stonic|Tasman|Telluride|XCeed
+Land-Rover:|Defender|Discovery|LR4|Range-Rover|Range-Rover-Evoque|Range-Rover-Velar
+Lexus:CT-200h|ES|ES-300h|GX|GX-460|GX-470|IS|IS-300|LS-600h-L|NX|NX-350h|RC|RX|UX
+Lincoln:MKC|MKZ|Nautilus|Navigator|Town-Car
+Lotus:
+MG:EHS|HS|MG4|MG5|One|RX9|ZS|ZS-EV
+MINI:Clubman|Cooper|Cooper-SE|Countryman|Hardtop
+Mazda:2|3|5|6|B-Series-Pickup|BT50|CX-3|CX-30|CX-5|CX-50|CX-60|CX-9|CX-90|MX-30|MX-5|MX-5-Miata|Mazdaspeed-3|Mazdaspeed-MX-5|Tribute
+Mercedes-Benz:|A-180|B-Class|C-Class|CL-Class|CLK-Class|E-Class|EQA|EQB|EQV|G-Class|GLA-Class|GLC-Class|GLK-Class|M-Class|ML-350|SL-Class|SLC-Class|SLK-Class|Viano
+Mitsubishi:ASX|Eclipse-Cross|Outlander|Outlander-PHEV|Outlander-Sport|RVR|Triton
+Nissan:350Z|370Z|ARIYA|Altima|Armada|Frontier|Juke|Kicks|Leaf|Maxima|Micra|Murano|NV-Passenger|Pathfinder|Patrol|Pulsar|Qashqai|Rogue|Rogue-Sport|Sentra|Titan|Titan-XD|Versa|X-Trail|Xterra|Z
+NissanInfiniti:
+Peugeot:107|2008|207|208|3008|308|408|5008|508|Partner|RCZ|e-208
+Polestar:2|4
+Porsche:718|911|Cayenne|Cayman|Macan|Macan-Electric|Panamera|Taycan
+Ram:1500|1500-Classic|2500|3500|ProMaster-Window-Van
+Renault:Captur|Clio|Duster|Kadjar|Laguna|Megane|Megane-E-Tech|Scenic|Symbioz|Trafic|Twingo|ZOE
+Rolls-Royce:
+Scion:FR-S|iQ|tC|xB
+Seat:Alhambra|Arona|Ateca|Ibiza|Leon|Mii|Mii-Electric|Tarraco
+Skoda:Citigo-e-iV
+Subaru:Ascent|BRZ|Crosstrek|Forester|Impreza|Legacy|Outback|Solterra|Tribeca|WRX
+Suzuki:Baleno|Jimny|Splash|Swift|Vitara|XL7
+Toyota:4Runner|Allion|Aqua|Auris|Avalon|Avalon-Hybrid|Aygo|C-HR|Camry|Camry-Hybrid|Corolla|Corolla-Cross|Corolla-Hybrid|Crown|FJ-Cruiser|Fortuner|GR-Corolla|GR-Supra|GR86|GT86|Grand-Highlander|Grand-Highlander-Hybrid|Hiace|Highlander|Hilux|Land-Cruiser|Land-Cruiser-Hybrid|Matrix|Mirai|Prius|Prius-Prime|Prius-v|RAV4|RAV4-Hybrid|RAV4-Prime|Sequoia|Sienna|Sienna-Hybrid|Supra|Tacoma|Tundra|Veloz|Venza|Venza-Hybrid|Vios|Yaris|Yaris-Cross|Yaris-iA|bZ4X
+VauxhallOpel:|Corsa|Corsa-e|Mokka
+Volkswagen:Amarok|Arteon|Atlas|Beetle|Beetle-Convertible|CC|Crafter|Golf|ID-Buzz|ID3|ID5|ID7-Tourer|Jetta|Jetta-GLI|Multivan|Passat|Polo|Scirocco|T-Cross|T-Roc|T6-Transporter|Taigo|Taos|Tiguan|Touareg|Touran|Transporter|Up|Virtus|e-Golf|e-Up
+Volvo:S40|S60|S80|S90|V40|V60|XC40|XC40-Recharge|XC60|XC90
+smart:fortwo`;
+const normName = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+const OBDB_REPOS = {};   // "chevrolet" -> [{ repo: "Chevrolet-Tahoe", model: "Tahoe" }, ...]
+OBDB_INDEX.split("\n").forEach((line) => {
+  const i = line.indexOf(":"), mk = line.slice(0, i);
+  OBDB_REPOS[normName(mk)] = line.slice(i + 1).split("|").map((m) => ({ repo: m ? mk + "-" + m : mk, model: m }));
+});
+const MAKE_ALIAS = { vauxhall: "vauxhallopel", opel: "vauxhallopel", mercedes: "mercedesbenz", alfa: "alfaromeo" };
+const FAMILY = {   // sister brands that share computers (and so most factory requests)
+  chevrolet: ["gmc", "buick", "cadillac", "holden"], gmc: ["chevrolet", "buick", "cadillac"], buick: ["chevrolet", "gmc", "cadillac"],
+  cadillac: ["chevrolet", "gmc", "buick"], holden: ["chevrolet", "gmc"], pontiac: ["chevrolet", "gmc", "buick"], saturn: ["chevrolet", "gmc"],
+  ford: ["lincoln"], lincoln: ["ford"], mercury: ["ford", "lincoln"],
+  toyota: ["lexus", "scion"], lexus: ["toyota", "scion"], scion: ["toyota", "lexus"],
+  honda: ["acura"], acura: ["honda"], nissan: ["infiniti", "nissaninfiniti"], infiniti: ["nissan", "nissaninfiniti"],
+  hyundai: ["kia", "genesis"], kia: ["hyundai", "genesis"], genesis: ["hyundai", "kia"],
+  chrysler: ["dodge", "jeep", "ram"], dodge: ["chrysler", "jeep", "ram"], jeep: ["chrysler", "dodge", "ram"], ram: ["chrysler", "dodge", "jeep"],
+  volkswagen: ["audi", "seat", "cupra", "skoda"], audi: ["volkswagen", "seat", "cupra", "skoda"], seat: ["volkswagen", "cupra", "audi"],
+  cupra: ["seat", "volkswagen", "audi"], skoda: ["volkswagen", "seat"], bmw: ["mini"], mini: ["bmw"],
+  landrover: ["jaguar"], jaguar: ["landrover"], peugeot: ["citroen", "vauxhallopel"], citroen: ["peugeot"], vauxhallopel: ["peugeot"],
+  renault: ["dacia"], dacia: ["renault"],
+};
+const OBDB_UNITS_JS = {
+  celsius: "C", fahrenheit: "F", kilopascal: "kPa", psi: "psi", bars: "bar", volts: "V", millivolts: "mV", rpm: "rpm", percent: "%",
+  degrees: "deg", scalar: "", unknown: "", kilometersPerHour: "kph", kilometers: "km", miles: "mi", offon: "onoff", onoff: "onoff",
+  noyes: "yesno", yesno: "yesno", milliseconds: "ms", seconds: "s", minutes: "min", hours: "h", milliamps: "mA", amps: "A",
+  gramsPerSecond: "gps", newtonMeters: "Nm", liters: "L", hex: "hex", metersPerSecondSquared: "m/s²", gravity: "g",
+  ampereHours: "Ah", kilowatts: "kW", millimeters: "mm", megaohms: "MΩ",
+};
+const OBDB_SKIP = new Set(["Trips", "Seatbelts", "Lights", "Doors", "Clocks", "Details", "Stats", "DTCs", "ECU", "Cruise control"]);
+
+function huntRepos() {
+  const mk0 = normName(ARGS.vmake), mk = MAKE_ALIAS[mk0] || mk0, mdl = normName(ARGS.vmodel);
+  const out = [], seen = new Set();
+  const add = (repo, tier) => { if (!seen.has(repo)) { seen.add(repo); out.push([repo, tier]); } };
+  const mine = OBDB_REPOS[mk] || [];
+  // 0 = this model · 1 = a model with a close name (Silverado / Silverado-1500) · 2 = the make's other models · 3 = sister brands
+  mine.forEach((r) => { if (mdl && normName(r.model) === mdl) add(r.repo, 0); });
+  mine.forEach((r) => { const m = normName(r.model); if (mdl && m && (m.startsWith(mdl) || mdl.startsWith(m))) add(r.repo, 1); });
+  mine.forEach((r) => add(r.repo, 2));
+  (FAMILY[mk] || []).forEach((f) => (OBDB_REPOS[f] || []).forEach((r) => add(r.repo, 3)));
+  return out;
+}
+async function obdbFetch(repo) {
+  for (const br of ["main", "master"]) {
+    try {
+      const r = await fetch(`https://raw.githubusercontent.com/OBDb/${repo}/${br}/signalsets/v3/default.json`);
+      if (r.ok) return await r.json();
+    } catch (e) {}
+  }
+  return null;
+}
+function obdbYearOk(f, y) {
+  if (!f || !y) return true;
+  if ((f.years || []).includes(y)) return true;
+  if (!("from" in f) && !("to" in f)) return !(f.years && f.years.length);
+  return (f.from ?? 0) <= y && y <= (f.to ?? 9999);
+}
+// One OBDb file -> requests [[sig, sig...], ...]. std = the standard (SAE J1979) list: only PIDs this car says it has that
+// the main screen doesn't already show, asked of the engine computer the same way as the main screen.
+function obdbCmds(json, year, src, tier, std) {
+  const out = [];
+  for (const c of (json && json.commands) || []) {
+    let hdr = String(c.hdr || "").toUpperCase(), rax = String(c.rax || "").toUpperCase();
+    if (c.eax || c.tst || c.fcm1 || c.pri || !/^([0-9A-F]{3}|DA[0-9A-F]{2})$/.test(hdr)) continue;
+    if (!obdbYearOk(c.filter, year)) continue;
+    const [svc, pid0] = Object.entries(c.cmd || {})[0] || ["", ""];
+    const pid = String(pid0).toUpperCase();
+    if (std) {
+      if (svc !== "01" || PIDS[pid] || !(sup01 && sup01.has(pid))) continue;
+      hdr = baseHeader; rax = "";
+    } else if (svc !== "21" && svc !== "22") continue;   // reads only
+    const sigs = [];
+    for (const s of c.signals || []) {
+      const f = s.fmt || {};
+      if (OBDB_SKIP.has(s.path) || !f.len || f.len > 32) continue;
+      sigs.push({ hdr, rax, req: (svc + pid).toUpperCase(), bix: f.bix || 0, len: f.len, mul: f.mul ?? 1, div: f.div ?? 1, add: f.add ?? 0,
+        sign: !!f.sign, lsb: !!f.blsb, unit: OBDB_UNITS_JS[f.unit] ?? (f.unit || ""), min: f.min ?? null, max: f.max ?? null,
+        nmin: f.nullmin ?? null, nmax: f.nullmax ?? null,
+        map: f.map ? Object.fromEntries(Object.entries(f.map).map(([k, v]) => [k, v && typeof v === "object" ? (v.description || v.value) : v])) : null,
+        name: s.name || s.id || "", path: std ? "" : (s.path || ""), grp: std ? "More standard readings" : "", src, tier });
+    }
+    if (sigs.length) out.push(sigs);
+  }
+  return out;
+}
+async function gatherCandidates(progress) {
+  const year = parseInt(ARGS.year, 10) || 0;
+  const std29 = baseProto === "7" || baseProto === "9";
+  const jobs = [...(std29 ? [] : [["SAEJ1979", 0, true]]), ...huntRepos().map(([r, t]) => [r, t, false])];
+  const lists = new Array(jobs.length);
+  let next = 0, done = 0;
+  const worker = async () => {
+    while (next < jobs.length && !(hunt && hunt.stop)) {
+      const i = next++, [repo, tier, std] = jobs[i];
+      const j = await obdbFetch(repo);
+      lists[i] = j ? obdbCmds(j, year, std ? "standard list" : repo.replace(/-/g, " "), tier, std) : [];
+      progress(++done, jobs.length);
+    }
+  };
+  await Promise.all([1, 2, 3, 4, 5, 6].map(worker));
+  // One layout per request: the closest model wins; between equals, the layout the most models use.
+  const byKey = new Map();
+  lists.forEach((cmds) => (cmds || []).forEach((sigs) => {
+    const g0 = sigs[0], key = g0.hdr + "|" + g0.rax + "|" + g0.req;
+    const lay = sigs.map((g) => [g.name, g.bix, g.len, g.mul, g.div, g.add, g.unit].join(",")).join(";");
+    let k = byKey.get(key);
+    if (!k) byKey.set(key, (k = new Map()));
+    const e = k.get(lay);
+    if (!e) k.set(lay, { n: 1, tier: g0.tier, sigs });
+    else { e.n++; if (g0.tier < e.tier) { e.tier = g0.tier; e.sigs = sigs; } }
+  }));
+  const out = [];
+  for (const [key, lays] of byKey) {
+    const best = [...lays.values()].sort((a, b) => a.tier - b.tier || b.n - a.n)[0];
+    const g0 = best.sigs[0];
+    out.push({ key, hdr: g0.hdr, rax: g0.rax, req: g0.req, tier: best.tier, sigs: best.sigs.map((g) => Object.assign({}, g)), state: "new", miss: 0 });
+  }
+  out.sort((a, b) => a.tier - b.tier || (a.hdr + a.rax).localeCompare(b.hdr + b.rax) || a.req.localeCompare(b.req));
+  return out;
+}
+function prepSig(g) {
+  if (g.label) return g;
+  g.label = (g.tier >= 1 ? "≈ " : "") + cleanName(g.name);
+  g.group = oemGroup(g);
+  g.watch = tccRole(g.name, g.unit, g.map);
+  return g;
+}
+const slimSig = (g) => {
+  const o = {};
+  for (const k of ["hdr", "rax", "req", "bix", "len", "mul", "div", "add", "sign", "lsb", "unit", "min", "max", "nmin", "nmax", "map", "name", "path", "grp", "src", "tier"])
+    if (g[k] !== undefined) o[k] = g[k];
+  return o;
+};
+let hunt = null, myLearnedId = null;
+function huntShow(text) {
+  const b = $("huntBox");
+  b.hidden = false;
+  if (text) { b.innerHTML = esc(text); fitHeight(); return; }
+  const h = hunt, secs = Math.round((Date.now() - h.t0) / 1000), t = Math.floor(secs / 60) + ":" + String(secs % 60).padStart(2, "0");
+  b.innerHTML = h.done
+    ? `✅ ${h.stop ? "Stopped" : "Done"} (${t}) — checked ${h.checked.toLocaleString()} factory requests and found <b>${h.found}</b> new readings` +
+      (h.learned.length ? ". Saved for this car, so next time they show up right away." : ".") +
+      (h.learned.some((c) => c.tier >= 1) ? `<br><span class="note">≈ = from a sister model's list. Double-check those against your Topdon before you trust them.</span>` : "")
+    : `🔎 Checking ${h.checked.toLocaleString()} of ${h.total.toLocaleString()} factory requests · <b>${h.found}</b> new readings found · ${t}`;
+  fitHeight();
+}
+async function findEverything() {
+  if (hunt && !hunt.done) { hunt.stop = true; $("huntBtn").textContent = "Stopping…"; return; }   // the button doubles as Stop
+  if (!connected) return;
+  if (!isCan) { alert("Factory readings need a CAN vehicle (most 2008 and newer)."); return; }
+  if (!ARGS.vmake) { alert("Set the vehicle first (VIN search above), so the app knows which factory lists to try."); return; }
+  if (T.drive.on || (T.trans && T.trans.on) || FOCUS) { alert("Finish the test drive or guided test first, then try again."); return; }
+  hunt = { stop: false, done: false, checked: 0, total: 0, found: 0, learned: [], t0: Date.now() };
+  $("huntBtn").textContent = "⏹ Stop searching";
+  huntShow("📥 Getting the factory lists for this make…");
+  let cands = [];
+  try { cands = await gatherCandidates((d, n) => huntShow(`📥 Getting the factory lists… ${d} of ${n}`)); }
+  catch (e) { logEvent("scanner", "Find every reading", "Couldn't get the factory lists: " + e.message, e.stack); }
+  const have = new Set(oemCmds.map((c) => c.hdr + "|" + c.rax + "|" + c.req));
+  const todo = cands.filter((c) => !have.has(c.key));
+  hunt.total = todo.length;
+  const mods = {};
+  for (let i = 0; i < todo.length && !hunt.stop && connected; i += 4) {
+    await txn(async () => {   // a few at a time, so the live readings keep updating in between
+      for (const c of todo.slice(i, i + 4)) {
+        if (hunt.stop || !connected) break;
+        hunt.checked++;
+        const m = mods[c.hdr] || (mods[c.hdr] = { alive: false, silent: 0 });
+        if (!m.alive && m.silent >= 3) continue;   // nothing at that address on this car
+        const { bytes, replied } = await readOem(c);
+        if (replied || bytes) m.alive = true; else m.silent++;
+        if (!bytes) continue;
+        c.sigs.forEach(prepSig);
+        const vals = [];
+        let wrong = false;
+        for (const g of c.sigs) {
+          const v = extractBits(bytes, g.bix, g.len, g.lsb, g.sign);
+          const text = v == null ? null : fmtOem(g, v);
+          if (text == null) continue;
+          if (oemDisagrees(g, text)) { wrong = true; break; }
+          if (oemSane(g, text)) vals.push([g, text]);
+        }
+        if (wrong || !vals.length) continue;
+        c.state = "live";
+        oemCmds.push(c);
+        hunt.learned.push(c);
+        for (const [g, text] of vals) setTile(oemTile(g), text);
+        hunt.found += vals.length;
+      }
+      await setAddr(baseHeader, "");
+    });
+    huntShow();
+  }
+  hunt.done = true;
+  $("huntBtn").textContent = "🔎 Find every reading this car has";
+  updateEnhNote();
+  if (!cands.length) huntShow("Couldn't get the factory lists (no internet on this phone?). Try again in a minute.");
+  else if (!todo.length) huntShow("Already checked every factory request on file for this car.");
+  else huntShow();
+  if (hunt.learned.length) {
+    myLearnedId = "L" + Date.now();
+    const sigs = [];
+    hunt.learned.forEach((c) => c.sigs.forEach((g) => sigs.push(slimSig(g))));
+    sendValue({ type: "oem_learned", id: myLearnedId, sigs, checked: hunt.checked, found: hunt.found });
+  }
+}
+$("huntBtn").addEventListener("click", () => {
+  findEverything().catch((e) => {
+    if (hunt) hunt.done = true;
+    $("huntBtn").textContent = "🔎 Find every reading this car has";
+    logEvent("scanner", "Find every reading", e.message, e.stack);
+  });
+});
 
 // ===================== DTCs, VIN, Readiness, Mode $06 =====================
 let dtcs = { stored: [], pending: [], permanent: [] }, vinRead = "";
@@ -5957,7 +6280,7 @@ function showAi(text, label) {
 }
 
 // ===================== Connect / setup =====================
-const BTN_IDS = ["pauseBtn", "driveBtn", "readBtn", "clearBtn", "aiBtn", "syncBtn", "modBtn", "evapBtn"];
+const BTN_IDS = ["pauseBtn", "driveBtn", "readBtn", "clearBtn", "aiBtn", "syncBtn", "modBtn", "evapBtn", "huntBtn"];
 const enableBtns = (on) => BTN_IDS.forEach((id) => { $(id).disabled = !on; });
 
 // If the adapter drops (bumps, ignition flicker, phone hiccup), reconnect on our own and keep the test drive going.
@@ -8428,6 +8751,10 @@ def handle_ble_event(ev: dict):
                   customer=ss.customer_name, phone=ss.customer_phone)
     queue_update(toast=f"Scanner synced: {vin or 'no VIN'} · {len(codes)} code(s) sent to 🔧 Diagnostics", **upd)
 
+  elif ev.get("type") == "oem_learned":
+    save_learned(ev)
+    st.rerun()
+
   elif ev.get("type") == "log":
     for e in ev.get("entries") or []:
       log_problem(e.get("kind", "scanner"), e.get("where", "Bluetooth scanner"), e.get("message", ""), e.get("details", ""))
@@ -8575,12 +8902,15 @@ with _scan_box, guard("Vehicle Scan — scanner"):
              " into the other tabs automatically. The Bluetooth link stays up while you use the rest of the app.")
   _vd = ss.vehicle_details or {}
   oem_repo, oem_sigs = obdb_signals(_vd.get("Make", ""), _vd.get("Model", ""), str(_vd.get("Model Year", "")))
+  _learned = learned_readings(_vd)   # what 🔎 Find every reading found on this car (or one just like it) before
   _disp = re.search(r"\d+(\.\d+)?", str(_vd.get("Displacement (L)") or _vd.get("Engine") or ""))
   event = _ble_dashboard(vehicle=ss.vehicle_info, make=make_profile(), year=_vd.get("Model Year", ""),
                          disp=_disp.group(0) if _disp else "",
                          cyl=str(_vd.get("Engine Number of Cylinders") or
                                  (re.search(r"[VIL](\d{1,2})\b|(\d{1,2})\s*cyl", str(_vd.get("Engine", "")), re.I) or [None, ""])[1] or ""),
-                         oem=oem_sigs, oem_src=oem_repo, ai=ss.ble_ai, key="ble", default=None)
+                         oem=oem_sigs, oem_src=oem_repo, ai=ss.ble_ai,
+                         vmake=_vd.get("Make", ""), vmodel=_vd.get("Model", ""),
+                         learned=_learned.get("sigs") or [], learned_id=_learned.get("lid", ""), key="ble", default=None)
   if isinstance(event, dict) and event.get("id") and event["id"] != ss.ble_last_event:
     ss.ble_last_event = event["id"]
     handle_ble_event(event)
