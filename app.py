@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-12"
+APP_VERSION = "2026-11-13"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -108,6 +108,12 @@ WHATS_NEW = [
     "FIX: Knowledge now loads ALL your notes (it stopped at 1,000 before)",
     "EASIER: 📋 Paste a diagram — snip it (Windows+Shift+S), click the paste box, Ctrl+V. Or share the diagram's tab once (👀) "
     "and 📺 Use my shared screen grabs a fresh, sharp picture every time you tap it",
+    "NEW LOOK: 💬 The app opens on just the chat — type, 📎 add a photo or video, or 🎙️ talk right in the box at the bottom "
+    "(＋ has screen share, all-AIs, past chats, new chat). Buttons along the bottom: 🚗 Vehicle Scan (VIN search, then the "
+    "scanner) · 🔧 Diagnostics · 🔬 Scope & Tests (wiring diagrams, scope, test results, test drive review) · 🧾 Customer & "
+    "RO · ☰ More (cars in the shop, log, Knowledge)",
+    "NEW: ✍️ RO write-up — one tap writes the Concern / Cause / Correction from the job (only what you actually did); it "
+    "prints on the repair order with the estimate and goes out with the email",
 ]
 
 st.markdown(
@@ -160,19 +166,49 @@ h1, h2, h3, .tdg-title {{ font-family: 'Space Grotesk', 'Inter', sans-serif !imp
 [data-testid="stTabs"] [role="tab"]::before {{ content: ""; width: 25px; height: 25px; background-color: currentColor;
   -webkit-mask-repeat: no-repeat; mask-repeat: no-repeat; -webkit-mask-position: center; mask-position: center;
   -webkit-mask-size: contain; mask-size: contain; }}
-[data-testid="stTabs"] [role="tab"]:nth-child(1)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z'/></svg>"); }}
+[data-testid="stTabs"] [role="tab"]:nth-child(1)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M21 11.5a8.4 8.4 0 0 1-12.3 7.4L3 20.5l1.6-5.2A8.4 8.4 0 1 1 21 11.5z'/><path d='M8.5 11.5h.01M12.5 11.5h.01M16.5 11.5h.01'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M21 11.5a8.4 8.4 0 0 1-12.3 7.4L3 20.5l1.6-5.2A8.4 8.4 0 1 1 21 11.5z'/><path d='M8.5 11.5h.01M12.5 11.5h.01M16.5 11.5h.01'/></svg>"); }}
 [data-testid="stTabs"] [role="tab"]:nth-child(2)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M3 16v-3l2-6h14l2 6v3z'/><path d='M3 16v3h3v-3M18 16v3h3v-3'/><circle cx='7.5' cy='13' r='1'/><circle cx='16.5' cy='13' r='1'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M3 16v-3l2-6h14l2 6v3z'/><path d='M3 16v3h3v-3M18 16v3h3v-3'/><circle cx='7.5' cy='13' r='1'/><circle cx='16.5' cy='13' r='1'/></svg>"); }}
-[data-testid="stTabs"] [role="tab"]:nth-child(3)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M3 12h4l3 8 4-16 3 8h4'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M3 12h4l3 8 4-16 3 8h4'/></svg>"); }}
-[data-testid="stTabs"] [role="tab"]:nth-child(4)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z'/></svg>"); }}
+[data-testid="stTabs"] [role="tab"]:nth-child(3)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18l3 3 6.3-6.3a4 4 0 0 0 5.4-5.4l-2.6 2.6-2.4-.6-.6-2.4z'/></svg>"); }}
+[data-testid="stTabs"] [role="tab"]:nth-child(4)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='2.5' y='4' width='19' height='14' rx='2'/><path d='M5 12c1.4-4 2.8-4 4.2 0s2.8 4 4.2 0 2.8-4 4.2 0'/><path d='M8 21h8'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='2.5' y='4' width='19' height='14' rx='2'/><path d='M5 12c1.4-4 2.8-4 4.2 0s2.8 4 4.2 0 2.8-4 4.2 0'/><path d='M8 21h8'/></svg>"); }}
 [data-testid="stTabs"] [role="tab"]:nth-child(5)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='5' y='4' width='14' height='17' rx='2'/><path d='M9 3h6v3H9zM9 11h6M9 15h6'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><rect x='5' y='4' width='14' height='17' rx='2'/><path d='M9 3h6v3H9zM9 11h6M9 15h6'/></svg>"); }}
-[data-testid="stTabs"] [role="tab"]:nth-child(6)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z'/><path d='M4 19V5'/><path d='M9 7h6'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z'/><path d='M4 19V5'/><path d='M9 7h6'/></svg>"); }}
-[data-testid="stTabs"] [role="tab"] p {{ font-size: .66rem !important; font-weight: 600 !important; letter-spacing: .12em; text-transform: uppercase;
-  color: var(--tdg-muted) !important; margin: 0 !important; white-space: nowrap; }}
+[data-testid="stTabs"] [role="tab"]:nth-child(6)::before {{ -webkit-mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 7h16M4 12h16M4 17h16'/></svg>"); mask-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'><path d='M4 7h16M4 12h16M4 17h16'/></svg>"); }}
+[data-testid="stTabs"] [role="tab"] p {{ font-size: .6rem !important; font-weight: 600 !important; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--tdg-muted) !important; margin: 0 !important; white-space: normal; text-align: center; line-height: 1.15 !important; }}
 [data-testid="stTabs"] [role="tab"][aria-selected="true"] {{ color: var(--tdg-cyan) !important; }}
 [data-testid="stTabs"] [role="tab"][aria-selected="true"] p {{ color: #F1F5F9 !important; }}
 [data-testid="stTabs"] [role="tab"][aria-selected="true"]::after {{ content: ""; position: absolute; top: 0; left: 28%; right: 28%; height: 3px;
   border-radius: 0 0 3px 3px; background: var(--tdg-cyan); }}
 div[data-baseweb="tab-highlight"], div[data-baseweb="tab-border"], [data-testid="stTabs"] .react-aria-SelectionIndicator {{ display: none !important; }}
+/* 💬 chat front screen: greeting, conversation, and the message bar pinned above the bottom buttons */
+.tdg-greet {{ text-align: center; margin: 8vh auto 1rem; max-width: 560px; }}
+.tdg-greet .ic {{ width: 62px; height: 62px; margin: 0 auto 16px; border-radius: 18px; background: #0d1116;
+  border: 1px solid rgba(34,211,238,.45); box-shadow: 0 0 26px rgba(34,211,238,.28); display: flex; align-items: center; justify-content: center; }}
+.tdg-greet h1 {{ font-size: 2.05rem !important; font-weight: 600 !important; margin: 0 !important; padding: 0 !important; line-height: 1.2 !important; }}
+.tdg-greet .q {{ color: var(--tdg-muted); font-size: 1.15rem; margin-top: .35rem; }}
+.tdg-greet .car {{ display: inline-block; margin-top: 1.2rem; background: rgba(34,211,238,.08); border: 1px solid rgba(34,211,238,.3);
+  color: #E2E8F0; padding: 6px 14px; border-radius: 999px; font-size: .88rem; }}
+.tdg-greet .tip {{ color: #6B7682; font-size: .84rem; margin-top: 1.1rem; }}
+.tdg-chathead {{ font-family: 'JetBrains Mono', monospace; font-size: .75rem; letter-spacing: .08em; color: var(--tdg-muted);
+  text-align: center; margin: 0 0 .4rem; }}
+.tdg-chatpad {{ height: 64px; }}
+.st-key-chatbar {{ position: fixed !important; left: 0; right: 0; margin: 0 auto !important; bottom: calc(76px + env(safe-area-inset-bottom));
+  width: min(calc(100% - 20px), 740px) !important; max-width: none !important; z-index: 998; display: flex !important;
+  flex-direction: row !important; flex-wrap: nowrap !important; align-items: flex-end !important; gap: 8px !important;
+  padding: 7px !important; background: rgba(13,17,22,.96); border: 1px solid rgba(34,211,238,.35); border-radius: 24px;
+  box-shadow: 0 -8px 30px rgba(0,0,0,.5); backdrop-filter: blur(10px); }}
+.st-key-chatbar > div {{ width: auto !important; flex: 0 0 auto !important; min-width: 0 !important; margin: 0 !important; }}
+.st-key-chatbar > div:has([data-testid="stChatInput"]) {{ flex: 1 1 auto !important; }}
+.st-key-chatbar [data-testid="stChatInput"] {{ border: none !important; background: transparent !important; }}
+.st-key-chatbar [data-testid="stPopover"] button, .st-key-chatbar [data-testid="stPopoverButton"] {{ min-height: 46px; border-radius: 16px !important;
+  padding: 0 12px !important; font-size: 1.15rem !important; }}
+.st-key-jobbar [data-testid="stHorizontalBlock"] {{ flex-wrap: nowrap !important; gap: .45rem !important; }}
+.st-key-jobbar [data-testid="stColumn"], .st-key-jobbar [data-testid="column"] {{ min-width: 0 !important; }}
+.st-key-jobbar button p {{ white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+@media (max-width: 520px) {{
+  [data-testid="stTabs"] [role="tab"] p {{ text-transform: none; letter-spacing: 0; font-size: .66rem !important; }}
+  .tdg-greet {{ margin-top: 5vh; }}
+  .tdg-greet h1 {{ font-size: 1.7rem !important; }}
+}}
 /* cards, expanders, inputs, buttons */
 div[data-testid="stExpander"] {{ border: 1px solid var(--tdg-line) !important; border-radius: 18px !important; overflow: hidden;
   background: rgba(22,25,30,.7); }}
@@ -252,7 +288,7 @@ DEFAULTS = {
     "chat_history": [], "dtc_result": None, "scope_result": None, "symptoms": "",
     "man_make": "", "man_make_other": "", "man_model": "", "man_trim": "", "man_engine": "",
     "ble_ai": None, "ble_last_event": None, "ble_dtcs": {}, "test_results": {},
-    "tech_notes": "", "customer_summary": "", "fix_part": "", "fix_test": "", "fix_notes": "",
+    "tech_notes": "", "customer_summary": "", "fix_part": "", "fix_test": "", "fix_notes": "", "ro_story": "",
     "customer_email": "", "odometer": "", "estimate_rows": [], "follow_up_days": 0, "follow_up_note": "",
     "follow_up_done": False, "drive_plan": "", "wave_result": None, "know_pending": None,
     "plan_steps": None, "plan_idx": 0, "plan_done": [], "plan_notes": {}, "plan_qa": None, "diag_requests": [],
@@ -340,7 +376,7 @@ class guard:
     import traceback
     log_problem("crash", self.where, f"{name}: {exc}", "".join(traceback.format_exception(etype, exc, tb)))
     st.error(f"⚠️ Something broke in **{self.where}** ({name}). It was saved to the problem log — "
-             "go to the 📋 Log tab → 🐞 Problem log and copy the report to Claude.")
+             "go to ☰ More → 📋 Log & history → 🐞 Problem log and copy the report to Claude.")
     return True
 
 
@@ -2607,7 +2643,7 @@ JOB_FIELDS = ["customer_name", "customer_phone", "customer_address", "vin_input"
               "vehicle_details", "sel_codes", "manual_dtc", "symptoms", "ble_dtcs", "scan_data", "test_results", "dtc_result",
               "scope_result", "chat_history", "tech_notes", "customer_summary", "fix_part", "fix_test", "fix_notes",
               "customer_email", "odometer", "estimate_rows", "follow_up_days", "follow_up_note", "follow_up_done",
-              "wave_result", "plan_steps", "plan_idx", "plan_done", "plan_notes", "diag_requests"]
+              "wave_result", "plan_steps", "plan_idx", "plan_done", "plan_notes", "diag_requests", "ro_story"]
 
 
 def job_snapshot() -> dict:
@@ -3095,14 +3131,14 @@ def log_csv(rows: list[dict]) -> str:
 def next_step() -> str:
   """One line telling the tech where the job goes next — the same guided feel as a factory tool."""
   if not ss.vehicle_info:
-    return "Tap <b>Connect &amp; Auto-Scan</b> on 📊 Scanner (fills everything in), or photo the VIN on 📷."
+    return "On 🚗 Vehicle Scan: type or photo the VIN, or tap <b>Connect &amp; Auto-Scan</b> (fills everything in)."
   if not current_codes() and not (ss.symptoms or "").strip() and not ss.scan_data:
-    return "Connect the scanner on 📊 to read codes — or type codes/symptoms on 🔧 Diagnose."
+    return "Connect the scanner on 🚗 Vehicle Scan to read codes — or type codes/symptoms on 🔧 Diagnostics."
   if not ss.dtc_result:
-    return "Run the <b>Diagnostic Tree</b> on 🔧 Diagnose to get the test plan."
+    return "Run the <b>Diagnostic Tree</b> on 🔧 Diagnostics to get the test plan."
   if not (ss.fix_part or "").strip():
-    return "Work the plan (scope + guided tests), then record the <b>confirmed fix</b> on 🔧 section 6."
-  return "Send the report (🔧 section 5), then close the job under 🚗 Cars in the shop."
+    return "Work the plan (🔬 scope + guided tests), then record the <b>confirmed fix</b> on 🧾 Customer &amp; RO."
+  return "Send the repair order (🧾 Customer &amp; RO), then tap <b>✅ Car is done</b> on 🚗 Vehicle Scan."
 
 
 def context_bar():
@@ -3326,7 +3362,7 @@ def jobs_panel():
       st.warning("⚠️ Permanent storage isn't set up yet, so jobs, the log and test drives are still erased when the app "
                  "restarts or you update it. Add SUPABASE_URL and SUPABASE_KEY to Streamlit Secrets to fix this.")
     elif ss.get("_store_err"):
-      st.warning(f"⚠️ Last save had a problem: {ss._store_err} (details in 📋 Log → 🐞 Problem log)")
+      st.warning(f"⚠️ Last save had a problem: {ss._store_err} (details in ☰ More → 📋 Log → 🐞 Problem log)")
     st.caption("Every car is saved automatically as you work. Switch between cars here; refreshing the page keeps your place.")
     c1, c2 = st.columns(2)
     if c1.button("➕ Start a new car", use_container_width=True):
@@ -3408,8 +3444,8 @@ with guard("Settings"):
     with (_pop("⚙️") if _pop else st.expander("⚙️ Settings")):
       setup_panel()
       st.toggle("🌟 Simple view", key="simple_view",
-                help="Big status cards, the plan one test at a time, plain-English codes. Hides the pro sections "
-                     "(scope math, report, estimate, confirmed fix) — nothing is lost, switch it off to see them.")
+                help="Big status cards, the plan one test at a time, plain-English codes. Hides the AI drafts and "
+                     "web research under the test plan — nothing is lost, switch it off to see them.")
       st.toggle("🔆 Keep screen on", value=True, key="keep_on",
                 help="Stops the phone from locking while the app is open, so it doesn't reset in the middle of a job. "
                      "Uses a little more battery — turn it off when you don't need it.")
@@ -3663,10 +3699,28 @@ def pro_section(name: str):
     return st.container()
 
 
-tab0, tab1, tab2, tab3, tab5, tab6 = st.tabs(["Home", "Car", "Scan", "Diagnose", "Log", "Notes"])
+tab0, tab1, tab3, tab_scope, tab_ro, tab_more = st.tabs(["Chat", "Vehicle Scan", "Diagnostics", "Scope & Tests",
+                                                          "Customer & RO", "More"])
+
+
+def _keyed_box(k: str):
+  try:
+    return st.container(key=k)
+  except TypeError:   # older Streamlit without keyed containers: everything shows
+    return st.container()
+
+
+# ☰ More: the cars in the shop, the log and Knowledge — one shows at a time (the others stay loaded, just hidden)
+with tab_more:
+  _more_opts = ["🚗 Cars in the shop", "📋 Log & history", "📖 Knowledge"]
+  _more = st.radio("More", _more_opts, horizontal=True, key="more_pick", label_visibility="collapsed")
+  tab_cars, tab5, tab6 = _keyed_box("more_cars"), _keyed_box("more_log"), _keyed_box("more_know")
+  st.markdown("<style>" + "".join(f".st-key-{k} {{ display: none !important; }}"
+                                  for k, o in zip(("more_cars", "more_log", "more_know"), _more_opts) if o != _more)
+              + "</style>", unsafe_allow_html=True)
 
 # ========================================================
-# --- 🏠 HOME: the AI chat first, then the car you're on and the cars in the shop ---
+# --- 💬 CHAT (the front screen) + 🚗 cars in the shop (under ☰ More) ---
 # ========================================================
 def _local_now() -> datetime:
   try:
@@ -3684,7 +3738,7 @@ def home_cars():
     st.warning("⚠️ Permanent storage isn't set up yet, so jobs are erased when the app restarts. Add SUPABASE_URL and "
                "SUPABASE_KEY to Secrets (⚙️ top right).")
   elif ss.get("_store_err"):
-    st.warning(f"⚠️ Last save had a problem: {ss._store_err} (details in 📋 Log → 🐞 Problem log)")
+    st.warning(f"⚠️ Last save had a problem: {ss._store_err} (details in ☰ More → 📋 Log → 🐞 Problem log)")
   cur = ss.get("job_id")
   st.markdown('<div class="tdg-label">Current car</div>', unsafe_allow_html=True)
   with st.container(key="carnow"):
@@ -3704,8 +3758,8 @@ def home_cars():
         ss._toast = "Job closed"
         st.rerun()
     else:
-      st.markdown('<div class="tdg-car"><div class="v">No car open</div><div class="m">Ask the AI anything above — or open the '
-                  'Car screen below to add a VIN, or connect the scanner on Scan</div></div>', unsafe_allow_html=True)
+      st.markdown('<div class="tdg-car"><div class="v">No car open</div><div class="m">Start one on 🚗 Vehicle Scan — VIN '
+                  'search or connect the scanner</div></div>', unsafe_allow_html=True)
   jobs = [r for r in store_list("job", 60, {"status": "open"}) if r["id"] != cur]
   if jobs:
     st.markdown(f'<div class="tdg-label">Cars in the shop · {len(jobs) + (1 if cur else 0)} open</div>', unsafe_allow_html=True)
@@ -3735,22 +3789,56 @@ def home_cars():
         st.rerun()
 
 
-with tab0, guard("Home"):
-  _now = _local_now()
-  st.markdown(f'<div class="tdg-today"><h1>Today</h1><div class="sub">{_now.strftime("%A, %B")} {_now.day}'
-              f'{(" · Welcome back, " + html_lib.escape(ss.tech_user)) if ss.get("tech_user") else " · Welcome back"}</div></div>',
-              unsafe_allow_html=True)
-  # 💬 the AI chat — filled in at the very end of the script (it needs helpers defined further down), shown right here
+def job_bar():
+  """Top of 🚗 Vehicle Scan: start a new car, jump to another car in the shop, or close this one."""
+  cur = ss.get("job_id")
+  jobs = [r for r in store_list("job", 60, {"status": "open"}) if r["id"] != cur]
+  has_car = job_has_content(job_snapshot())
+  with _keyed_box("jobbar"):
+    c1, c2, c3 = st.columns([1.1, 2.2, 1.2])
+    if c1.button("➕ New car", key="home_new", use_container_width=True, disabled=not has_car,
+                 help="Saves this car and starts a clean one"):
+      ss._job_request = "new"
+      st.rerun()
+    if jobs:
+      pick = c2.selectbox("Switch car", [r["id"] for r in jobs], index=None, label_visibility="collapsed",
+                          placeholder=f"🔁 Switch car — {len(jobs)} more in the shop",
+                          format_func=lambda i: next(f"{(r.get('data') or {}).get('vehicle_info') or 'Vehicle not set'} · "
+                                                     f"{(r.get('data') or {}).get('customer_name') or 'no name'}"
+                                                     for r in jobs if r["id"] == i), key=f"jb_pick_{ss.get('job_n', 0)}")
+      if pick:
+        ss._job_request = pick
+        st.rerun()
+    else:
+      c2.caption("No other cars open — all the cars in the shop are under ☰ More")
+    if cur and has_car and c3.button("✅ Car is done", key="home_close", use_container_width=True,
+                                     help="Closes this job (reopen it any time under ☰ More → 🚗 Cars in the shop)"):
+      ss.job_status = "closed"
+      autosave_job(force=True)
+      ss._job_request = "new"
+      ss._toast = "Job closed"
+      st.rerun()
+
+
+with tab0, guard("Chat"):
+  # 💬 the chat — filled in at the very end of the script (it needs helpers defined further down), shown right here
   _quick_box = st.container()
+
+with tab_cars, guard("Cars in the shop"):
   home_cars()
 
 
 # ========================================================
-# --- TAB 1: VIN & CUSTOMER INFO ---
+# --- 🚗 VEHICLE SCAN: VIN search at the top, the scanner right under it ---
 # ========================================================
-with tab1, guard("VIN & Customer tab"):
+with tab1:
+  # two fixed boxes, so the scanner never moves in the page (moving it would drop the Bluetooth link)
+  _veh_box, _scan_box = st.container(), st.container()
+
+with _veh_box, guard("Vehicle Scan — VIN search"):
   context_bar()
-  st.markdown("#### 🚗 Vehicle")
+  job_bar()
+  st.markdown("#### 🔎 VIN search")
   with st.expander("📸 Read the VIN from a photo", expanded=not ss.vehicle_details):
     st.caption("Tip: use **Take or upload photo** — on a phone it opens the full-resolution camera, which reads far better than "
              "the small in-app camera. Get close, fill the frame with the VIN, avoid glare. Works with the door sticker, "
@@ -3901,7 +3989,12 @@ with tab1, guard("VIN & Customer tab"):
           for c in like:
             st.markdown(f"- _{c['components'].title()}_ — {c['summary'][:350]}{'…' if len(c['summary']) > 350 else ''}")
 
-  st.write("---")
+
+# ========================================================
+# --- 🧾 CUSTOMER & RO: the customer first (the repair order is further down the script) ---
+# ========================================================
+with tab_ro, guard("Customer info"):
+  context_bar()
   st.markdown("#### 👤 Customer")
   col_c1, col_c2 = st.columns(2)
   with col_c1:
@@ -3912,7 +4005,7 @@ with tab1, guard("VIN & Customer tab"):
     st.text_area("Address:", key="customer_address", height=108,
                  placeholder="e.g. 6428 DAWSON BLVD, STE 1730, NORCROSS, GA, 30093")
     st.text_input("Odometer (miles):", key="odometer", placeholder="e.g. 163,420")
-  st.caption("📄 Got a work order? Open 📸 Read the VIN from a photo above and tap "
+  st.caption("📄 Got a work order? On 🚗 Vehicle Scan open 📸 Read the VIN from a photo and tap "
              "\"Extract Customer Details from this Image\" — it fills all of this in.")
 
 # ========================================================
@@ -7814,12 +7907,12 @@ function savedDrivesHtml() {
     ${list.map((d, i) => `<tr><td style="text-align:left">${esc(d.started)}${/interrupted/.test(d.status) ? ' <span class="grade-y">(interrupted)</span>' : ""}</td>
       <td style="text-align:left">${esc(d.vehicle || "—")}</td><td>${d.minutes ?? "—"}</td><td>${(d.alerts || []).length}</td>
       <td><button class="tbtn" data-drv="send" data-i="${i}">Send to app / Claude</button><button class="tbtn sec" data-drv="csv" data-i="${i}">CSV</button><button class="tbtn sec" data-drv="del" data-i="${i}">✕</button></td></tr>`).join("")}</table>
-    <div class="note">"Send to app" puts the drive in the 📋 Log tab → 🚗 Test drive review, where you can copy it to Claude or have the AI team review it.</div></details>`;
+    <div class="note">"Send to app" puts the drive in 🔬 Scope & Tests → 🚗 Test drive review, where you can copy it to Claude or have the AI team review it.</div></details>`;
 }
 document.addEventListener("click", (e) => {
   const b = e.target.closest("[data-drv]"); if (!b) return;
   const list = lsGet(LS_DRIVES, []), d = list[+b.dataset.i]; if (!d) return;
-  if (b.dataset.drv === "send") { sendDrive(d); log("Drive sent to the app — see 📋 Log → 🚗 Test drive review."); }
+  if (b.dataset.drv === "send") { sendDrive(d); log("Drive sent to the app — see 🔬 Scope & Tests → 🚗 Test drive review."); }
   if (b.dataset.drv === "csv") exportDriveCsv(d);
   if (b.dataset.drv === "del" && confirm("Delete this saved drive?")) { list.splice(+b.dataset.i, 1); lsSet(LS_DRIVES, list); renderTests(); }
 });
@@ -7907,7 +8000,7 @@ async function start(k) {
   stream.getVideoTracks()[0].addEventListener("ended", () => stop());
   ["askBtn", "stopBtn", "autoWrap"].forEach((id) => ($(id).hidden = false));
   $(k === "screen" ? "scrBtn" : "camBtn").classList.add("on");
-  msg(k === "screen" ? "👀 The AI can see the window you shared. Ask about it in Quick help, or tap Ask the AI about this screen."
+  msg(k === "screen" ? "👀 The AI can see the window you shared. Ask about it in 💬 Chat, or tap Ask the AI about this screen."
                      : "👀 The AI can see what the camera sees — point it at the scan tool screen (or the engine).");
   sendValue({ type: "state", on: true, kind: k, id: "st-" + Date.now() });
   setTimeout(() => grab(true, false), 1500);
@@ -8324,10 +8417,10 @@ def handle_ble_event(ev: dict):
     if VIN_RE.fullmatch(vin):
       if vin == ss.active_vin or load_vehicle(vin):
         upd["vin_input"] = vin
-    upd["sel_codes"] = codes  # scanned codes go straight into the Diagnose tab
+    upd["sel_codes"] = codes  # scanned codes go straight into 🔧 Diagnostics
     append_to_log(vin=vin or ss.active_vin, vehicle=ss.vehicle_info, dtc=", ".join(codes) or "No codes",
                   customer=ss.customer_name, phone=ss.customer_phone)
-    queue_update(toast=f"Scanner synced: {vin or 'no VIN'} · {len(codes)} code(s) sent to the Diagnose tab", **upd)
+    queue_update(toast=f"Scanner synced: {vin or 'no VIN'} · {len(codes)} code(s) sent to 🔧 Diagnostics", **upd)
 
   elif ev.get("type") == "log":
     for e in ev.get("entries") or []:
@@ -8344,7 +8437,7 @@ def handle_ble_event(ev: dict):
       store_put("drive", rec["id"], rec)
       ss.drive_pick = rec["id"]
       ss.drive_review_pending = rec["id"]   # the AI team reviews every drive automatically
-      ss._toast = "Test drive saved — the AI team is reviewing it (📋 Log → 🚗 Test drive review)"
+      ss._toast = "Test drive saved — the AI team is reviewing it (🔬 Scope & Tests → 🚗 Test drive review)"
 
   elif ev.get("type") == "tests":
     ss.test_results = ev.get("results") or {}
@@ -8466,11 +8559,12 @@ Use clean bold section headers and direct shop-floor language. Skip sections wit
     st.rerun()
 
 
-with tab2, guard("Live Telemetry tab"):
-  st.subheader("📊 Scanner & Live Data")
-  context_bar()
-  if ss.get("simple_view"):
-    status_cards()
+with _scan_box, guard("Vehicle Scan — scanner"):
+  st.write("---")
+  st.markdown("#### 📡 Scanner & live data")
+  with st.container():   # (a fixed spot, so Simple view's cards don't move the scanner)
+    if ss.get("simple_view"):
+      status_cards()
   st.caption("Works in Chrome (Android, Windows, macOS, ChromeOS). Connecting reads the VIN and codes and fills them"
              " into the other tabs automatically. The Bluetooth link stays up while you use the rest of the app.")
   _vd = ss.vehicle_details or {}
@@ -8528,7 +8622,7 @@ def scan_context(extra: str = "") -> str:
 
 
 # ========================================================
-# --- CHAT (💬 Quick help at the top + Copilot on the Diagnose tab: one conversation, saved permanently) ---
+# --- CHAT (💬 the front screen: one conversation per car, every question and answer saved permanently) ---
 # ========================================================
 def chat_memory(question: str) -> str:
   """Earlier saved chats worth remembering for this question: this same car first, then ones on the same subject."""
@@ -8902,7 +8996,7 @@ def chat_messages(msgs: list, where: str, start: int = 0):
       if msg.get("who"):
         st.caption(msg["who"])
       st.markdown(msg.get("content") or "")
-      if msg.get("research") and where == "copilot":
+      if msg.get("research"):
         with st.expander("🌐 Sources Perplexity found"):
           st.markdown(msg["research"])
       if msg.get("role") == "assistant" and not str(msg.get("content") or "").startswith("⚠️"):
@@ -8984,94 +9078,189 @@ def chat_files_split(files: list) -> tuple[list, list]:
   return imgs, vids
 
 
-def quick_help_panel():
-  """💬 Always-open question box above the tabs, with the conversation (foldable) right above it."""
+def _chat_input_box(placeholder: str):
+  """The message box at the bottom: type, 📎 attach photos / video, or 🎙️ talk (newer Streamlit) — older ones get a plain box.
+  Returns (what was sent, can it take files)."""
+  tries = (dict(accept_file="multiple", file_type=PHOTO_TYPES + list(VIDEO_TYPES), accept_audio=True),
+           dict(accept_file="multiple", file_type=PHOTO_TYPES + list(VIDEO_TYPES)),
+           {})
+  for kw in tries:
+    try:
+      return st.chat_input(placeholder, key="chat_box", **kw), bool(kw)
+    except TypeError:
+      continue
+  return st.chat_input(placeholder), False
+
+
+def _chat_scroll_down(n: int):
+  """When a new message shows up, slide the conversation to the bottom (only while 💬 Chat is the screen you're on)."""
+  components.html(f"""<script>
+  (function () {{
+    const f = window.frameElement;
+    if (!f || f.offsetParent === null) return;      // Chat isn't the screen on show
+    const d = window.parent.document, w = window.parent;
+    const m = d.querySelector('[data-testid="stMain"]') || d.querySelector('section.main');
+    const go = () => {{ if (m && m.scrollHeight > m.clientHeight) m.scrollTo({{top: m.scrollHeight, behavior: "smooth"}});
+                        else w.scrollTo({{top: d.body.scrollHeight, behavior: "smooth"}}); }};
+    setTimeout(go, 150); setTimeout(go, 700);
+  }})();   // message {n}
+  </script>""", height=0)
+
+
+def chat_home():
+  """💬 The front screen: just the conversation with the AI, like a chat app. Type, 📎 attach or 🎙️ talk in the bar at the
+  bottom; ＋ holds the extras (show the AI your screen, all the AIs checking each other, past chats, new chat)."""
   msgs = ss.chat_history or []
   pending = ss.get("_chat_pending")
-  box = _try(st.container, border=True, key="quickhelp", fallback_drop=("key",))
-  with box:
-    n_kn = len(knowledge_entries())
-    st.markdown('<div class="tdg-hero"><div class="ic"><svg width="26" height="30" viewBox="0 0 30 34"><g fill="#22D3EE">'
-                '<rect x="1" y="12" width="4" height="10" rx="2"/><rect x="8" y="5" width="4" height="22" rx="2"/>'
-                '<rect x="15" y="9" width="4" height="16" rx="2"/><rect x="22" y="1" width="4" height="32" rx="2"/></g></svg></div>'
-                '<div><div class="k">TEST DON\'T GUESS</div><div class="h">Ask the <b>AI</b></div>'
-                '<div class="s">Repair questions, codes, specs, how to test anything — type it or say it</div></div></div>',
-                unsafe_allow_html=True)
-    # 👀 first in the box, so it stays in the same spot and the shared screen / camera keeps running between taps
-    if st.toggle("👀 Let the AI see my screen or camera", key="eye_toggle",
-                 help="Share your scan tool's screen (from a computer) or point the phone camera at it. The AI reads it every "
-                      "half minute and uses it in every answer and AI Check — so it sees what you see."):
+  # fixed spots, in this order, so the shared screen (👀) never reloads when messages come in
+  top, eye_box, past_box, convo, watch_box, tail = (st.container() for _ in range(6))
+  bar = _keyed_box("chatbar")
+  team = bool(ss.get("qh_team", True))
+
+  # ---------- the bar at the bottom: ＋ extras and the message box ----------
+  with bar:
+    _pop = getattr(st, "popover", None)
+    with (_pop("＋") if _pop else st.expander("＋ More")):
+      st.toggle("👀 Let the AI see my screen or camera", key="eye_toggle",
+                help="Share your scan tool's screen (from a computer) or point the phone camera at it. The AI reads it every "
+                     "half minute and uses it in every answer and AI Check — so it sees what you see.")
+      st.checkbox("🤝 All AIs check each other (about a minute)", value=True, key="qh_team",
+                  help="On: Perplexity researches, Gemini and DeepSeek each answer, and Claude checks them against each other. "
+                       "Off: one AI answers in a few seconds.")
+      st.toggle("🕘 Past chats", key="qh_past")
+      if msgs and st.button("🧹 New chat", key="qh_new", use_container_width=True,
+                            help="Starts fresh. Earlier chats stay saved and the AI still remembers them."):
+        new_chat()
+        st.rerun()
+      n_kn = len(knowledge_entries())
+      st.caption("The AI knows the open car, the codes, the scanner data, the test plan, your shop history and "
+                 + (f"your {n_kn:,} Knowledge notes" if n_kn else "your Knowledge notes")
+                 + ", and remembers your earlier chats. Every question and answer is saved.")
+      upl_key = f"qh_files_{ss.get('qh_files_n', 0)}"
+      old_files = []
+    sent, can_attach = _chat_input_box("Ask anything — codes, specs, how to test it…" if not msgs else "Reply…")
+    if not can_attach:   # older Streamlit: photos / video go in through ＋
+      with (_pop("📎") if _pop else st.expander("📎 Photos / video")):
+        old_files = st.file_uploader("📷 🎥 Photos or a video for your next question", type=PHOTO_TYPES + list(VIDEO_TYPES),
+                                     accept_multiple_files=True, key=upl_key) or []
+
+  # ---------- top: the greeting on a fresh chat, a slim header once you're talking ----------
+  with top:
+    if not store_on():
+      st.warning("⚠️ Permanent storage isn't set up yet, so jobs and chats are erased when the app restarts. Add SUPABASE_URL "
+                 "and SUPABASE_KEY to Secrets (⚙️ top right).")
+    elif ss.get("_store_err"):
+      st.warning(f"⚠️ Last save had a problem: {ss._store_err} (details in ☰ More → 📋 Log → 🐞 Problem log)")
+    if not msgs and not pending:
+      _now = _local_now()
+      hi = "Good morning" if _now.hour < 12 else ("Good afternoon" if _now.hour < 17 else "Good evening")
+      who = html_lib.escape(ss.get("tech_user") or "")
+      car = ""
+      if ss.vehicle_info:
+        car = (f'<div class="car">🚗 {html_lib.escape(ss.vehicle_info)}'
+               f'{(" · " + html_lib.escape(ss.active_dtc)) if ss.active_dtc else ""} — the AI already knows this car</div>')
+      st.markdown('<div class="tdg-greet"><div class="ic"><svg width="28" height="32" viewBox="0 0 30 34"><g fill="#22D3EE">'
+                  '<rect x="1" y="12" width="4" height="10" rx="2"/><rect x="8" y="5" width="4" height="22" rx="2"/>'
+                  '<rect x="15" y="9" width="4" height="16" rx="2"/><rect x="22" y="1" width="4" height="32" rx="2"/></g></svg>'
+                  f'</div><h1>{hi}{(", " + who) if who else ""}</h1><div class="q">What are we working on?</div>{car}'
+                  '<div class="tip">Type it, tap 📎 to add a photo or a video, or tap 🎙️ and just talk.</div></div>',
+                  unsafe_allow_html=True)
+    elif ss.vehicle_info:
+      st.markdown(f'<div class="tdg-chathead">🚗 {html_lib.escape(ss.vehicle_info)}'
+                  f'{(" · " + html_lib.escape(ss.active_dtc)) if ss.active_dtc else ""}</div>', unsafe_allow_html=True)
+
+  # ---------- 👀 the shared screen / camera ----------
+  with eye_box:
+    if ss.get("eye_toggle"):
       eye_panel()
     else:
       ss.eye_on, ss.eye = False, None
-    slot = st.container()             # where a new question + answer show up
-    if msgs:
-      with st.expander("💬 Conversation", expanded=True):
-        show_all = len(msgs) > 4 and st.toggle("Show the whole conversation", key="qh_all")
-        start = 0 if show_all else max(0, len(msgs) - 4)
-        chat_messages(msgs[start:], "quick", start)
-        slot = st.container()
-    if pending and pending.get("where") != "copilot":
-      with slot:
-        _chat_watch()
-    with _try(st.form, "qh_form", clear_on_submit=True, border=False, fallback_drop=("border",)):
-      c1, c2 = _try(st.columns, [6, 1], vertical_alignment="bottom", fallback_drop=("vertical_alignment",))
-      q = c1.text_input("**💬 Quick help** — ask the AI anything", key="qh_q",
-                        placeholder="e.g. How do I test a 3-wire cam sensor?  ·  What's that noise in this video?")
-      go = c2.form_submit_button("Ask", type="primary", use_container_width=True)
-      files = (st.file_uploader("📷 🎥 Photos or a video (wiring diagram, connector, part, meter — or a video of the noise, "
-                                "shake or scope screen; sound is included)",
-                                type=PHOTO_TYPES + list(VIDEO_TYPES), accept_multiple_files=True, key="qh_files") or []
-               if ss.get("qh_photos") else [])
-    voice = None
-    if hasattr(st, "audio_input"):   # 🎙️ talk instead of typing (greasy hands)
-      voice = st.audio_input("🎙️ Or say it — tap the mic, talk, tap stop. It asks right away.", key=f"qh_mic_{ss.get('qh_mic_n', 0)}")
-    o1, o2, o3, o4 = st.columns(4)
-    o1.toggle("📷 🎥 Add photos / video", key="qh_photos")
-    o2.checkbox("🤝 All AIs check each other", value=True, key="qh_team",
-                help="On: Perplexity researches, Gemini and DeepSeek each answer, and Claude checks them against each other "
-                     "(about a minute). Off: one AI answers in a few seconds.")
-    past = o3.toggle("🕘 Past chats", key="qh_past")
-    if msgs and o4.button("🧹 New chat", key="qh_new", use_container_width=True,
-                          help="Starts fresh. Earlier chats stay saved and the AI still remembers them."):
-      new_chat()
-      st.rerun()
-    st.caption("Knows the open car, the codes, the scanner data, the test plan, your shop history and "
-               + (f"your {n_kn} Knowledge notes" if n_kn else "your Knowledge notes")
-               + " · remembers your earlier chats · every question and answer is saved")
-    if ss.pop("_eye_ask", False) and not pending and eye_fresh():
-      with slot:
-        ask_chat("Here's what I'm looking at right now. What do you see? Anything that doesn't look right, and what should I "
-                 "check next?", [], bool(ss.get("qh_team", True)), "quick")
-    if voice is not None and not pending:
-      vb = voice.getvalue()
-      if vb and hashlib.md5(vb).hexdigest() != ss.get("_qh_mic_seen"):
-        ss._qh_mic_seen = hashlib.md5(vb).hexdigest()
-        ss.qh_mic_n = ss.get("qh_mic_n", 0) + 1   # a fresh mic for next time
-        try:
-          with st.spinner("🎙️ Listening to what you said…"):
-            said = transcribe_audio(vb, getattr(voice, "type", "") or "audio/wav")
-        except AIError as e_:
-          said = None
-          st.warning(f"Couldn't hear that: {e_}")
-        if said:
-          with slot:
-            ask_chat(said, [], bool(ss.get("qh_team", True)), "quick")
-        elif said == "":
-          st.warning("Didn't catch any words — try again a little closer to the phone.")
-    if go and str(q or "").strip():
-      if pending:
-        st.warning("Hang on — the last answer is still being worked on. Ask again when it shows up.")
-      else:
-        imgs, vids = chat_files_split(files)
-        with slot:
-          ask_chat(str(q).strip(), imgs, bool(ss.get("qh_team", True)), "quick", vids)
-    if past:
-      past_chats_panel()
+
+  # ---------- 🕘 past chats ----------
+  if ss.get("qh_past"):
+    with past_box:
+      with st.expander("🕘 Past chats", expanded=True):
+        past_chats_panel()
+
+  # ---------- what you sent (handled before the progress box, so nothing you send is lost when an answer lands) ----------
+  def _go(text: str, imgs: list, vids: list):
+    if ss.get("_chat_pending"):
+      ss._chat_queue = (text, imgs, vids)    # asked as soon as the current answer is in
+      st.toast("Got it — I'll ask that as soon as the answer I'm working on is done.")
+      return
+    with watch_box:
+      ask_chat(text, imgs, team, "quick", vids)
+
+  if ss.pop("_eye_ask", False) and not pending and eye_fresh():
+    _go("Here's what I'm looking at right now. What do you see? Anything that doesn't look right, and what should I "
+        "check next?", [], [])
+  if sent is not None:
+    text = (sent if isinstance(sent, str) else (getattr(sent, "text", None) or "")) or ""
+    files = [] if isinstance(sent, str) else list(getattr(sent, "files", None) or [])
+    files += list(old_files)
+    audio = None if isinstance(sent, str) else getattr(sent, "audio", None)
+    if audio is not None:
+      try:
+        with st.spinner("🎙️ Listening to what you said…"):
+          said = transcribe_audio(audio.getvalue(), getattr(audio, "type", "") or "audio/wav")
+      except AIError as e_:
+        said = None
+        st.warning(f"Couldn't hear that: {e_}")
+      if said:
+        text = (text + " " + said).strip()
+      elif said == "" and not text and not files:
+        st.warning("Didn't catch any words — try again a little closer to the phone.")
+    imgs, vids = chat_files_split(files)
+    if old_files:
+      ss.qh_files_n = ss.get("qh_files_n", 0) + 1   # empty the picker for the next question
+    if not text and (imgs or vids):
+      text = ("What do you see in this video (and hear)? Anything that doesn't look or sound right, and what should I check "
+              "next?" if vids else "What do you see here? Anything that doesn't look right, and what should I check next?")
+    if text:
+      _go(text, imgs, vids)
+  elif not pending and ss.get("_chat_queue"):
+    _go(*ss.pop("_chat_queue"))
+
+  # ---------- the conversation ----------
+  with convo:
+    start = 0
+    if len(msgs) > 24 and not ss.get("qh_all"):
+      start = len(msgs) - 24
+      if st.button(f"⬆️ Show the {start} earlier message(s)", key="qh_more"):
+        ss.qh_all = True
+        st.rerun()
+    chat_messages(msgs[start:], "quick", start)
+  if pending:
+    with watch_box:
+      _chat_watch()
+  with tail:
+    st.markdown('<div class="tdg-chatpad"></div>', unsafe_allow_html=True)   # room so the bar never covers the last answer
+    if len(msgs) != ss.get("_chat_seen_n", 0):
+      ss._chat_seen_n = len(msgs)
+      if msgs:
+        _chat_scroll_down(len(msgs))
+
+
+def test_results_panel():
+  """🧪 Every guided test on this car (🎯 Guided Tests on the scanner and the tests the AI runs) — also on the repair order."""
+  st.write("---")
+  st.markdown("#### 🧪 Test results on this car")
+  t = ss.test_results or {}
+  if not t:
+    st.caption("No tests run yet. Connect the scanner on 🚗 Vehicle Scan and use 🎯 Guided Tests — or let the AI run the "
+               "tests it asks for. Every result shows up here and on the repair order.")
+    return
+  dot = {"GOOD": "🟢", "MARGINAL": "🟡", "BAD": "🔴"}
+  rows = []
+  for k, v in t.items():
+    g = str(v.get("grade", "")).upper() if isinstance(v, dict) else ""
+    rows.append({"Test": k, "Result": f"{dot.get(g, '⚪')} {g.title()}".strip(),
+                 "What it found": str(v.get("verdict", "")) if isinstance(v, dict) else str(v)})
+  st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
 # ========================================================
-# --- SCOPE DATA FILE SCREEN (Diagnose tab, section 2) ---
+# --- SCOPE DATA FILE SCREEN (🔬 Scope & Tests) ---
 # ========================================================
 SYMPTOM_CHIPS = ["⚠️ Check engine light on", "🛑 Cranks, no start", "🐢 Hard start", "🫨 Rough idle",
                  "💨 Hesitates on acceleration", "📉 Stalls", "🔥 Overheating", "⛽ Poor fuel economy",
@@ -9317,15 +9506,15 @@ def scope_data_section():
       st.markdown(ss.wave_result["text"])
 
 
-with tab3, guard("Diagnose tab"):
-  st.subheader("🔧 Diagnose")
+with tab3, guard("Diagnostics"):
+  st.subheader("🔧 Diagnostics")
   context_bar()
   if ss.get("simple_view"):
     status_cards()
     st.markdown("<style>div[class*='st-key-pro_'] { display: none !important; }</style>", unsafe_allow_html=True)
 
   # ---------- 1. Codes ----------
-  st.markdown("#### 1 · Fault codes")
+  st.markdown("#### 🔢 Fault codes & complaint")
   d = ss.ble_dtcs or {}
   kinds = {}
   kinds.update(module_codes(d))
@@ -9339,7 +9528,7 @@ with tab3, guard("Diagnose tab"):
         format_func=lambda c: f"{c} · {kinds.get(c, 'added')}",
     )
   else:
-    st.caption("Connect the scanner on the 📊 Scanner tab — the codes it reads show up here automatically.")
+    st.caption("Connect the scanner on 🚗 Vehicle Scan — the codes it reads show up here automatically.")
   st.text_input("Add codes by hand (optional):", key="manual_dtc", placeholder="e.g. P0171, P0174")
   st.text_area("Symptoms / customer complaint (optional — works with or without codes):", key="symptoms", height=80,
                placeholder="e.g. Rough idle when cold, stumbles on hard acceleration, no check engine light")
@@ -9497,13 +9686,23 @@ Format strictly using these Markdown sections:
       with st.expander("🌐 Web research Perplexity found (TSBs, recalls, known fixes, sources)"):
         st.markdown(ss.dtc_result["research"])
 
+  st.caption("💬 Questions about the plan or a reading? Ask in Chat — it knows this car, the codes and the plan. "
+             "Wiring diagrams, the scope and test results are on 🔬 Scope & Tests; the write-up is on 🧾 Customer & RO.")
+
+
+# ========================================================
+# --- 🔬 SCOPE & TESTS: wiring diagrams, scope & test readings, test results, test drive review ---
+# ========================================================
+with tab_scope, guard("Scope & Tests"):
+  st.subheader("🔬 Scope & Tests")
+  context_bar()
   with guard("Wiring diagrams"):   # the diagrams the AI asked for (test plan, step cards, AI Check, chat) + ones you add
     diagrams_panel()
 
-  with pro_section("scope"):
-    # ---------- 2. Scope lab ----------
+  with st.container():
+    # ---------- Scope lab ----------
     st.write("---")
-    st.markdown("#### 2 · Scope & test readings")
+    st.markdown("#### 〰️ Scope & test readings")
     with guard("Scope data file"):
       scope_data_section()
     st.markdown("**📸 Or a photo of the scope / meter screen**")
@@ -9616,56 +9815,8 @@ Format strictly using these Markdown sections:
             st.markdown(f"**🐋 {deepseek_label()}** (readings only — can't see photos)")
             st.markdown(sr["ds_draft"])
 
-  # ---------- 3. Copilot ----------
-  st.write("---")
-  st.markdown("#### 3 · Copilot chat")
-  hcol1, hcol2 = st.columns([4, 1])
-  hcol1.caption("Ask follow-ups about the codes, the test plan or your readings. It knows the vehicle, the scan data, your shop "
-                "history and your Knowledge notes, and it remembers earlier chats. Same conversation as 💬 Quick help at the "
-                "top — every answer is saved.")
-  if ss.chat_history and hcol2.button("New chat", help="Starts fresh. Earlier chats stay saved and the AI still remembers them."):
-    new_chat()
-    st.rerun()
-
-  chat_messages(ss.chat_history or [], "copilot")
-  if (ss.get("_chat_pending") or {}).get("where") == "copilot":
-    _chat_watch()
-
-  # 📷 Photos for the next question: wiring diagrams, connectors, parts, scope or meter screens
-  nkey = ss.get("chat_photo_n", 0)
-  with st.expander("📷 🎥 Add photos or a video to your question (wiring diagram, connector, part, scope, meter, noise)",
-                   expanded=bool(ss.get(f"chat_cam_on_{nkey}"))):
-    chat_files = st.file_uploader("Take or upload photos (up to 4) or a video (sound is included)",
-                                  type=PHOTO_TYPES + list(VIDEO_TYPES),
-                                  accept_multiple_files=True, key=f"chat_files_{nkey}_{ss.get('job_n', 0)}") or []
-    chat_vids = [(f.name, f.getvalue()) for f in chat_files if is_video(f.name)][:2]
-    chat_files = [f for f in chat_files if not is_video(f.name)]
-    chat_cam = st.camera_input("Take a photo", key=f"chat_cam_{nkey}") if st.toggle("Use in-app camera instead", key=f"chat_cam_on_{nkey}") else None
-    chat_imgs = []
-    for f in ([chat_cam] if chat_cam else []) + list(chat_files):
-      try:
-        chat_imgs.append(ImageOps.exif_transpose(Image.open(f)))
-      except Exception:
-        st.warning(f"Couldn't open {getattr(f, 'name', 'that photo')} — try a JPG or PNG.")
-    chat_imgs = chat_imgs[:4]
-    if chat_imgs:
-      st.image([im.convert("RGB") for im in chat_imgs], width=140)
-      st.caption(f"{len(chat_imgs)} photo(s) will go with your next question. Gemini and Claude read them; DeepSeek works from your text.")
-    if chat_vids:
-      st.caption(f"🎥 {', '.join(n for n, _ in chat_vids)} will go with your next question. Gemini watches and listens to it "
-                 "and reports to the others; Claude and DeepSeek check its reasoning.")
-
-  chat_quick = st.toggle("⚡ Quick answer — one AI, a few seconds (off = all the AIs check each other's work, about a minute)",
-                         value=False, key="chat_quick")
-  user_question = st.chat_input("Ask a question (add photos above first if you want)" if not chat_imgs else
-                                f"Ask about the {len(chat_imgs)} photo(s) — e.g. 'Which wire is the 5V reference?'")
-  if user_question:
-    if ss.get("_chat_pending"):
-      st.warning("Hang on — the last answer is still being worked on. Ask again when it shows up.")
-    else:
-      if chat_imgs or chat_vids:
-        ss.chat_photo_n = nkey + 1        # empties the photo box for the next question
-      ask_chat(user_question, chat_imgs, not chat_quick, "copilot", chat_vids)
+  with guard("Test results"):
+    test_results_panel()
 
 # ========================================================
 # --- TEST DRIVE REVIEW (saved drives from the Bluetooth dashboard) ---
@@ -9721,10 +9872,31 @@ def drive_text(rec: dict) -> str:
 
 
 # ========================================================
-# --- CUSTOMER / SHOP REPORT (shown at the bottom of the Diagnose tab) ---
+# --- CUSTOMER / SHOP REPORT = the repair order (🧾 Customer & RO screen) ---
 # ========================================================
 FOLLOW_UP_LABELS = {0: "No follow-up", 7: "In about 1 week", 14: "In about 2 weeks", 30: "In about 1 month",
                     60: "In about 2 months", 90: "In about 3 months", 180: "In about 6 months"}
+
+RO_STORY_PROMPT = """Write the repair order story (the "3 Cs") for this job the way a professional technician writes it on
+the RO.
+Vehicle: {vehicle} · VIN: {vin} · Mileage: {miles}
+Customer concern: {complaint}
+Trouble codes: {codes}
+Tests done and their results: {tests}
+Diagnostic steps worked so far: {progress}
+Technician's notes: {notes}
+Repair done: {fix}
+Estimate lines: {estimate}
+
+Format exactly (three short paragraphs, nothing else):
+CONCERN: <the customer's concern in one or two sentences>
+CAUSE: <what testing found — the tests done and the key readings that proved it, and the codes found>
+CORRECTION: <the repair performed and how it was verified — or, if not repaired yet, start with "Recommend:" and give the
+recommended repair from the notes / estimate>
+
+RULES: plain professional shop language, past tense, short. Use ONLY the facts above — never invent a test, a reading, a
+part, a price or a time. Leave out anything unknown. If the cause isn't confirmed yet, say what testing is still needed."""
+
 
 CUSTOMER_SUMMARY_PROMPT = """Write a short summary of this diagnosis for the CAR OWNER (not a mechanic).
 Vehicle: {vehicle}
@@ -9816,6 +9988,7 @@ def build_report_html(notes: str) -> str:
   rows_tests = "".join(
       f"<tr><td>{e(k)}</td><td>{grade_of(v)}</td><td>{e(str(v.get('verdict', '')) if isinstance(v, dict) else str(v))}</td></tr>"
       for k, v in tests.items()) or "<tr><td colspan=3>No guided tests run</td></tr>"
+  shop = secret("SHOP_NAME") or "Test Don't Guess"
   ff_html = ("<h2>Freeze frame (" + e(ff.get("dtc", "")) + ")</h2><p>" +
              " · ".join(f"{e(k)}: <b>{e(str(v))}</b>" for k, v in (ff.get("vals") or {}).items()) + "</p>") if ff.get("dtc") else ""
   return f"""<!doctype html><html><head><meta charset="utf-8"><title>Diagnostic report - {e(ss.vehicle_info or 'Vehicle')}</title>
@@ -9825,7 +9998,7 @@ td,th{{border:1px solid #ccc;padding:5px 7px;text-align:left;vertical-align:top}
 pre{{white-space:pre-wrap;font-family:inherit;font-size:13px;background:#fafafa;border:1px solid #ddd;padding:10px}}
 @media print{{button{{display:none}}}}</style></head><body>
 <button onclick="window.print()" style="float:right;padding:8px 14px">Print / Save as PDF</button>
-<h1>⚡ Test Don't Guess — Diagnostic Report</h1><div class="muted">{e(datetime.now().strftime("%B %d, %Y %I:%M %p"))}</div>
+<h1>{e(shop)} — Repair Order</h1><div class="muted">Diagnostic report · {e(datetime.now().strftime("%B %d, %Y %I:%M %p"))}{(" · Job " + e(str(ss.get("job_id")))) if ss.get("job_id") else ""}</div>
 <h2>Customer & vehicle</h2><table>
 <tr><th>Customer</th><td>{e(ss.customer_name or '')}</td><th>Phone</th><td>{e(ss.customer_phone or '')}</td></tr>
 <tr><th>Vehicle</th><td>{e(ss.vehicle_info or '')}</td><th>VIN</th><td>{e(ss.active_vin or 'not provided')}</td></tr>
@@ -9833,6 +10006,7 @@ pre{{white-space:pre-wrap;font-family:inherit;font-size:13px;background:#fafafa;
 <tr><th>Odometer</th><td>{e(ss.odometer or '')}</td><th>Technician</th><td>{e(ss.get('tech_user') or '')}</td></tr></table>
 {"<h2>What we found</h2><p style='font-size:15px;line-height:1.5'>" + e(ss.customer_summary).replace(chr(10), "<br>") + "</p>" if (ss.customer_summary or "").strip() else ""}
 {"<h2>Repair performed</h2><p><b>" + e(ss.fix_part) + "</b>" + ("<br>Verified by: " + e(ss.fix_test) if (ss.fix_test or "").strip() else "") + "</p>" if (ss.fix_part or "").strip() else ""}
+{"<h2>Repair order write-up</h2><pre>" + e(ss.get("ro_story") or "") + "</pre>" if (ss.get("ro_story") or "").strip() else ""}
 <h2>Trouble codes</h2><table><tr><th>Module</th><th>Code</th><th>Status</th></tr>{rows_codes}</table>
 {ff_html}
 <h2>Test results</h2><table><tr><th>Test</th><th>Result</th><th>Details</th></tr>{rows_tests}</table>
@@ -9845,11 +10019,11 @@ pre{{white-space:pre-wrap;font-family:inherit;font-size:13px;background:#fafafa;
 </body></html>"""
 
 
-with tab3, guard("Diagnose tab"):
-  with pro_section("report"):
+with tab_ro, guard("Repair order"):
+  with st.container():
     st.write("---")
-    with st.expander("📸 4 · Job photos & estimate", expanded=bool(
-        [r for r in (ss.estimate_rows or []) if isinstance(r, dict) and str(r.get("Item") or "").strip()])):
+    st.markdown("#### 🧾 Repair order")
+    with st.expander("💲 Estimate & job photos", expanded=True):
       st.caption("Photos save with the job and go on the customer report — the leaky gasket or chafed wire sells the repair "
                  "better than words. The estimate prints on the report with a total.")
       _pc1, _pc2 = st.columns(2)
@@ -9915,10 +10089,9 @@ with tab3, guard("Diagnose tab"):
           st.markdown(f"Parts **${_parts:,.2f}** · Labor **${_labor:,.2f}** · **Total ${_parts + _labor:,.2f}**")
 
     st.write("---")
-    with st.expander("🧾 5 · Customer report — summary, email, text, print",
-                     expanded=bool((ss.customer_summary or "").strip() or (ss.tech_notes or "").strip())):
-      st.caption("One page with the vehicle, all codes, freeze frame, every test result (green / yellow / red) and the plan. "
-                 "Open it on your phone and use Print → Save as PDF, or text it to the customer.")
+    with st.expander("📤 Write-up for the customer — RO story, summary, email, text, print", expanded=True):
+      st.caption("One page with the customer, the vehicle, the RO write-up, the estimate, all codes, every test result "
+                 "(green / yellow / red) and photos. Email it, text the summary, or open it and use Print → Save as PDF.")
       notes = st.text_area("Technician notes / recommendation (goes on the report):", key="tech_notes", height=80,
                            placeholder="e.g. Recommend replacing cylinder 3 ignition coil and spark plugs. Fuel trims normal after repair.")
       _has_findings = bool(ss.dtc_result or ss.test_results or ss.tech_notes.strip() or ss.fix_part.strip() or current_codes())
@@ -9936,13 +10109,32 @@ with tab3, guard("Diagnose tab"):
           ss.customer_summary = _sum.strip()
       st.text_area("Customer summary (edit it as you like — it goes at the top of the report):", key="customer_summary", height=130,
                    placeholder="Tap the button above, or type your own summary for the customer.")
+      st.markdown("**📝 RO write-up** — Concern · Cause · Correction (prints on the repair order)")
+      if st.button("✍️ Write up the RO from this job", key="ro_write", disabled=not _has_findings,
+                   help="The AI writes the 3 Cs from what's on this job — the complaint, codes, tests, plan steps, notes and fix. "
+                        "It never adds a test or part you didn't do."):
+        with st.spinner("Writing the repair order..."):
+          _ro, _who = quick_ai(RO_STORY_PROMPT.format(
+              vehicle=ss.vehicle_info or "the vehicle", vin=ss.active_vin or "not given", miles=ss.odometer or "not given",
+              complaint=ss.symptoms.strip() or "not given", codes=", ".join(current_codes()) or "none",
+              tests=json.dumps(ss.test_results or {})[:3000], progress=plan_progress_text()[:2500] or "none",
+              notes=ss.tech_notes.strip() or "none",
+              fix=(ss.fix_part.strip() + (f" (proved by: {ss.fix_test.strip()})" if ss.fix_test.strip() else "")) or "not done yet",
+              estimate="; ".join(str(r.get("Item")) for r in (ss.estimate_rows or [])
+                                 if isinstance(r, dict) and str(r.get("Item") or "").strip()) or "none"), max_tokens=3000)
+        if _ro.startswith("⚠️"):
+          st.error(_ro)
+        else:
+          ss.ro_story = _ro.strip()
+      st.text_area("RO write-up", key="ro_story", height=150, label_visibility="collapsed",
+                   placeholder="CONCERN: …\nCAUSE: …\nCORRECTION: …  (tap the button above, or type your own)")
       _rep_name = re.sub(r"\W+", "_", ss.vehicle_info or "vehicle")
       _report_html = build_report_html(notes)
       _bat = battery_slip_html() if any(re.search(r"charg|crank|battery|power", k, re.I) for k in (ss.test_results or {})) else ""
       _sc1, _sc2, _sc3, _sc4 = st.columns(4)
       with _sc1:
-        st.download_button("🧾 Download report", data=_report_html.encode("utf-8"), mime="text/html",
-                           file_name=f"report_{_rep_name}_{datetime.now():%Y%m%d}.html", use_container_width=True)
+        st.download_button("🧾 Download repair order", data=_report_html.encode("utf-8"), mime="text/html",
+                           file_name=f"RO_{_rep_name}_{datetime.now():%Y%m%d}.html", use_container_width=True)
       with _sc2:
         if st.button("📧 Email it to the customer", use_container_width=True,
                      disabled=not (email_ready() and (ss.customer_email or "").strip())):
@@ -9976,7 +10168,7 @@ with tab3, guard("Diagnose tab"):
         st.caption("📧 To email reports: add SMTP_USER and SMTP_PASSWORD to Streamlit Secrets (for Gmail, make an "
                    "\"App password\" under Google Account → Security → 2-Step Verification, and use that, not your normal password).")
       elif not (ss.customer_email or "").strip():
-        st.caption("📧 Add the customer's email on the VIN tab to enable emailing.")
+        st.caption("📧 Add the customer's email at the top of this screen to enable emailing.")
       if not sms_ready():
         st.caption("💬 To text customers: make a free trial account at twilio.com, buy a texting number (~$1/mo), and add "
                    "TWILIO_SID, TWILIO_TOKEN and TWILIO_FROM (the number, like +16785551234) to Secrets.")
@@ -9986,7 +10178,7 @@ with tab3, guard("Diagnose tab"):
 
       # ---------- 5. Confirmed fix ----------
     st.write("---")
-    with st.expander("✅ 6 · Confirmed fix & follow-up — teaches the app", expanded=bool((ss.fix_part or "").strip())):
+    with st.expander("✅ Confirmed fix & follow-up — teaches the app", expanded=bool((ss.fix_part or "").strip())):
       st.caption("When the car is fixed, write down what actually fixed it and the test that proved it. Next time a car like this "
                  "comes in, the AI sees your shop's real fixes first.")
       f1, f2 = st.columns(2)
@@ -9999,7 +10191,7 @@ with tab3, guard("Diagnose tab"):
         else:
           st.error("Couldn't save the fix — add the vehicle or customer first.")
       if not ss.vehicle_info:
-        st.caption("Set the vehicle on the VIN tab first.")
+        st.caption("Set the vehicle on 🚗 Vehicle Scan first.")
 
       st.markdown("**📅 Follow up with this customer?**")
       _fu1, _fu2 = st.columns(2)
@@ -10010,7 +10202,7 @@ with tab3, guard("Diagnose tab"):
       ss.follow_up_days = _fu_pick
       _fu2.text_input("About what:", key="follow_up_note", placeholder="e.g. Rear brakes at 4mm — due soon")
       if _fu_pick:
-        st.caption("It'll show under 📅 Callbacks due on the Log tab when the time comes (counted from the job's last update).")
+        st.caption("It'll show under ☰ More → 📋 Log → 📅 Callbacks due when the time comes (counted from the job's last update).")
 # ========================================================
 # --- TAB 5: VEHICLE & DTC LOG ---
 # ========================================================
@@ -10069,7 +10261,7 @@ with tab5, guard("Log tab"):
         store_delete("log")
         queue_update(toast="Log cleared")
   else:
-    st.info("No vehicles or DTCs logged yet. Connect the scanner (📊 Scanner tab) or run a diagnostic tree (🔧 Diagnose tab) to start logging.")
+    st.info("No vehicles or DTCs logged yet. Connect the scanner (🚗 Vehicle Scan) or run a diagnostic tree (🔧 Diagnostics) to start logging.")
 
   # ---------- 📅 Callbacks due ----------
   st.write("---")
@@ -10092,7 +10284,7 @@ with tab5, guard("Log tab"):
     if _when <= _today + __import__("datetime").timedelta(days=7):
       _due.append((_when, _r["id"], _d))
   if not _due:
-    st.caption("Nothing due. Set a follow-up when you close a job (Diagnose tab → section 6) and it shows up here on time.")
+    st.caption("Nothing due. Set a follow-up when you close a job (🧾 Customer & RO → ✅ Confirmed fix) and it shows up here on time.")
   else:
     for _when, _jid, _d in sorted(_due):
       _cb1, _cb2 = st.columns([5, 1])
@@ -10154,13 +10346,14 @@ with tab5, guard("Log tab"):
         st.markdown("**⚠️ Comebacks** — same car, same code, within 60 days (all time)")
         st.dataframe(_comebacks, use_container_width=True, hide_index=True)
 
+with tab_scope, guard("Test drive review"):
   # ---------- 🚗 Test drive review ----------
   st.write("---")
-  st.subheader("🚗 Test drive review")
+  st.markdown("#### 🚗 Test drive review")
   drives = load_drives()
   if not drives:
     st.caption("Every test drive is saved automatically when you tap Stop Test Drive (and on your phone, even if the page "
-               "reloads mid-drive). Older drives on your phone: 📊 Scanner tab → 🎯 Guided Tests → 📁 Saved test drives → Send to app.")
+               "reloads mid-drive). Older drives on your phone: 🚗 Vehicle Scan → 🎯 Guided Tests → 📁 Saved test drives → Send to app.")
   else:
     ids = list(drives)
     if ss.get("drive_pick") not in ids:
@@ -10199,6 +10392,7 @@ with tab5, guard("Log tab"):
     st.markdown("**Copy this to Claude** — tap the copy icon in the top-right corner of the box:")
     st.code(txt[:30000], language=None)
 
+with tab5, guard("Log tab"):
   # ---------- 🐞 Problem log ----------
   st.write("---")
   st.subheader("🐞 Problem log")
@@ -10217,14 +10411,14 @@ with tab5, guard("Log tab"):
       "TEST DON'T GUESS — PROBLEM REPORT",
       f"App version: {APP_VERSION} · {datetime.now():%Y-%m-%d %I:%M %p}",
       f"Vehicle: {ss.vehicle_info or 'none'} · VIN {ss.active_vin or 'none'} · OEM profile {make_profile()}",
-      f"Codes in Diagnose tab: {ss.active_dtc or 'none'}",
+      f"Codes in Diagnostics: {ss.active_dtc or 'none'}",
       f"What happened: {what.strip() or '(not described)'}",
       "",
       f"RECENT LOGGED PROBLEMS ({len(recent)}):",
       *[f"- [{p.get('time')}] {p.get('kind')} in {p.get('where')}: {p.get('message')}"
         + (f"\n    {p.get('details', '').strip()[-1500:]}" if p.get("details") else "") for p in recent],
       "",
-      "SCANNER STATE: " + (json.dumps({k: v for k, v in dbg.items() if k != "trace"}) if dbg else "not sent (tap 🐞 Send debug info on the 📊 Scanner tab)"),
+      "SCANNER STATE: " + (json.dumps({k: v for k, v in dbg.items() if k != "trace"}) if dbg else "not sent (tap 🐞 Send debug info on 🚗 Vehicle Scan)"),
       *(["LAST ADAPTER EXCHANGES:", *dbg.get("trace", [])[-60:]] if dbg.get("trace") else []),
   ])
   st.markdown("**Report to send Claude** — tap the copy icon in the top-right corner of the box:")
@@ -10461,9 +10655,9 @@ with tab6, guard("Knowledge tab"):
         st.error("That file isn't a notes export.")
 
 
-# 💬 Quick help (shows at the top of the page — see _quick_box)
-with _quick_box, guard("Quick help chat"):
-  quick_help_panel()
+# 💬 The chat front screen (shown on 💬 Chat — see _quick_box)
+with _quick_box, guard("Chat"):
+  chat_home()
 
 
 # ========================================================
