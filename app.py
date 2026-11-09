@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-18"
+APP_VERSION = "2026-11-19"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -124,6 +124,8 @@ WHATS_NEW = [
     "yourself; the app only opens the page). The open car's VIN is right there to copy",
     "NEW: 📄 PDFs — tap ＋ in the chat box to add a PDF (service info, wiring diagram, TSB, manual) and ask about it; and "
     "📖 Knowledge → Learn from book pages or a PDF turns a PDF into notes (pick the pages if it's a big one)",
+    "BETTER: 📖 Knowledge leaves out notes you already have when it reads pages or a PDF (same words, or same meaning with the "
+    "same numbers) — you only see the new ones",
 ]
 
 st.markdown(
@@ -10947,29 +10949,59 @@ Return JSON only: a list of objects with keys
 "applies_to" (e.g. "All", "GM 3.6L", "COP ignition", "Port injection"),
 "rule" (the note itself, in your own words)."""
 
+def _note_key(text: str) -> str:
+  return re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).strip()
+
+
+def _note_nums(text: str) -> list:
+  return sorted(re.findall(r"\d+(?:\.\d+)?", str(text or "")))
+
+
 def know_pending_from(found: list, src: str, who: str):
-  """Notes the AI pulled from pages or a PDF -> the review table (nothing is saved until you tap Save)."""
-  ss.know_pending = [{"Keep": True, "Topic": str(x.get("topic") or "General")[:60],
-                      "Type": x.get("type") if x.get("type") in KNOW_KINDS else "Rule of thumb",
-                      "Applies to": str(x.get("applies_to") or "All")[:60], "Note": str(x.get("rule")).strip()[:600]}
-                     for x in found]
-  ss.know_pending_src, ss.know_pending_who = src, who
-  try:   # 🧠 mark notes that say the same thing as one you already have
-    have = knowledge_entries()
+  """Notes the AI pulled from pages or a PDF -> the review table (nothing is saved until you tap Save).
+  Notes you already have are left out: the same words, or the same meaning with the same numbers. A note that reads alike
+  but has different numbers is kept — that's a different spec."""
+  rows = [{"Keep": True, "Topic": str(x.get("topic") or "General")[:60],
+           "Type": x.get("type") if x.get("type") in KNOW_KINDS else "Rule of thumb",
+           "Applies to": str(x.get("applies_to") or "All")[:60], "Note": str(x.get("rule")).strip()[:600]}
+          for x in found]
+  have = knowledge_entries()
+  have_keys = {_note_key(e.get("rule")) for e in have}
+  keep, seen, skipped = [], set(), 0
+  for r in rows:   # word for word the same as a note you have (or one earlier in this batch)
+    k = _note_key(r["Note"])
+    if k in have_keys or k in seen:
+      skipped += 1
+      continue
+    seen.add(k)
+    keep.append(r)
+  try:   # 🧠 says the same thing (same numbers) as a note you have, or as one earlier in this batch
+    if not (keep and embed_provider()):
+      raise LookupError("no meaning search")
     vecs = ensure_vectors("know", [(e["_id"], note_text(e)) for e in have]) if have else {}
-    if vecs:
-      ids = list(vecs)
-      M = np.stack([vecs[i] for i in ids])
-      new = embed_texts([f"{r['Topic']} ({r['Type']}; applies to {r['Applies to']}): {r['Note']}" for r in ss.know_pending], "doc")
+    new = embed_texts([f"{r['Topic']} ({r['Type']}; applies to {r['Applies to']}): {r['Note']}" for r in keep], "doc") if keep else []
+    if len(new) == len(keep):
       byid = {e["_id"]: e for e in have}
-      for r, v in zip(ss.know_pending, new):
-        sims = M[:, :len(v)] @ v[:M.shape[1]]
-        j = int(np.argmax(sims))
-        if sims[j] >= 0.93:
-          r["Keep"] = False
-          r["Already have?"] = f"≈ {byid[ids[j]].get('topic', '')}: {str(byid[ids[j]].get('rule', ''))[:80]}"
+      ids = list(vecs)
+      M = np.stack([vecs[i] for i in ids]) if ids else None
+      out, kept = [], []
+      for r, v in zip(keep, new):
+        nums, dup = _note_nums(r["Note"]), False
+        if M is not None:
+          sims = M[:, :len(v)] @ v[:M.shape[1]]
+          dup = any(sims[j] >= 0.92 and _note_nums(byid[ids[j]].get("rule")) == nums for j in np.argsort(-sims)[:3])
+        if not dup:
+          dup = any(float(v @ v2) >= 0.95 and _note_nums(r2["Note"]) == nums for r2, v2 in kept)
+        if dup:
+          skipped += 1
+        else:
+          out.append(r)
+          kept.append((r, v))
+      keep = out
   except Exception:
-    pass
+    pass   # no meaning search: the word-for-word check above still runs
+  ss.know_pending, ss.know_skipped = keep, skipped
+  ss.know_pending_src, ss.know_pending_who = src, who
 
 
 def know_pdf_prompt(pages: str) -> str:
@@ -11055,13 +11087,14 @@ with tab6, guard("Knowledge tab"):
       else:
         know_pending_from(found, (src.strip() or getattr(kpdf, "name", "PDF")) +
                           (f", pages {kpages.strip()}" if (kpages or "").strip() else ""), who)
+    if ss.get("know_pending") == [] and ss.get("know_skipped"):
+      st.info(f"🧠 All {ss.know_skipped} note(s) from that are ones you already have — nothing new to save.")
+      ss.know_pending = None
     if ss.get("know_pending"):
-      st.markdown(f"**{len(ss.know_pending)} note(s) found** — fix anything that's off, untick what you don't want, then save. "
+      st.markdown(f"**{len(ss.know_pending)} new note(s) found** — fix anything that's off, untick what you don't want, then save. "
                   f"<small>({ss.get('know_pending_who', '')})</small>", unsafe_allow_html=True)
-      _rep = sum(1 for r in ss.know_pending if r.get("Already have?"))
-      if _rep:
-        st.caption(f"🧠 {_rep} of these say the same thing as a note you already have — they're unticked (see 'Already have?'). "
-                   "Tick any you still want.")
+      if ss.get("know_skipped"):
+        st.caption(f"🧠 Left out {ss.know_skipped} note(s) you already have.")
       edited = st.data_editor(ss.know_pending, use_container_width=True, hide_index=True, num_rows="dynamic",
                               key=f"know_edit_{ss.get('know_n', 0)}",
                               column_config={"Note": st.column_config.TextColumn(width="large"),
@@ -11069,9 +11102,11 @@ with tab6, guard("Knowledge tab"):
       ks1, ks2 = st.columns(2)
       if ks1.button("💾 Save these notes", type="primary", use_container_width=True):
         n_saved = 0
+        _have = {_note_key(e.get("rule")) for e in knowledge_entries()}
         for i_, row in enumerate(edited or []):
-          if not row.get("Keep") or not str(row.get("Note") or "").strip():
+          if not row.get("Keep") or not str(row.get("Note") or "").strip() or _note_key(row.get("Note")) in _have:
             continue
+          _have.add(_note_key(row.get("Note")))
           store_put("know", datetime.now().strftime("%Y%m%d%H%M%S") + f"{i_:03d}",
                     {"topic": str(row.get("Topic") or "General").strip(), "type": row.get("Type") or "Rule of thumb",
                      "applies_to": str(row.get("Applies to") or "All").strip(), "rule": str(row.get("Note")).strip(),
@@ -11096,11 +11131,14 @@ with tab6, guard("Knowledge tab"):
                                                 "under 1 ms points to a lean cylinder or high secondary resistance.")
       m_src = st.text_input("Source (optional)", placeholder="e.g. my own experience, a class, a book")
       if st.form_submit_button("💾 Save note") and m_rule.strip():
-        store_put("know", datetime.now().strftime("%Y%m%d%H%M%S%f"),
-                  {"topic": m_topic.strip() or "General", "type": m_type, "applies_to": m_app.strip() or "All",
-                   "rule": m_rule.strip(), "source": m_src.strip(), "added": datetime.now().strftime("%Y-%m-%d"),
-                   "tech": ss.get("tech_user") or ""})
-        queue_update(toast="Note saved")
+        if _note_key(m_rule) in {_note_key(e.get("rule")) for e in knowledge_entries()}:
+          st.info("You already have that exact note — nothing saved.")
+        else:
+          store_put("know", datetime.now().strftime("%Y%m%d%H%M%S%f"),
+                    {"topic": m_topic.strip() or "General", "type": m_type, "applies_to": m_app.strip() or "All",
+                     "rule": m_rule.strip(), "source": m_src.strip(), "added": datetime.now().strftime("%Y-%m-%d"),
+                     "tech": ss.get("tech_user") or ""})
+          queue_update(toast="Note saved")
 
   # ---- what the AI will use on THIS car ----
   if entries and (ss.vehicle_info or current_codes()):
