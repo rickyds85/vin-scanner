@@ -13,7 +13,7 @@ import re
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 
 from PIL import Image, ImageEnhance, ImageOps
 import numpy as np
@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-20"
+APP_VERSION = "2026-11-21"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -140,6 +140,9 @@ WHATS_NEW = [
     "NEW: 🔎 Find every reading runs by itself the first time a car is connected, and it reaches a lot more: each make's master "
     "list, multi-frame readings, newer GM (29-bit) computers, Nissan / Infiniti and Stellantis readings that need a diagnostic "
     "session. FIX: cars whose own network is 29-bit (most Hondas) now connect and read correctly",
+    "FIXES from a code review: a clipped or blank stretch in an injector scope capture no longer throws away the whole "
+    "channel's measurements; VIN photos are read by Gemini and Claude at the same time (faster); Claude and DeepSeek retry "
+    "once when their servers are busy; small hardening for two techs using the app at once",
 ]
 
 st.markdown(
@@ -690,7 +693,8 @@ def _store_list_all(kind: str, where_json: str, ver: int, online: bool) -> list[
   while True:
     params = {"kind": f"eq.{kind}", "select": "id,data", "order": "id.asc", "limit": "1000", "offset": str(off)}
     for k, v in where.items():
-      params[f"data->>{k}"] = f"eq.{v}"
+      if re.fullmatch(r"[\w .\-]{1,80}", str(v)):   # plain text only; anything else gets matched below, never sent
+        params[f"data->>{k}"] = f"eq.{v}"
     try:
       r = http().get(_supa_url(), headers=_supa_headers(), params=params, timeout=30)
     except requests.RequestException as e:
@@ -700,7 +704,7 @@ def _store_list_all(kind: str, where_json: str, ver: int, online: bool) -> list[
       _store_error(f"Listing {kind} failed: HTTP {r.status_code}")
       break
     page = r.json()
-    rows += page
+    rows += [x for x in page if all(str((x.get("data") or {}).get(k, "")) == str(v) for k, v in where.items())]
     if len(page) < 1000:
       break
     off += 1000
@@ -990,6 +994,14 @@ def _vunpack(s: str) -> np.ndarray:
   return np.frombuffer(base64.b64decode(s), dtype=np.float16).astype(np.float32)
 
 
+def _embed_warn(e):
+  """Log a meaning-search problem — at most once an hour (it would otherwise repeat on every search)."""
+  s_ = _embed_state()
+  if time.time() - s_.get("warned_at", 0) > 3600:
+    s_["warned_at"] = time.time()
+    log_problem("ai", "Meaning search", str(e))
+
+
 def ensure_vectors(src: str, items: list) -> dict:
   """Fingerprints for these (id, text) items, making and saving any that are missing or out of date. {} if unavailable."""
   mkey = embed_model_key()
@@ -1010,9 +1022,7 @@ def ensure_vectors(src: str, items: list) -> dict:
         except Exception as e:
           if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):   # going too fast for the free tier: finish next time
             break
-          if not _embed_state().get("warned"):
-            _embed_state()["warned"] = True
-            log_problem("ai", "Meaning search", str(e))
+          _embed_warn(e)
           break
         rows = []
         for (sid, t), v in zip(chunk, vecs):
@@ -1035,9 +1045,7 @@ def meaning_scores(query: str, src: str, items: list) -> dict:
       return {}
     q = _query_vec(embed_model_key(), str(query)[:2000])
   except Exception as e:
-    if not _embed_state().get("warned"):
-      _embed_state()["warned"] = True
-      log_problem("ai", "Meaning search", str(e))
+    _embed_warn(e)
     return {}
   return {sid: float(np.dot(v[:len(q)], q[:len(v)])) for sid, v in vecs.items()}
 
@@ -1256,6 +1264,9 @@ def claude(prompt: str, *, max_tokens: int = 4000, timeout: int = 120, image_b64
       if res.status_code == 400 and re.search(r"effort|output_config", res.text or "", re.I):
         _model_swaps()[("no_effort", model)] = True   # this model doesn't take the effort setting: ask without it
         res = post(model)
+      if res.status_code in (429, 500, 502, 503, 504, 529) and attempt == 0:   # busy / overloaded: wait a moment, once
+        time.sleep(2.5)
+        res = post(model)
     except requests.RequestException as e:
       raise AIError(f"Claude connection error: {e}") from e
     if res.status_code != 200:
@@ -1325,6 +1336,10 @@ def _deepseek_raw(key: str, model: str, session: requests.Session, prompt: str, 
     try:
       res = session.post(DEEPSEEK_URL, timeout=timeout, json=body,
                          headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+      if res.status_code in (429, 500, 502, 503, 504):   # busy: wait a moment and try once more
+        time.sleep(2.5)
+        res = session.post(DEEPSEEK_URL, timeout=timeout, json=body,
+                           headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
     except requests.RequestException as e:
       raise RuntimeError(f"DeepSeek connection error: {e}") from e
     return res
@@ -1590,25 +1605,27 @@ def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: b
     gpt_job = pool.submit(_openai_raw, secret("OPENAI_API_KEY"), openai_model(), requests.Session(), gpt_prompt,
                           12000, 150, imgs[:6], "medium", False, _model_swaps())
   try:
-    parts = [{"text": full}] + [{"inline_data": {"mime_type": "image/jpeg", "data": b}} for b in imgs] + (extra_parts or [])
-    draft = gemini(parts, timeout=45 if fast else (180 if extra_parts else 120), think="low" if fast else "high")
-  except AIError as e:
-    gem_err = str(e)
-  deadline = t0 + (75 if fast else 200)   # nobody holds the answer up for long: a draft that isn't in by then is skipped
-  if gpt_job:
     try:
-      gpt_draft = gpt_job.result(timeout=max(5, deadline - time.time()))
-    except Exception as e:
-      log_problem("ai", "ChatGPT draft", str(e) or "took too long")
-    _note_openai_swap()
-  if ds_job:
-    try:   # with two drafts already in, the third opinion gets a short grace period, not the whole wait
-      ds_draft = ds_job.result(timeout=max(5, min(deadline - time.time(), 30 if (draft and gpt_draft) else 999)))
-    except Exception as e:
-      log_problem("ai", "DeepSeek draft", str(e) or "took too long — the others didn't wait for it")
-    _note_deepseek_swap()
-  if pool:
-    pool.shutdown(wait=False)
+      parts = [{"text": full}] + [{"inline_data": {"mime_type": "image/jpeg", "data": b}} for b in imgs] + (extra_parts or [])
+      draft = gemini(parts, timeout=45 if fast else (180 if extra_parts else 120), think="low" if fast else "high")
+    except AIError as e:
+      gem_err = str(e)
+    deadline = t0 + (75 if fast else 200)   # nobody holds the answer up for long: a draft that isn't in by then is skipped
+    if gpt_job:
+      try:
+        gpt_draft = gpt_job.result(timeout=max(5, deadline - time.time()))
+      except Exception as e:
+        log_problem("ai", "ChatGPT draft", str(e) or "took too long")
+      _note_openai_swap()
+    if ds_job:
+      try:   # with two drafts already in, the third opinion gets a short grace period, not the whole wait
+        ds_draft = ds_job.result(timeout=max(5, min(deadline - time.time(), 30 if (draft and gpt_draft) else 999)))
+      except Exception as e:
+        log_problem("ai", "DeepSeek draft", str(e) or "took too long — the others didn't wait for it")
+      _note_deepseek_swap()
+  finally:   # even if this run is interrupted (you tapped something else), the helpers are let go
+    if pool:
+      pool.shutdown(wait=False, cancel_futures=True)
   more = {"gpt": gpt_draft, "judge": ""}
   have = [x for x in (("Gemini", draft), ("ChatGPT", gpt_draft), ("DeepSeek", ds_draft)) if x[1]]
   blocks = []
@@ -1770,9 +1787,35 @@ def _jpeg_b64(img: Image.Image, max_side: int) -> str:
   return base64.b64encode(b.getvalue()).decode()
 
 
+def _side_thread(fn):
+  """Run fn() on a side thread that can still use the app's own helpers (Secrets, model fallback, problem log).
+  Returns a Future — or None when this Streamlit can't do it (the caller then simply runs fn() itself)."""
+  try:
+    from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
+    ctx = get_script_run_ctx()
+  except Exception:
+    return None
+  if ctx is None:
+    return None
+  fut = Future()
+  def work():
+    try:
+      fut.set_result(fn())
+    except BaseException as e:
+      fut.set_exception(e)
+  th = threading.Thread(target=work, daemon=True, name="ai-side")
+  add_script_run_ctx(th, ctx)
+  th.start()
+  return fut
+
+
 def _ai_vin_reads(img: Image.Image) -> dict:
-  """Ask Gemini (and Claude, if its key is set) to read the printed VIN. Returns {model: [vins]}."""
+  """Ask Gemini (and Claude, if its key is set) to read the printed VIN — both at once. Returns {model: [vins]}."""
   reads = {}
+  def by_claude():
+    txt = claude(VIN_READ_PROMPT, max_tokens=3000, timeout=60, image_b64=_jpeg_b64(img, 1568), effort="low")
+    return [c for v in ((find_json(txt, dict) or {}).get("vins") or []) for c in clean_vin_text(str(v))]
+  job = _side_thread(by_claude) if has_claude() else None   # Claude starts reading while Gemini does
   try:
     raw = gemini([{"text": VIN_READ_PROMPT}, {"inline_data": {"mime_type": "image/jpeg", "data": _jpeg_b64(img, 2048)}}],
                  json_mode=True, timeout=40, think="low")
@@ -1781,11 +1824,8 @@ def _ai_vin_reads(img: Image.Image) -> dict:
     pass
   if has_claude():
     try:
-      txt = claude(VIN_READ_PROMPT, max_tokens=3000, timeout=60, image_b64=_jpeg_b64(img, 1568), effort="low")
-      obj = find_json(txt, dict)
-      vins = (obj or {}).get("vins", []) or []
-      reads["Claude"] = [c for v in vins for c in clean_vin_text(str(v))]
-    except AIError:
+      reads["Claude"] = job.result(timeout=90) if job else by_claude()
+    except Exception:
       pass   # already in the problem log
   return reads
 
@@ -2556,8 +2596,9 @@ def _inj_v(t, y, dt):
     if k >= len(y):
       break
     seg = y[k: k + int(0.003 / dt)]
-    kick = float(np.nanmax(seg)) if len(seg) else None
-    kick_i = int(np.nanargmax(seg)) if len(seg) else 0
+    seen = len(seg) > 0 and bool(np.isfinite(seg).any())   # blank here = the scope clipped (∞) or the probe dropped out
+    kick = float(np.nanmax(seg)) if seen else None
+    kick_i = int(np.nanargmax(seg)) if seen else 0
     tail = seg[kick_i:]
     settle = next((i for i in range(len(tail)) if tail[i] < supply + 1.0), None)
     bump = False
@@ -9814,7 +9855,7 @@ def start_ai_job(job_id: str, fn) -> bool:
   if ctx is None:
     return False
   jobs = _ai_jobs()
-  for k in [k for k, v in jobs.items() if time.time() - v.get("started", 0) > 3600]:
+  for k in [k for k, v in list(jobs.items()) if time.time() - v.get("started", 0) > 3600]:
     jobs.pop(k, None)   # tidy up anything nobody collected
   if job_id in jobs:
     return True
