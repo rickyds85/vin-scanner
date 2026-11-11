@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-19"
+APP_VERSION = "2026-11-20"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -126,6 +126,20 @@ WHATS_NEW = [
     "📖 Knowledge → Learn from book pages or a PDF turns a PDF into notes (pick the pages if it's a big one)",
     "BETTER: 📖 Knowledge leaves out notes you already have when it reads pages or a PDF (same words, or same meaning with the "
     "same numbers) — you only see the new ones",
+    "NEW: 💬 ChatGPT joined the AI team (add OPENAI_API_KEY in Secrets). Who does what now: Perplexity searches the web · Gemini "
+    "watches videos, listens, reads PDFs and writes a draft · ChatGPT writes its own diagnosis (it sees your photos) · DeepSeek "
+    "gives a third opinion · Claude checks every draft against the data and writes the final answer. If one is down its backup "
+    "takes over (ChatGPT can do the final check and the web search). See ⚙️ → Setup → Who does what",
+    "BETTER THINKING: every AI is told to reason from the evidence (what was measured, what each reading rules in or out, the "
+    "test that separates the top causes); Claude's final check runs at high effort; DeepSeek and Gemini think it through "
+    "instead of rushing; test plans get deeper web research; wiring diagrams are read twice by two different AIs and any pin "
+    "or wire color they read differently is flagged",
+    "NEW: 📊 Every standard reading — all ~190 SAE PIDs are built in (second O2 banks, wide-range O2, torque, turbo, EGR, diesel "
+    "aftertreatment, hybrid battery, trans gear…). The car is only asked for the ones it supports; they show under the Std "
+    "groups. The freeze frame now shows everything the car stored, and 🪪 Computer software shows the calibration IDs",
+    "NEW: 🔎 Find every reading runs by itself the first time a car is connected, and it reaches a lot more: each make's master "
+    "list, multi-frame readings, newer GM (29-bit) computers, Nissan / Infiniti and Stellantis readings that need a diagnostic "
+    "session. FIX: cars whose own network is 29-bit (most Hondas) now connect and read correctly",
 ]
 
 st.markdown(
@@ -721,6 +735,12 @@ def img_part(img: Image.Image) -> dict:
   return {"inline_data": {"mime_type": "image/jpeg", "data": base64.b64encode(b.getvalue()).decode()}}
 
 
+@st.cache_resource
+def _model_swaps() -> dict:
+  """Shared notes about the AI models: a retired name -> its replacement, settings a model doesn't take."""
+  return {}
+
+
 def gemini_model() -> str:
   return ss.get("_gemini_model_ok") or secret("GEMINI_MODEL") or GEMINI_DEFAULT_MODEL
 
@@ -730,23 +750,42 @@ def gemini_label() -> str:
   return m
 
 
-def gemini(parts: list, *, json_mode: bool = False, timeout: int = 60) -> str:
+def gemini(parts: list, *, json_mode: bool = False, timeout: int = 60, think: str | None = None) -> str:
+  """Ask Gemini. `think` is how hard it reasons before it answers: "minimal" / "low" / "medium" / "high" (None = the
+  model's own default, which is medium). Diagnosis drafts and the video / PDF / diagram reports ask for "high"; quick
+  reads (voice, a scan-tool screen) ask for "low" so they stay fast. A model that doesn't take the setting is asked
+  again without it, and if Google is busy (429 / 5xx) the request is tried once more."""
   key = secret("GEMINI_API_KEY")
   if not key:
     raise AIError("GEMINI_API_KEY is missing from Streamlit Secrets.")
-  payload = {"contents": [{"parts": parts}]}
-  if json_mode:
-    payload["generationConfig"] = {"response_mime_type": "application/json"}
   model = gemini_model()
-  for attempt in range(2):
+  fell_back = retried = False
+  res = None
+  for _attempt in range(5):
+    cfg = {}
+    if json_mode:
+      cfg["response_mime_type"] = "application/json"
+    if think and not _model_swaps().get(("gemini_no_think", model)):
+      cfg["thinkingConfig"] = {"thinkingLevel": think}
+    payload = {"contents": [{"parts": parts}]}
+    if cfg:
+      payload["generationConfig"] = cfg
     try:
       res = http().post(GEMINI_URL.format(model=model), headers={"x-goog-api-key": key}, json=payload, timeout=timeout)
     except requests.RequestException as e:
       raise AIError(f"Gemini connection error: {e}") from e
+    if res.status_code == 400 and "thinkingConfig" in cfg and re.search(r"think", res.text or "", re.I):
+      _model_swaps()[("gemini_no_think", model)] = True   # this model doesn't take a thinking level: ask without it
+      continue
     # Model not available on this key/region -> fall back once to the older model
-    if res.status_code in (400, 404) and model != GEMINI_FALLBACK_MODEL and "model" in res.text.lower() and attempt == 0:
+    if res.status_code in (400, 404) and model != GEMINI_FALLBACK_MODEL and "model" in res.text.lower() and not fell_back:
       model = GEMINI_FALLBACK_MODEL
       ss["_gemini_model_ok"] = model
+      fell_back = True
+      continue
+    if res.status_code in (429, 500, 502, 503, 504) and not retried:   # busy: wait a moment and try once more
+      retried = True
+      time.sleep(2.5)
       continue
     break
   if res.status_code != 200:
@@ -1018,17 +1057,20 @@ def ask_gemini(prompt: str) -> str:
     return f"⚠️ {e}"
 
 
-def ask_perplexity(prompt: str, preset: str = "low") -> str:
+def ask_perplexity(prompt: str, effort: str = "low", timeout: int = 60) -> str:
+  """Perplexity's search agent. effort = how deep it digs: "low" (a few searches, quick) · "medium" (chains many
+  searches across sources) · "high" (deep and slow)."""
   key = secret("PERPLEXITY_API_KEY")
   if not key:
     return "⚠️ PERPLEXITY_API_KEY is not configured in Streamlit Secrets."
+  def post(field: str):
+    return http().post("https://api.perplexity.ai/v1/responses", timeout=timeout,
+                       headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                       json={field: effort, "input": prompt})
   try:
-    res = http().post(
-        "https://api.perplexity.ai/v1/responses",
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-        json={"preset": preset, "input": prompt},
-        timeout=60,
-    )
+    res = post("effort")
+    if res.status_code in (400, 422):   # an older version of their API calls this setting "preset"
+      res = post("preset")
   except requests.exceptions.Timeout:
     return "⚠️ Request timed out. Please try again."
   except requests.RequestException as e:
@@ -1046,11 +1088,26 @@ def ask_perplexity(prompt: str, preset: str = "low") -> str:
   return text or "No response text received."
 
 
-# --- AI TEAM: Perplexity researches the web, Gemini reasons over everything ---
-def web_research(vehicle: str, codes: str, symptoms: str, question: str = "") -> str:
-  """Perplexity looks up live sources. Returns '' if not configured or it fails."""
-  if not secret("PERPLEXITY_API_KEY"):
-    return ""
+# --- AI TEAM: who does what ---
+# 🌐 Perplexity   web research (TSBs, recalls, known fixes) — built for live search with sources. Backup: ChatGPT web search.
+# ✨ Gemini       the eyes and ears: watches videos, listens to voice, reads PDFs and scan-tool screens; first draft.
+# 💬 ChatGPT      an independent second diagnosis (it sees the photos too); backup for the final check and quick answers.
+# 🐋 DeepSeek     a third opinion from the text alone — cheap, and it reasons differently from the others.
+# 🧠 Claude       the senior tech: checks every draft against the data, writes the final answer; step cards, diagrams, notes.
+AI_ROLES = [
+    ("🌐 Perplexity", "Searches the web for TSBs, recalls and known fixes", "ChatGPT's web search"),
+    ("✨ Gemini", "Watches videos, listens to voice, reads PDFs and your scan tool screen; writes a first draft", "—"),
+    ("💬 ChatGPT", "Writes its own diagnosis without seeing the others (it sees your photos too)", "—"),
+    ("🐋 DeepSeek", "A third opinion from the text alone", "—"),
+    ("🧠 Claude", "The senior tech: checks every draft against the data and writes the final answer; "
+                  "also step cards, wiring diagrams, Knowledge notes and the customer write-ups", "ChatGPT, then Gemini"),
+]
+RESEARCH_BY_GPT = "_Web research by ChatGPT (Perplexity wasn't available)._"
+
+
+def web_research(vehicle: str, codes: str, symptoms: str, question: str = "", deep: bool = False) -> str:
+  """Live web research. Perplexity does it (deep=True chains more searches — used for test plans); if it isn't set up
+  or fails, ChatGPT searches the web instead. Returns '' if nobody could."""
   focus = question or f"fault code(s) {codes or 'none'}; symptoms: {symptoms or 'none given'}"
   prompt = f"""Research for a professional auto technician. Vehicle: {vehicle}. Problem: {focus}.
 Find from current, reputable sources (manufacturer TSBs and recalls, NHTSA, technician forums like iATN, repair databases):
@@ -1059,15 +1116,42 @@ Find from current, reputable sources (manufacturer TSBs and recalls, NHTSA, tech
 3. Published factory specs relevant to testing (resistance, voltage, pressure, duty cycle, pinouts) if available.
 4. Common misdiagnoses or parts that get replaced for nothing.
 Be specific to this vehicle, list sources, and say clearly when something could not be confirmed."""
-  out = ask_perplexity(prompt)
-  if out.startswith("⚠️") or out == "No response text received.":
-    log_problem("ai", "Perplexity web research", out)
-    return ""
+  out = ""
+  if secret("PERPLEXITY_API_KEY"):
+    out = ask_perplexity(prompt, "medium" if deep else "low", 100 if deep else 60)
+    if deep and out.startswith("⚠️"):   # the deeper search failed or ran out of time: one quick search instead
+      out = ask_perplexity(prompt, "low", 45)
+    if out.startswith("⚠️") or out == "No response text received.":
+      log_problem("ai", "Perplexity web research", out)
+      out = ""
+  if not out and has_openai():
+    try:
+      out = RESEARCH_BY_GPT + "\n\n" + chatgpt(prompt, max_tokens=6000, timeout=150, effort="low", web=True)
+    except AIError:
+      out = ""
   return out
 
 
+# How every AI on the team is told to reason through a diagnosis (added to the drafts and to the final check)
+DIAG_THINK = """
+
+HOW TO THINK IT THROUGH (do this before you write; show the result, not the scratch work):
+1. Evidence first. List what was actually MEASURED or read (codes and what sets them, freeze frame, live data, test
+   results) apart from what is only assumed or reported by the customer.
+2. For each likely cause ask: if this were the fault, what would the data show? Does it? Drop every cause the data
+   already rules out, and say which reading ruled it out.
+3. Rank what's left by how well it explains ALL the evidence (one cause that explains everything beats two that each
+   explain half), then by how common it is on this platform.
+4. Choose the next test by what it will tell you: the fastest, cheapest test whose result separates the top causes.
+   Say what each result would mean.
+5. Never condemn a part on a code alone — name the test and the reading that proves it. If the evidence isn't enough
+   yet, say so and say exactly what is missing.
+(If the question is just a fact or a spec, skip all this and answer it.)
+"""
+
+
 TEAM_RULES = """
-WEB RESEARCH FROM PERPLEXITY (live sources; may contain errors):
+WEB RESEARCH (live sources; may contain errors):
 {research}
 
 TEAM RULES:
@@ -1079,11 +1163,6 @@ TEAM RULES:
 
 
 # --- When a model name is retired: ask the provider which models this key can use and switch to the closest one ---
-@st.cache_resource
-def _model_swaps() -> dict:
-  return {}
-
-
 _MODEL_GONE = re.compile(r"model[^\n]{0,60}(not[ _](exist|found|available|supported)|does ?n[o']t exist|invalid|deprecated|retired)"
                          r"|(unknown|invalid|unsupported|nonexistent)[ _]model|not_found_error", re.I)
 
@@ -1233,11 +1312,12 @@ def _deepseek_replacement(key: str, session: requests.Session, wanted: str) -> s
 
 
 def _deepseek_raw(key: str, model: str, session: requests.Session, prompt: str, max_tokens: int, timeout: int,
-                  swaps: dict | None = None) -> str:
+                  swaps: dict | None = None, think: bool = False) -> str:
   """No Streamlit calls in here, so it is safe to run in a background thread.
-  DeepSeek "thinks" by default, and the thinking counts against max_tokens — on a big job it could use the
-  whole budget and return an EMPTY answer. Its job here is a fast second-opinion draft (Claude does the deep
-  review), so thinking is switched off. If an empty answer still comes back, one retry with a bigger budget."""
+  DeepSeek "thinks" by default, and the thinking counts against max_tokens — on a small budget it can use the whole
+  thing and return an EMPTY answer. think=False (quick jobs) switches thinking off. think=True (a full diagnosis)
+  lets it reason, with a budget big enough for the thinking AND the answer; if the answer still comes back empty,
+  it is asked once more without thinking."""
   def call(think_off: bool, budget: int):
     body = {"model": model, "max_tokens": budget, "messages": [{"role": "user", "content": prompt}]}
     if think_off:
@@ -1248,7 +1328,8 @@ def _deepseek_raw(key: str, model: str, session: requests.Session, prompt: str, 
     except requests.RequestException as e:
       raise RuntimeError(f"DeepSeek connection error: {e}") from e
     return res
-  res = call(True, max_tokens)
+  off, budget0 = not think, (max(max_tokens, 16000) if think else max_tokens)
+  res = call(off, budget0)
   if _model_error(res) and "think" not in res.text.lower():   # model name retired -> switch to one this key has
     alt = _deepseek_replacement(key, session, model)
     if alt:
@@ -1256,7 +1337,7 @@ def _deepseek_raw(key: str, model: str, session: requests.Session, prompt: str, 
         swaps[("deepseek", model)] = alt
         swaps["_deepseek_note"] = (model, alt)
       model = alt
-      res = call(True, max_tokens)
+      res = call(off, budget0)
   if res.status_code == 400 and "think" in res.text.lower():   # this model doesn't take the switch: ask normally
     res = call(False, max(max_tokens, 12000))
   if res.status_code != 200:
@@ -1268,7 +1349,7 @@ def _deepseek_raw(key: str, model: str, session: requests.Session, prompt: str, 
     raise RuntimeError("DeepSeek returned an unreadable answer.") from e
   text = msg.get("content") or ""
   if not text.strip() and choice.get("finish_reason") == "length":
-    res = call(False, max(max_tokens * 3, 12000))
+    res = call(False, max(max_tokens * 3, 12000)) if off else call(True, max_tokens)   # thinking ate the budget
     try:
       choice = res.json()["choices"][0]
       msg = choice["message"]
@@ -1300,104 +1381,307 @@ def _note_deepseek_swap():
                                         f"Put DEEPSEEK_MODEL = \"{note[1]}\" in Secrets to make it permanent.")
 
 
-REVIEW_PROMPT = """You are the senior master technician on a diagnostic team. Perplexity searched the web, and Gemini and DeepSeek each wrote a first-draft plan on their own.
-Your job: produce the FINAL plan the technician will follow.
+# --- ChatGPT (OpenAI): an independent second diagnosis, and the backup for the final check ---
+OPENAI_URL = "https://api.openai.com/v1/responses"
+OPENAI_MODELS_URL = "https://api.openai.com/v1/models"
+OPENAI_DEFAULT_MODEL = "gpt-6.1-sol"   # change with OPENAI_MODEL in Secrets (e.g. gpt-6-astra = their most capable)
+_OPENAI_NOT_CHAT = re.compile(r"image|audio|realtime|transcri|tts|whisper|embed|moderat|search|cyber|rosalind|daybreak|"
+                              r"codex|live|translate|instruct", re.I)
+
+
+def has_openai() -> bool:
+  return bool(secret("OPENAI_API_KEY"))
+
+
+def openai_model() -> str:
+  wanted = secret("OPENAI_MODEL") or OPENAI_DEFAULT_MODEL
+  return _model_swaps().get(("openai", wanted), wanted)
+
+
+def openai_label() -> str:
+  m = re.sub(r"^gpt-", "", openai_model())
+  return "ChatGPT " + " ".join(w.upper() if w in ("gpt",) else w.capitalize() for w in m.split("-"))
+
+
+def _openai_pick(ids: list, wanted: str) -> str | None:
+  """The closest model this key can use: same family name first (sol / astra / terra / luna), newest version first."""
+  def ver(i):
+    m = re.match(r"gpt-(\d+)(?:\.(\d+))?", i)
+    return (int(m.group(1)), int(m.group(2) or 0)) if m else (0, 0)
+  ids = [i for i in ids if i and i != wanted and i.startswith("gpt-") and not _OPENAI_NOT_CHAT.search(i)
+         and not re.search(r"\d{4}-\d{2}-\d{2}$", i)]
+  if not ids:
+    return None
+  fam = next((w for w in ("sol", "astra", "terra", "luna", "pro", "mini", "nano") if re.search(rf"\b{w}\b", wanted)), "sol")
+  order = [fam] + [w for w in ("sol", "astra", "terra", "luna") if w != fam]
+  for want in order:
+    hit = sorted((i for i in ids if re.search(rf"\b{want}\b", i)), key=ver, reverse=True)
+    if hit:
+      return hit[0]
+  return sorted(ids, key=ver, reverse=True)[0]
+
+
+def _openai_replacement(key: str, session: requests.Session, wanted: str) -> str | None:
+  """Thread-safe (no Streamlit calls): ask OpenAI which models this key can use."""
+  try:
+    r = session.get(OPENAI_MODELS_URL, headers={"Authorization": f"Bearer {key}"}, timeout=15)
+    ids = [m.get("id", "") for m in (r.json().get("data") or [])] if r.status_code == 200 else []
+  except (requests.RequestException, ValueError):
+    ids = []
+  return _openai_pick(ids, wanted)
+
+
+def _openai_raw(key: str, model: str, session: requests.Session, prompt: str, max_tokens: int, timeout: int,
+                images: list | None = None, effort: str | None = "medium", web: bool = False,
+                swaps: dict | None = None) -> str:
+  """One question to ChatGPT (OpenAI's Responses API). No Streamlit calls in here, so it is safe in a background thread.
+  effort = how hard it reasons (low / medium / high). The reasoning counts against max_tokens, so if the answer comes
+  back empty because the thinking used the whole budget, it is asked once more with a bigger budget at low effort.
+  web=True lets it search the web. A setting this model doesn't take is dropped and the question is asked again."""
+  content = [{"type": "input_text", "text": prompt}] + [
+      {"type": "input_image", "image_url": "data:image/jpeg;base64," + b} for b in (images or []) if b]
+  drop = set()
+  def call(mdl: str, eff: str | None, budget: int):
+    body = {"model": mdl, "input": [{"role": "user", "content": content}], "max_output_tokens": budget, "store": False}
+    if eff:
+      body["reasoning"] = {"effort": eff}
+    if web:
+      body["tools"] = [{"type": "web_search"}]
+    for k in drop:
+      body.pop(k, None)
+    try:
+      return session.post(OPENAI_URL, timeout=timeout, json=body,
+                          headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+    except requests.RequestException as e:
+      raise RuntimeError(f"ChatGPT connection error: {e}") from e
+  def ask(eff: str | None, budget: int):
+    nonlocal model
+    res = call(model, eff, budget)
+    if _model_error(res) or (res.status_code in (400, 404) and "model_not_found" in (res.text or "")):
+      alt = _openai_replacement(key, session, model)   # model name retired -> switch to one this key has
+      if alt:
+        if swaps is not None:
+          swaps[("openai", model)] = alt
+          swaps["_openai_note"] = (model, alt)
+        model = alt
+        res = call(model, eff, budget)
+    for _ in range(3):   # a setting this model doesn't take ("reasoning", "store", ...): drop it and ask again
+      m = re.search(r"(?:Unsupported|Unknown|Unrecognized|Invalid)[^'\"]{0,40}(?:parameter|argument|value)[^'\"]{0,20}['\"]([a-z_]+)",
+                    res.text or "", re.I) if res.status_code == 400 else None
+      if not m or m.group(1) not in ("reasoning", "store", "tools", "max_output_tokens"):
+        break
+      if m.group(1) == "tools" and web:
+        raise RuntimeError(f"ChatGPT model {model} can't search the web.")
+      drop.add(m.group(1))
+      res = call(model, eff, budget)
+    if res.status_code in (429, 500, 502, 503, 504) and "insufficient_quota" not in (res.text or ""):
+      time.sleep(2.5)   # busy: one more try
+      res = call(model, eff, budget)
+    if res.status_code != 200:
+      why = res.text[:300]
+      if "insufficient_quota" in why:
+        why = "the OpenAI account is out of credit (add credit at platform.openai.com → Billing)."
+      raise RuntimeError(f"ChatGPT API error ({res.status_code}, {model}): {why}")
+    try:
+      data = res.json()
+      text = "".join(c.get("text", "") for item in (data.get("output") or []) if item.get("type") == "message"
+                     for c in (item.get("content") or []) if c.get("type") in ("output_text", "text"))
+    except (ValueError, AttributeError) as e:
+      raise RuntimeError("ChatGPT returned an unreadable answer.") from e
+    return text, data
+  text, data = ask(effort, max_tokens)
+  if not text.strip() and (data.get("incomplete_details") or {}).get("reason") == "max_output_tokens":
+    text, data = ask("low" if effort else None, min(max(max_tokens * 2, 16000), 64000))
+  if not text.strip():
+    raise RuntimeError(f"ChatGPT returned an empty answer (status={data.get('status')}, "
+                       f"reason={(data.get('incomplete_details') or {}).get('reason')}).")
+  if data.get("status") == "incomplete":
+    text += "\n\n_(ChatGPT's answer hit the length limit and may be cut off.)_"
+  return text
+
+
+def _note_openai_swap():
+  note = _model_swaps().pop("_openai_note", None)
+  if note:
+    log_problem("ai", "ChatGPT model", f"Model '{note[0]}' isn't available on your key any more — switched to '{note[1]}'. "
+                                       f"Put OPENAI_MODEL = \"{note[1]}\" in Secrets to make it permanent.")
+
+
+def chatgpt(prompt: str, *, max_tokens: int = 8000, timeout: int = 150, image_b64="", effort: str | None = "medium",
+            web: bool = False) -> str:
+  key = secret("OPENAI_API_KEY")
+  if not key:
+    raise AIError("OPENAI_API_KEY is missing from Streamlit Secrets.")
+  try:
+    return _openai_raw(key, openai_model(), http(), prompt, max_tokens, timeout, _img_list(image_b64)[:6], effort, web,
+                       _model_swaps())
+  except RuntimeError as e:
+    raise AIError(str(e)) from e
+  finally:
+    _note_openai_swap()
+
+
+REVIEW_PROMPT = """You are the senior master technician on a diagnostic team. {writers} each wrote a first-draft answer on their own, without seeing each other's work.
+Your job: produce the FINAL answer the technician will follow.
 
 ORIGINAL TASK (vehicle, codes, symptoms, scan data and test results, plus required format):
 {task}
 
-WEB RESEARCH (Perplexity; may contain errors):
+WEB RESEARCH (may contain errors):
 {research}
 
-GEMINI'S DRAFT:
-{draft}
-
-DEEPSEEK'S DRAFT (written separately — a second opinion):
-{ds_draft}
+{drafts}
 
 INSTRUCTIONS:
 - Keep the exact section format the original task requires.
-- Compare both drafts against the scan data, test results and research. Keep the best of each, fix anything wrong, remove generic or irrelevant steps, add important tests or pattern failures it missed.
+- Work from the EVIDENCE in the task (codes, freeze frame, live data, test results), not from the drafts. Then check every draft against it: keep what the evidence supports, fix what it contradicts, remove generic or irrelevant steps, add important tests or pattern failures they missed.
+- Where the drafts disagree, decide by the evidence — not by how many drafts say it. If the evidence can't settle it yet, say so and give the one test that will.
 - If photos are attached (scope / meter capture, wiring diagram, connector, part), look at them yourself and check that what the drafts say they show is right. For wiring diagrams, read wire colors, pin numbers and splice/ground locations carefully.
-- Your main job is making sure NOTHING IS MISSED: any reading, code, alert or test result in the task that neither draft explained, you explain.
-- Order the tests from fastest/cheapest and most likely to least, so the tech doesn't throw parts at it.
+- Your main job is making sure NOTHING IS MISSED: any reading, code, alert or test result in the task that no draft explained, you explain.
+- For every cause you keep, say which reading or test points to it; for every cause the data rules out, say which reading rules it out. Never condemn a part on a code alone.
+- Order the tests from fastest/cheapest and most likely to least, so the tech doesn't throw parts at it. For each test say what result proves or clears the suspect.
 - Never invent TSB numbers or specs; only use ones from the research or that you are sure of.
-- End with "### Team Notes": 2-5 bullets on what you changed, and where Gemini, DeepSeek and the research disagreed and who was right."""
+- End with "### Team Notes": 2-5 bullets on what you changed, and where the drafts and the research disagreed and who was right."""
+
+
+def final_effort() -> str:
+  """How hard Claude thinks on the final check. "high" unless FINAL_CHECK_EFFORT in Secrets says otherwise
+  (medium = faster answers, xhigh = slower and deeper)."""
+  e = (secret("FINAL_CHECK_EFFORT") or "").strip().lower()
+  return e if e in ("low", "medium", "high", "xhigh", "max") else "high"
 
 
 def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: bool, status=None, *,
                 question: str = "", image_b64="", fast: bool = False, research: str = "",
-                effort: str | None = None, extra_parts: list | None = None) -> tuple[str, str, str, str]:
-  """The whole team on one job: Perplexity researches -> Gemini and DeepSeek draft at the same time
-  -> Claude checks both (and the photo, if any) and writes the final answer.
-  Steps are skipped if their key isn't set. fast=True = short answers (live test drive checks).
-  Returns (final answer, research, gemini draft, deepseek draft)."""
-  draft, ds_draft, gem_err = "", "", ""
+                effort: str | None = None, extra_parts: list | None = None) -> tuple[str, str, str, str, dict]:
+  """The whole team on one job: the web is searched -> Gemini, ChatGPT and DeepSeek each write their own draft at the
+  same time, without seeing each other's -> Claude checks every draft against the data (and the photos) and writes
+  the final answer. If Claude can't, ChatGPT does the final check. Steps are skipped if their key isn't set.
+  fast=True = short answers (live test drive checks): Gemini + DeepSeek drafts only, low effort.
+  Returns (final answer, research, Gemini's draft, DeepSeek's draft, more) — more = {"gpt": ChatGPT's draft,
+  "judge": who did the final check}."""
+  draft, ds_draft, gpt_draft, gem_err = "", "", "", ""
+  imgs = _img_list(image_b64)
   tokens = 900 if fast else 4000
+  t0 = time.time()
   if use_web and not research:
     if status:
-      status.update(label="🌐 Perplexity is researching TSBs, recalls and known fixes...")
-    research = web_research(vehicle, codes, symptoms, question=question)
-  full = prompt + (TEAM_RULES.format(research=research[:6000]) if research else "")
-  writers = f"✨ {gemini_label()}" + (f" and 🐋 {deepseek_label()} are" if has_deepseek() else " is")
+      status.update(label="🌐 Searching the web for TSBs, recalls and known fixes...")
+    research = web_research(vehicle, codes, symptoms, question=question, deep=not question and not fast)
+  full = prompt + ("" if fast else DIAG_THINK) + (TEAM_RULES.format(research=research[:6000]) if research else "")
+  use_ds, use_gpt = has_deepseek(), has_openai() and not fast
+  names = [f"✨ {gemini_label()}"] + ([f"💬 {openai_label()}"] if use_gpt else []) + ([f"🐋 {deepseek_label()}"] if use_ds else [])
   if status:
-    status.update(label=f"{writers} working on it" + (" with the web research..." if research else "..."))
-  pool, ds_job = None, None
-  if has_deepseek():   # DeepSeek runs in the background while Gemini works, so it adds no wait time
-    ds_prompt = full + ("\n\nNOTE: the technician attached photo(s) or a video that you cannot see. "
-                        "Work from the text (and the VIDEO REPORT, if there is one); another technician is looking at them."
-                        if _img_list(image_b64) or extra_parts else "")
-    pool = ThreadPoolExecutor(max_workers=1)
+    status.update(label=(", ".join(names[:-1]) + " and " + names[-1] + " are each" if len(names) > 1 else names[0] + " is")
+                  + " working on it" + (" with the web research..." if research else "..."))
+  pool = ThreadPoolExecutor(max_workers=2) if (use_ds or use_gpt) else None
+  ds_job = gpt_job = None
+  if use_ds:   # DeepSeek and ChatGPT run in the background while Gemini works, so they add little or no wait
+    ds_prompt = full + ("\n\nNOTE: the technician attached photo(s), a video or a PDF that you cannot see. "
+                        "Work from the text (and the VIDEO REPORT / PDF REPORT, if there is one); another technician is "
+                        "looking at them." if imgs or extra_parts else "")
     # its own connection: the shared one isn't guaranteed safe while Gemini uses it at the same time
     ds_job = pool.submit(_deepseek_raw, secret("DEEPSEEK_API_KEY"), deepseek_model(), requests.Session(),
-                         ds_prompt, tokens, 60 if fast else 120, _model_swaps())
+                         ds_prompt, tokens, 60 if fast else 150, _model_swaps(), not fast)
+  if use_gpt:
+    gpt_prompt = full + ("\n\nNOTE: the technician attached a video or PDF that you cannot open. Work from the VIDEO "
+                         "REPORT / PDF REPORT in the task; another technician is looking at the file itself."
+                         if extra_parts else "")
+    gpt_job = pool.submit(_openai_raw, secret("OPENAI_API_KEY"), openai_model(), requests.Session(), gpt_prompt,
+                          12000, 150, imgs[:6], "medium", False, _model_swaps())
   try:
-    parts = [{"text": full}] + [{"inline_data": {"mime_type": "image/jpeg", "data": b}} for b in _img_list(image_b64)] + (extra_parts or [])
-    draft = gemini(parts, timeout=45 if fast else (150 if extra_parts else 60))
+    parts = [{"text": full}] + [{"inline_data": {"mime_type": "image/jpeg", "data": b}} for b in imgs] + (extra_parts or [])
+    draft = gemini(parts, timeout=45 if fast else (180 if extra_parts else 120), think="low" if fast else "high")
   except AIError as e:
     gem_err = str(e)
-  if ds_job:
+  deadline = t0 + (75 if fast else 200)   # nobody holds the answer up for long: a draft that isn't in by then is skipped
+  if gpt_job:
     try:
-      ds_draft = ds_job.result(timeout=90 if fast else 200)
+      gpt_draft = gpt_job.result(timeout=max(5, deadline - time.time()))
     except Exception as e:
-      log_problem("ai", "DeepSeek draft", str(e))
-      ds_draft = ""
+      log_problem("ai", "ChatGPT draft", str(e) or "took too long")
+    _note_openai_swap()
+  if ds_job:
+    try:   # with two drafts already in, the third opinion gets a short grace period, not the whole wait
+      ds_draft = ds_job.result(timeout=max(5, min(deadline - time.time(), 30 if (draft and gpt_draft) else 999)))
+    except Exception as e:
+      log_problem("ai", "DeepSeek draft", str(e) or "took too long — the others didn't wait for it")
     _note_deepseek_swap()
+  if pool:
     pool.shutdown(wait=False)
+  more = {"gpt": gpt_draft, "judge": ""}
+  have = [x for x in (("Gemini", draft), ("ChatGPT", gpt_draft), ("DeepSeek", ds_draft)) if x[1]]
+  blocks = []
+  for who, text in (("GEMINI", draft), ("CHATGPT", gpt_draft), ("DEEPSEEK", ds_draft)):
+    if who == "CHATGPT" and not use_gpt:
+      continue
+    if who == "DEEPSEEK" and not use_ds:
+      continue
+    sees = {"GEMINI": "saw the photos / video / PDF itself" if (imgs or extra_parts) else "",
+            "CHATGPT": "saw the photos" if imgs else "",
+            "DEEPSEEK": "text only — it could not see the photos or files" if (imgs or extra_parts) else ""}[who]
+    blocks.append(f"{who}'S DRAFT" + (f" ({sees})" if sees else "") + ":\n" + (text or f"({who.title()} draft unavailable)"))
+  review = REVIEW_PROMPT.format(task=prompt, research=research[:6000] or "none", drafts="\n\n".join(blocks),
+                                writers=" and ".join(", ".join(n for n, _ in have).rsplit(", ", 1)) or "The other AIs") \
+      + ("\n\nKeep the final answer SHORT (the tech is driving): under 120 words, then 1-2 Team Notes bullets." if fast else "")
+  why = ""
   if has_claude():
     if status:
-      status.update(label=f"🧠 {claude_label()} is checking everyone's work so nothing is missed...")
+      status.update(label=f"🧠 {claude_label()} is checking everyone's work against the data so nothing is missed...")
     try:
-      final = claude(REVIEW_PROMPT.format(task=prompt, research=research[:6000] or "none",
-                                          draft=draft or "(Gemini draft unavailable)",
-                                          ds_draft=ds_draft or "(DeepSeek draft unavailable)")
-                     + ("\n\nKeep the final answer SHORT (the tech is driving): under 120 words, then 1-2 Team Notes bullets." if fast else ""),
-                     max_tokens=4000 if fast else 16000, timeout=60 if fast else 150, image_b64=image_b64,
-                     effort=effort or ("low" if fast else "medium"))
-      return final, research, draft, ds_draft
+      final = claude(review, max_tokens=4000 if fast else 32000, timeout=60 if fast else 240, image_b64=image_b64,
+                     effort=effort or ("low" if fast else final_effort()))
+      more["judge"] = "claude"
+      return final, research, draft, ds_draft, more
     except AIError as e:
-      best = draft or ds_draft
-      if best:
-        return best + f"\n\n_⚠️ Claude review unavailable: {e}_", research, "", (ds_draft if draft else "")
-  if draft:
-    return draft, research, "", ds_draft
-  if ds_draft:
-    return ds_draft + (f"\n\n_⚠️ Gemini failed: {gem_err}_" if gem_err else ""), research, "", ""
-  return (f"⚠️ Gemini failed ({gem_err}). Showing Perplexity's research instead:\n\n{research}" if research else f"⚠️ {gem_err}"), research, "", ""
+      why = str(e)
+  if has_openai() and not (len(have) == 1 and gpt_draft):   # Claude couldn't (or isn't set up): ChatGPT checks
+    if status:
+      status.update(label=f"💬 {openai_label()} is doing the final check...")
+    try:
+      final = chatgpt(review, max_tokens=6000 if fast else 24000, timeout=60 if fast else 200, image_b64=imgs[:6],
+                      effort="low" if fast else "high")
+      more["judge"] = "chatgpt"
+      return final + (f"\n\n_⚠️ Claude wasn't available ({why}) — ChatGPT did the final check._" if why else ""), \
+          research, draft, ds_draft, more
+    except AIError as e:
+      why = why or str(e)
+  best = draft or gpt_draft or ds_draft
+  if best:
+    note = f"\n\n_⚠️ Final check unavailable: {why}_" if why else (f"\n\n_⚠️ Gemini failed: {gem_err}_" if gem_err and not draft else "")
+    # only the draft that is shown counts as "who answered"
+    return best + note, research, "", (ds_draft if best is ds_draft else ""), {"gpt": gpt_draft if best is gpt_draft else "",
+                                                                                "judge": "", "solo": "gemini" if best is draft else ""}
+  return (f"⚠️ Gemini failed ({gem_err}). Showing the web research instead:\n\n{research}" if research else f"⚠️ {gem_err}"), \
+      research, "", "", more
 
 
-def team_names(draft: str, ds_draft: str, research: str) -> str:
-  return " + ".join(x for x in ["🌐 Perplexity" if research else "", "✨ " + gemini_label() if draft or not has_claude() else "",
-                                "🐋 " + deepseek_label() if ds_draft else "", "🧠 " + claude_label() if (draft or ds_draft) and has_claude() else ""] if x)
+def team_names(draft: str, ds_draft: str, research: str, more: dict | None = None) -> str:
+  """Who worked on an answer, for the small line under it."""
+  more = more or {}
+  judge = more.get("judge", "claude" if (draft or ds_draft) and has_claude() else "")
+  return " + ".join(x for x in [
+      ("🌐 ChatGPT web search" if research.startswith(RESEARCH_BY_GPT) else "🌐 Perplexity") if research else "",
+      "✨ " + gemini_label() if draft or more.get("solo") == "gemini" or (not judge and not ds_draft and not more.get("gpt")) else "",
+      "💬 " + openai_label() if more.get("gpt") else "",
+      "🐋 " + deepseek_label() if ds_draft else "",
+      "🧠 " + claude_label() if judge == "claude" else ("🧠 " + openai_label() + " (final check)" if judge == "chatgpt" else ""),
+  ] if x)
 
 
 def quick_ai(prompt: str, image_b64="", max_tokens: int = 4000, effort: str = "low") -> tuple[str, str]:
-  """One AI, one answer: Claude if its key is set, otherwise Gemini. Returns (answer, who answered)."""
+  """One AI, one answer: Claude if its key is set, then ChatGPT, then Gemini. Returns (answer, who answered)."""
   if has_claude():
     try:
       return claude(prompt, max_tokens=max_tokens, timeout=90, image_b64=image_b64, effort=effort), "🧠 " + claude_label()
     except AIError:
-      pass   # fall through to Gemini
+      pass   # fall through
+  if has_openai():
+    try:
+      return chatgpt(prompt, max_tokens=max(max_tokens, 6000), timeout=90, image_b64=image_b64, effort=effort), \
+          "💬 " + openai_label()
+    except AIError:
+      pass
   try:
     parts = [{"text": prompt}] + [{"inline_data": {"mime_type": "image/jpeg", "data": b}} for b in _img_list(image_b64)]
     return gemini(parts, timeout=60), "✨ " + gemini_label()
@@ -1491,7 +1775,7 @@ def _ai_vin_reads(img: Image.Image) -> dict:
   reads = {}
   try:
     raw = gemini([{"text": VIN_READ_PROMPT}, {"inline_data": {"mime_type": "image/jpeg", "data": _jpeg_b64(img, 2048)}}],
-                 json_mode=True, timeout=40)
+                 json_mode=True, timeout=40, think="low")
     reads["Gemini"] = [c for v in (json.loads(raw).get("vins") or []) for c in clean_vin_text(str(v))]
   except (AIError, ValueError, AttributeError):
     pass
@@ -1552,7 +1836,7 @@ def extract_customer(img_bytes: bytes) -> dict:
   ask = ("Read this work order / invoice. Extract ONLY the customer name, address, phone number, email and odometer/mileage."
          " Return a JSON object with keys 'customer_name', 'address', 'phone', 'email', 'odometer' (empty string if missing).")
   try:
-    return json.loads(gemini([{"text": ask}, img_part(img)], json_mode=True, timeout=25))
+    return json.loads(gemini([{"text": ask}, img_part(img)], json_mode=True, timeout=25, think="low"))
   except (AIError, ValueError):
     if not has_claude():
       raise
@@ -1637,14 +1921,17 @@ def set_manual_vehicle(year: str, make: str, model: str, trim: str, engine: str)
 
 # --- Vehicle-specific factory data from the open OBD database (github.com/OBDb) ---
 OBDB_RAW = "https://raw.githubusercontent.com/OBDb/{repo}/{branch}/signalsets/v3/default.json"
-OBDB_MAKE_NAMES = {"GMC": "GMC", "BMW": "BMW", "MINI": "MINI", "MERCEDES-BENZ": "Mercedes-Benz", "LAND ROVER": "Land-Rover"}
+OBDB_MAKE_NAMES = {"GMC": "GMC", "BMW": "BMW", "MINI": "MINI", "MERCEDES-BENZ": "Mercedes-Benz", "LAND ROVER": "Land-Rover",
+                   "INFINITI": "INFINITI", "ALFA ROMEO": "Alfa-Romeo", "FIAT": "Fiat", "MG": "MG", "BYD": "BYD", "RAM": "Ram",
+                   "ROLLS-ROYCE": "Rolls-Royce", "SMART": "smart"}
 OBDB_SKIP_PATHS = {"Trips", "Seatbelts", "Lights", "Doors", "Clocks", "Details", "Stats", "DTCs", "ECU", "Cruise control"}
 OBDB_UNITS = {
     "celsius": "C", "fahrenheit": "F", "kilopascal": "kPa", "psi": "psi", "bars": "bar", "volts": "V", "millivolts": "mV",
     "rpm": "rpm", "percent": "%", "degrees": "deg", "scalar": "", "unknown": "", "kilometersPerHour": "kph",
     "kilometers": "km", "miles": "mi", "offon": "onoff", "onoff": "onoff", "noyes": "yesno", "yesno": "yesno",
     "milliseconds": "ms", "seconds": "s", "minutes": "min", "hours": "h", "milliamps": "mA", "amps": "A",
-    "gramsPerSecond": "gps", "newtonMeters": "Nm", "liters": "L", "hex": "hex", "metersPerSecondSquared": "m/s²",
+    "gramsPerSecond": "g/s", "newtonMeters": "Nm", "liters": "L", "hex": "hex", "metersPerSecondSquared": "m/s²",
+    "litersPerHour": "L/h", "kilowattHours": "kWh",
     "gravity": "g", "ampereHours": "Ah", "kilowatts": "kW", "millimeters": "mm", "megaohms": "MΩ",
 }
 
@@ -1655,7 +1942,8 @@ def _obdb_repo_candidates(make: str, model: str) -> list[str]:
   cands = [mdl.replace(" ", "-"), mdl.split(" ")[0]]
   if mdl.split(" ")[0] in ("Silverado", "Sierra"):
     cands.append(mdl.split(" ")[0] + "-1500")
-  return list(dict.fromkeys(f"{mk}-{c}" for c in cands if c))
+  # last: the make's own master list (every factory request known for the make) when there is no list for this model
+  return list(dict.fromkeys([f"{mk}-{c}" for c in cands if c] + [mk]))
 
 
 def _year_ok(f: dict | None, year: int) -> bool:
@@ -1668,9 +1956,56 @@ def _year_ok(f: dict | None, year: int) -> bool:
   return f.get("from", 0) <= year <= f.get("to", 9999)
 
 
+OBDB_SAFE_SESSIONS = {"03", "C0"}   # extended diagnostic session / Nissan's: what every scan tool opens to read data
+
+
+def obdb_parse(cmds: list, year: int) -> list[dict]:
+  """One OBDb list -> the readings the scanner can ask for. Reads only (service 21 / 22). Left out: BMW-style extended
+  addressing and K-line requests (this adapter path can't do them), and requests needing an unusual diagnostic session."""
+  out = []
+  for c in cmds or []:
+    hdr, rax = str(c.get("hdr", "")).upper(), str(c.get("rax", "")).upper()
+    if c.get("eax") or c.get("proto") or c.get("baud") or c.get("init"):
+      continue
+    if not (re.fullmatch(r"[0-9A-F]{3}", hdr) or (re.fullmatch(r"[0-9A-F]{4}", hdr) and (hdr.startswith("DA") or len(rax) >= 6))):
+      continue
+    din = str(c.get("din") or "").upper()
+    if din and din not in OBDB_SAFE_SESSIONS:
+      continue
+    if not _year_ok(c.get("filter"), year):
+      continue
+    svc, pid = next(iter((c.get("cmd") or {}).items()), ("", ""))
+    if svc not in ("21", "22"):
+      continue
+    ext = len(hdr) == 4
+    extra = {}
+    if ext and c.get("pri"):
+      extra["pri"] = str(c["pri"]).upper()   # 29-bit priority byte (14 on newer GM, 17 VW group, 1D Volvo / Mazda)
+    if ext and c.get("tst"):
+      extra["tst"] = str(c["tst"]).upper()   # tester address when it isn't F1
+    if din:
+      extra["din"] = din
+      if c.get("dout"):
+        extra["dout"] = str(c["dout"]).upper()
+    for sig in c.get("signals", []):
+      f = sig.get("fmt", {})
+      if sig.get("path") in OBDB_SKIP_PATHS or not f.get("len") or f.get("len") > 32:
+        continue
+      out.append({
+          "hdr": hdr, "rax": rax, "req": f"{svc}{pid}".upper(),
+          "bix": f.get("bix", 0), "len": f["len"], "mul": f.get("mul", 1), "div": f.get("div", 1), "add": f.get("add", 0),
+          "sign": bool(f.get("sign")), "lsb": bool(f.get("blsb")), "unit": OBDB_UNITS.get(f.get("unit", ""), f.get("unit", "")),
+          "min": f.get("min"), "max": f.get("max"), "nmin": f.get("nullmin"), "nmax": f.get("nullmax"),
+          "map": {k: (v.get("description") or v.get("value")) if isinstance(v, dict) else v for k, v in f["map"].items()} if f.get("map") else None,
+          "name": sig.get("name", sig.get("id", "")), "path": sig.get("path", ""), **extra,
+      })
+  return out
+
+
 @st.cache_data(ttl=86400, show_spinner=False, max_entries=200)
 def obdb_signals(make: str, model: str, year: str) -> tuple[str, list[dict]]:
-  """Download this exact model's factory data definitions (one small JSON file) and trim it for the scanner."""
+  """Download this exact model's factory data definitions (one small JSON file) and trim it for the scanner. If the
+  database has no list for the model, the make's master list is used instead."""
   if not make or not model:
     return "", []
   y = int(year) if str(year).isdigit() else 0
@@ -1689,28 +2024,7 @@ def obdb_signals(make: str, model: str, year: str) -> tuple[str, list[dict]]:
       cmds = r.json().get("commands", [])
     except ValueError:
       continue
-    out = []
-    for c in cmds:
-      hdr = str(c.get("hdr", "")).upper()
-      if c.get("eax") or c.get("tst") or c.get("fcm1") or c.get("pri") or not re.fullmatch(r"[0-9A-F]{3}|DA[0-9A-F]{2}", hdr):
-        continue
-      if not _year_ok(c.get("filter"), y):
-        continue
-      svc, pid = next(iter(c.get("cmd", {}).items()), ("", ""))
-      if svc in ("01", "02", "09") or not svc:
-        continue
-      for sig in c.get("signals", []):
-        f = sig.get("fmt", {})
-        if sig.get("path") in OBDB_SKIP_PATHS or not f.get("len") or f.get("len") > 32:
-          continue
-        out.append({
-            "hdr": hdr, "rax": str(c.get("rax", "")).upper(), "req": f"{svc}{pid}".upper(),
-            "bix": f.get("bix", 0), "len": f["len"], "mul": f.get("mul", 1), "div": f.get("div", 1), "add": f.get("add", 0),
-            "sign": bool(f.get("sign")), "lsb": bool(f.get("blsb")), "unit": OBDB_UNITS.get(f.get("unit", ""), f.get("unit", "")),
-            "min": f.get("min"), "max": f.get("max"), "nmin": f.get("nullmin"), "nmax": f.get("nullmax"),
-            "map": {k: (v.get("description") or v.get("value")) if isinstance(v, dict) else v for k, v in f["map"].items()} if f.get("map") else None,
-            "name": sig.get("name", sig.get("id", "")), "path": sig.get("path", ""),
-        })
+    out = obdb_parse(cmds, y)
     if out:
       return repo, out
   return "", []
@@ -1743,19 +2057,23 @@ def save_learned(ev: dict):
   if not k:
     ss._toast = "Set the vehicle first (VIN search) so the readings it found can be saved for this car."
     return
-  if not new:
+  if not new and not ev.get("complete"):
     return
   old = learned_readings(vd)
-  key = lambda g: (g.get("hdr"), g.get("rax", ""), g.get("req"))
+  key = lambda g: (g.get("hdr"), g.get("rax", ""), g.get("req"), g.get("pri", ""), g.get("tst", ""))
   keys = {key(g) for g in new}
-  merged = [g for g in (old.get("sigs") or []) if key(g) not in keys] + new
+  merged = [g for g in (old.get("sigs") or []) if key(g) not in keys and not str(g.get("req", "")).startswith("01")] + new
   rec = {"vehicle": ss.vehicle_info, "vin": ss.active_vin, "sigs": merged[:6000], "lid": str(ev.get("id") or ""),
          "requests": len({key(g) for g in merged}), "readings": len(merged), "tech": ss.get("tech_user") or "",
-         "at": datetime.now().strftime("%Y-%m-%d %I:%M %p")}
+         "at": datetime.now().strftime("%Y-%m-%d %I:%M %p"),
+         # ver = the whole search finished on this kind of car (so it isn't run again on the next connect)
+         "ver": int(ev.get("ver") or 0) if ev.get("complete") else int(old.get("ver") or 0),
+         "checked": int(ev.get("checked") or 0)}
   store_put("oemmap", k, rec)
   ss.setdefault("_learned", {})[k] = rec
-  ss._toast = (f"🔎 Learned {int(ev.get('found') or len(new))} factory readings for this {ss.vehicle_info or 'car'} — "
-               "saved, so next time they show up right away")
+  if new:
+    ss._toast = (f"🔎 Learned {int(ev.get('found') or len(new))} factory readings for this {ss.vehicle_info or 'car'} — "
+                 "saved, so next time they show up right away")
 
 
 def make_profile() -> str:
@@ -2996,6 +3314,43 @@ Read the diagram carefully and return JSON only:
  "unclear": "<anything too small, blurry or cut off to read — or ''>"}}
 Use only what you can read on the diagram. Never guess a pin number or wire color — put it in "unclear" instead."""
 
+DIAGRAM_CHECK_PROMPT = """You are the second set of eyes on a wiring diagram. Another technician read the attached diagram
+and wrote the reading below. A wrong pin number or wire color sends the tech to the wrong wire, so check it.
+Vehicle: {vehicle} · Circuit: {circuit}
+
+THEIR READING:
+{reading}
+
+Look at the diagram yourself. For every connector ID, pin / cavity number, wire color, splice, ground, fuse and module
+pin in their reading, check it against what is printed on the diagram.
+Return JSON only: {{"differences": ["<what they wrote> — on the diagram I read <what you read>", ...],
+"missed": ["<anything on the diagram the tests need that they left out>", ...]}}
+List a difference only if you can clearly read it differently. If everything matches, return {{"differences": [], "missed": []}}."""
+
+
+def diagram_second_look(b64: str, circuit: str, obj: dict, first_reader: str) -> str:
+  """A different AI re-reads the diagram and compares it with the first reading. Returns a note for the tech
+  ('' when they agree or no second AI is set up)."""
+  reading = json.dumps({k: obj.get(k) for k in ("summary", "tests")}, ensure_ascii=False)[:6000]
+  ask = DIAGRAM_CHECK_PROMPT.format(vehicle=ss.vehicle_info or "not given", circuit=circuit, reading=reading)
+  try:
+    if has_openai() and "ChatGPT" not in first_reader:
+      raw, who = chatgpt(ask, max_tokens=8000, timeout=120, image_b64=b64, effort="medium"), "ChatGPT"
+    elif secret("GEMINI_API_KEY") and "Gemini" not in first_reader:
+      raw, who = gemini([{"text": ask}, {"inline_data": {"mime_type": "image/jpeg", "data": b64}}], json_mode=True,
+                        timeout=90, think="high"), "Gemini"
+    else:
+      return ""
+  except AIError:
+    return ""
+  chk = find_json(raw, dict) or {}
+  diffs = [str(x) for x in (chk.get("differences") or []) if str(x).strip()][:8]
+  missed = [str(x) for x in (chk.get("missed") or []) if str(x).strip()][:5]
+  if not diffs and not missed:
+    return f"✅ {who} re-read the diagram and agrees with every pin and wire color."
+  return (f"⚠️ {who} re-read the diagram and saw these differently — check them on the diagram before you probe: "
+          + " · ".join(diffs + ["(left out) " + m for m in missed]))
+
 
 def _norm_circ(c) -> set:
   return set(re.findall(r"[a-z0-9]+", str(c or "").lower())) - KN_STOP - {"circuit", "wiring", "diagram", "the", "to"}
@@ -3059,6 +3414,8 @@ def diagram_context() -> str:
       out.append(f"  · hookup{(' for step ' + str(t.get('step'))) if t.get('step') else ''}: {str(t.get('hookup', ''))[:400]}")
     if r.get("unclear"):
       out.append(f"  · couldn't read on the diagram: {r['unclear']}")
+    if str(r.get("second") or "").startswith("⚠️"):
+      out.append(f"  · second reader's note (the two readings differ here — tell the tech to verify these on the diagram): {r['second']}")
   return "\n".join(out)
 
 
@@ -3081,11 +3438,13 @@ def process_diagram(img_bytes: bytes, circuit: str, step_ids: list):
   with st.spinner("📐 The AI is reading the wiring diagram..."):
     raw, who = quick_ai(DIAGRAM_READ_PROMPT.format(vehicle=ss.vehicle_info or "not given", circuit=circuit,
                                                    tests=tests or "(general checks of this circuit — power, ground, signal)"),
-                        image_b64=b64, max_tokens=6000, effort="medium")
+                        image_b64=b64, max_tokens=12000, effort="high")
   if str(raw).startswith("⚠️"):
     ss._toast = "Couldn't read the diagram: " + str(raw)[2:150]
     st.rerun()
   obj = find_json(raw, dict) or {"summary": str(raw)[:3000], "tests": [], "unclear": ""}
+  with st.spinner("📐 A second AI is double-checking the pins and wire colors..."):
+    obj["second"] = diagram_second_look(b64, circuit, obj, who)
   autosave_job(force=True)
   rid = f"{ss.get('job_id') or 'nojob'}-{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
   rec = {"job": ss.get("job_id") or "", "vin": ss.get("active_vin") or "", "vehicle": ss.vehicle_info or "", "circuit": circuit,
@@ -3157,6 +3516,8 @@ def diagrams_panel(fold: bool = False):
           b.markdown(f"- {'Step ' + str(t.get('step')) + ': ' if t.get('step') else ''}{t.get('hookup', '')}")
         if r.get("unclear"):
           b.caption(f"⚠️ Couldn't read: {r['unclear']}")
+        if r.get("second"):
+          b.caption(r["second"])
         if b.button("🗑️ Remove", key=f"dgdel_{d['_id']}"):
           store_delete("diagram", d["_id"])
           ss.diagrams_nojob = [x for x in (ss.get("diagrams_nojob") or []) if x.get("_id") != d["_id"]]
@@ -3474,7 +3835,8 @@ def setup_panel():
   checks = [
       ("🔑 Shop login", bool(shop_users())), ("💾 Permanent storage", store_on()),
       ("✨ Gemini (main AI)", bool(secret("GEMINI_API_KEY"))), ("🧠 Claude review", has_claude()),
-      ("🐋 DeepSeek 2nd opinion", has_deepseek()), ("🌐 Perplexity research", bool(secret("PERPLEXITY_API_KEY"))),
+      ("💬 ChatGPT 2nd diagnosis", has_openai()), ("🐋 DeepSeek 3rd opinion", has_deepseek()),
+      ("🌐 Perplexity research", bool(secret("PERPLEXITY_API_KEY"))),
       ("📧 Email reports", email_ready()), ("💬 Text customers", sms_ready()), ("📲 Phone alerts (ntfy)", ntfy_ready()),
       ("🧠 Meaning search", bool(embed_provider())),
   ]
@@ -3490,7 +3852,7 @@ def setup_panel():
       st.caption("Turn one on by adding its key in **Manage app → Settings → Secrets**:  \n"
                  "login → APP_PASSWORD (or APP_USERS = \"Name:pass, Name2:pass2\")  \n"
                  "storage → SUPABASE_URL + SUPABASE_KEY  \n"
-                 "AIs → GEMINI_API_KEY · ANTHROPIC_API_KEY · DEEPSEEK_API_KEY · PERPLEXITY_API_KEY  \n"
+                 "AIs → GEMINI_API_KEY · ANTHROPIC_API_KEY · OPENAI_API_KEY (ChatGPT) · DEEPSEEK_API_KEY · PERPLEXITY_API_KEY  \n"
                  "email → SMTP_USER + SMTP_PASSWORD (Gmail app password)  \n"
                  "texting → TWILIO_SID + TWILIO_TOKEN + TWILIO_FROM  \n"
                  "phone alerts → NTFY_TOPIC (make up a long name, subscribe to it in the free ntfy app)  \n"
@@ -3501,6 +3863,15 @@ def setup_panel():
       st.toast("Sent — check your phone")
     if embed_provider():
       st.caption(f"🧠 Meaning search: {embed_model_key()}")
+    st.markdown("**🤝 Who does what on the AI team**")
+    _on = {"🌐 Perplexity": bool(secret("PERPLEXITY_API_KEY")), "✨ Gemini": bool(secret("GEMINI_API_KEY")),
+           "💬 ChatGPT": has_openai(), "🐋 DeepSeek": has_deepseek(), "🧠 Claude": has_claude()}
+    st.markdown("  \n".join(("✅ " if _on.get(n) else "⬜ ") + f"**{n}** — {job}" + (f" _(backup: {bk})_" if bk != "—" else "")
+                             for n, job, bk in AI_ROLES))
+    st.caption(f"Models: {gemini_label()} · {claude_label()}" + (f" · {openai_label()}" if has_openai() else "")
+               + (f" · {deepseek_label()}" if has_deepseek() else "")
+               + "  \nEach AI is told to think it through before it answers; the final check runs at high effort. If an AI "
+                 "is down, its backup takes over and the answer says so.")
 
 
 # ⚙️ Settings sit in the top-right corner (setup, Simple view, keep screen on, what's new)
@@ -3576,7 +3947,7 @@ def build_step_cards() -> bool:
                                            symptoms=(ss.symptoms or "").strip() or "not given", plan=plan[:9000],
                                            methods="\n".join(f"- {m['kid']}: [{m.get('topic', '')}] {m.get('rule', '')}" for m in methods)
                                            or "(none on file for this job)") + diagram_context(),
-                        max_tokens=8000, effort="low")
+                        max_tokens=12000, effort="medium")
   obj = find_json(raw, dict) or {}
   steps = [x for x in (obj.get("steps") or []) if isinstance(x, dict) and str(x.get("title") or "").strip()]
   if not steps:
@@ -3644,7 +4015,8 @@ def step_cards_panel(simple: bool):
       hook = [t for t in rd.get("tests") or [] if str(t.get("step")) == str(idx + 1)]
       st.markdown(f'<div class="tdg-card tdg-blue"><b>📐 From your wiring diagram ({e(str(dg.get("circuit", "")))}):</b><br>'
                   f'{e(str(hook[0].get("hookup") if hook else str(rd.get("summary", ""))[:700]))}'
-                  + (f'<br><small>⚠️ couldn\'t read: {e(str(rd.get("unclear")))}</small>' if rd.get("unclear") else "") + "</div>",
+                  + (f'<br><small>⚠️ couldn\'t read: {e(str(rd.get("unclear")))}</small>' if rd.get("unclear") else "")
+                  + (f'<br><small>{e(str(rd.get("second")))}</small>' if rd.get("second") else "") + "</div>",
                   unsafe_allow_html=True)
     else:
       with st.container(border=True):
@@ -4294,6 +4666,7 @@ canvas.tplot { background: rgba(15,22,36,.85); border: 1px solid var(--line); bo
   <div id="dtcBox" class="box">Codes are read automatically on connect.</div>
   <div id="clearWarn" class="box" style="display:none;border-color:var(--o);color:var(--o);font-weight:700"></div>
   <div id="ffBox" class="box" style="display:none"></div>
+  <div id="ecuBox" class="box" style="display:none"></div>
   <h3 style="color:var(--b)">🧭 ALL MODULES <span id="modNote" class="note">ABS, airbag, body, HVAC, cluster… scanned automatically after connect</span></h3>
   <div id="modBox" class="box">Not scanned yet.</div>
 
@@ -4318,11 +4691,11 @@ canvas.tplot { background: rgba(15,22,36,.85); border: 1px solid var(--line); bo
 
   <h3 style="color:var(--p)">🏭 OEM ENHANCED DATA <span id="enhNote" class="note">connect to scan this vehicle's modules</span></h3>
   <div class="bar" style="margin-bottom:6px"><button id="huntBtn" class="tbtn" disabled>🔎 Find every reading this car has</button>
-    <span class="note">Tries every factory request on file for this make and its sister brands, plus every standard reading, and keeps
-    the ones this car answers. About 2–5 minutes with the key on (engine running is best). What it finds is saved for next time.</span></div>
+    <span class="note">Runs by itself the first time a car is connected. Tries every factory request on file for this make and its
+    sister brands and keeps the ones this car answers — 1 to 4 minutes, key on (engine running is best). What it finds is saved for next time.</span></div>
   <div id="huntBox" class="box" hidden></div>
   <div id="enhBox" class="enh"><div class="box">Factory-level readings appear here as each module answers.</div></div>
-  <div class="note" style="margin:-10px 0 16px">Definitions from the open OBD database (OBDb, github.com/OBDb). Some are model-year specific, so sanity-check new readings against a factory scan tool. ≈ = from a sister model's list.</div>
+  <div class="note" style="margin:-10px 0 16px">Every standard (SAE) reading this car supports is under the "Std" groups. Factory definitions come from the open OBD database (OBDb, github.com/OBDb, CC BY-SA 4.0). Some are model-year specific, so sanity-check new readings against a factory scan tool. ≈ = from a sister brand's list.</div>
 
   <h3 style="color:var(--b)">📋 I/M READINESS</h3>
   <div id="readyBox" class="box">Loads automatically on connect.</div>
@@ -4350,6 +4723,7 @@ window.addEventListener("message", (e) => {
   const a = e.data.args || {};
   const changed = a.make !== ARGS.make || String(a.year) !== String(ARGS.year) || a.oem_src !== ARGS.oem_src ||
     ((a.learned_id || "") !== (ARGS.learned_id || "") && a.learned_id !== myLearnedId);
+  if (a.vmake !== ARGS.vmake || a.vmodel !== ARGS.vmodel || String(a.year) !== String(ARGS.year)) autoHuntTried = false;
   ARGS = a;
   if (changed && connected) buildEnhanced();
   if (a.ai && a.ai.id && a.ai.id !== lastAiShown) {
@@ -4615,25 +4989,36 @@ const bytesOf = (hex) => { const b = []; for (let i = 0; i + 2 <= hex.length; i 
 const respCode = (svc) => (parseInt(svc, 16) + 0x40).toString(16).toUpperCase().padStart(2, "0");
 
 let isCan = false, curHeader = "7DF", baseHeader = "7DF", batchOK = false, fastOK = true;
-let baseProto = "6", curProto = "6", curCra = "";
-// Point the adapter at one module. 3-char headers are 11-bit CAN (e.g. 7E0, 700);
-// 4-char headers like DA10 are 29-bit (18 DA 10 F1), used by Honda, newer Stellantis, etc.
-async function setAddr(hdr, rax) {
+let baseProto = "6", curProto = "6", curCra = "", curPri = "";
+const base29 = () => baseProto === "7" || baseProto === "9";            // the car's own OBD network uses 29-bit IDs (most Hondas)
+const funcHeader = () => (base29() ? "DB33" : "7DF");                   // "everyone answer": 7DF, or 18 DB 33 F1 on 29-bit cars
+// Point the adapter at one module.
+//  3-char headers are 11-bit CAN (7E0, 700, 7B0...). 4-char headers are 29-bit: the ID sent is  pri + hdr + tester.
+//    pri = priority byte: 18 normally (18 DA 10 F1 — Honda, newer Stellantis), 14 on newer GM, 17 on VW group, 1D on Volvo / Mazda
+//    tst = tester address: F1 normally
+//  rax = where the reply comes from: 2 digits = the module's address · 6 digits = the reply ID under the same priority
+//        · 8 digits = the whole reply ID · none = worked out from the header.
+async function setAddr(hdr, rax, pri, tst) {
   if (!isCan) return;
   const ext = hdr.length === 4;
-  const base29 = baseProto === "7" || baseProto === "9";
-  const want = ext ? (base29 ? baseProto : String(+baseProto + 1)) : (base29 ? String(+baseProto - 1) : baseProto);
+  const b29 = base29();
+  const want = ext ? (b29 ? baseProto : String(+baseProto + 1)) : (b29 ? String(+baseProto - 1) : baseProto);
   if (want !== curProto) {
     await sendCmd("ATSP" + want, 500);
-    curProto = want; curHeader = ""; curCra = "?";
-    if (ext) await sendCmd("ATCP18", 400);
+    curProto = want; curHeader = ""; curCra = "?"; curPri = "";
   }
-  const full = ext ? hdr + "F1" : hdr;
-  if (full !== curHeader) { await sendCmd("ATSH" + full, 500); curHeader = full; }
-  let cra = "";
-  if (ext) cra = "18DAF1" + (rax || hdr.slice(2));
-  else if (rax) cra = rax;
+  let full = hdr, cra = "";
+  rax = String(rax || "").toUpperCase();
+  if (ext) {
+    const p = String(pri || "18").toUpperCase(), t = String(tst || "F1").toUpperCase();
+    if (p !== curPri) { await sendCmd("ATCP" + p, 400); curPri = p; }
+    full = hdr + t;
+    if (rax.length === 8) cra = rax;
+    else if (rax.length === 6) cra = p + rax;
+    else if (hdr.startsWith("DA")) cra = p + "DA" + t + (rax || hdr.slice(2));
+  } else if (rax) cra = rax;
   else if (hdr !== "7DF" && !/^7E[0-7]$/.test(hdr)) cra = (parseInt(hdr, 16) + 8).toString(16).toUpperCase();
+  if (full !== curHeader) { await sendCmd("ATSH" + full, 500); curHeader = full; }
   if (cra !== curCra) { await sendCmd(cra ? "ATCRA" + cra : "ATCRA", 400); curCra = cra; }
 }
 const setHeader = (h) => setAddr(h, "");
@@ -5335,7 +5720,7 @@ function fmtOem(sig, v) {
   if ((sig.nmin != null && x <= sig.nmin) || (sig.nmax != null && x >= sig.nmax)) return null;      // "no value" markers
   if ((sig.min != null && x < sig.min - 1e-6) || (sig.max != null && x > sig.max + 1e-6)) return null;  // impossible = wrong layout
   const r1 = (n) => (Math.abs(n) >= 100 ? Math.round(n) : Math.round(n * 10) / 10);
-  switch (sig.unit) {
+  switch (sig.unit || "") {
     case "C": return x <= -39.5 || x > 300 ? null : degF(x) + " °F";
     case "F": return x <= -39.5 || x > 570 ? null : Math.round(x) + " °F";
     case "kPa": return r1(x * 0.145038) + " psi";
@@ -5344,6 +5729,9 @@ function fmtOem(sig, v) {
     case "kph": return Math.round(x * 0.621371) + " mph";
     case "km": return Math.round(x * 0.621371).toLocaleString() + " mi";
     case "Nm": return Math.round(x * 0.737562) + " lb-ft";
+    case "L/h": return (x * 0.264172).toFixed(2) + " gal/h";
+    case "gps": return r1(x) + " g/s";
+    case "s": return x >= 600 ? Math.floor(x / 3600) + " h " + Math.floor((x % 3600) / 60) + " min" : r1(x) + " s";
     case "onoff": case "onoff2": return x ? "ON" : "OFF";
     case "yesno": case "noyes": return x ? "YES" : "NO";
     case "hex": return v.toString(16).toUpperCase();
@@ -5351,7 +5739,7 @@ function fmtOem(sig, v) {
     case "%": return r1(x) + "%";
     case "deg": return r1(x) + "°";
     case "": return String(r1(x));
-    default: return r1(x) + " " + sig.unit;
+    default: return r1(x) + (sig.unit ? " " + sig.unit : "");
   }
 }
 // Readings that can't physically be right mean the factory data list doesn't fit this car (wrong year or layout): hide them.
@@ -5394,8 +5782,10 @@ const PATH_GROUP = {
   "Movement": "Wheel speeds & motion", "Orientation": "Wheel speeds & motion", "Climate": "Climate & A/C",
 };
 const GROUP_ORDER = ["Engine", "Transmission", "Misfire counters", "Fuel & air", "Electrical", "Tire pressure (TPMS)",
-  "Chassis, ABS & steering", "Wheel speeds & motion", "Climate & A/C", "More standard readings", "Other"];
-const GROUP_CLOSED = new Set(["Chassis, ABS & steering", "Wheel speeds & motion", "Climate & A/C", "More standard readings", "Other"]);
+  "Chassis, ABS & steering", "Wheel speeds & motion", "Climate & A/C", "Std · engine", "Std · fuel & O2",
+  "Std · emissions & diesel", "Std · hybrid / EV", "More standard readings", "Other"];
+const GROUP_CLOSED = new Set(["Chassis, ABS & steering", "Wheel speeds & motion", "Climate & A/C", "Std · engine", "Std · fuel & O2",
+  "Std · emissions & diesel", "Std · hybrid / EV", "More standard readings", "Other"]);
 function oemGroup(sig) {
   if (sig.grp) return sig.grp;
   if (sig.path) return PATH_GROUP[sig.path] || "Other";
@@ -5426,30 +5816,36 @@ function buildEnhanced() {
   const year = parseInt(ARGS.year, 10) || 0;
   const model = usingModelData();
   const base = !isCan ? [] : model ? ARGS.oem : (OEM_DB[profile()] || []).filter((g) => yearOk(g.yrs, year));
-  const learned = isCan && Array.isArray(ARGS.learned) ? ARGS.learned : [];   // what 🔎 Find every reading found on this car before
-  const lkeys = new Set(learned.map((g) => g.hdr + "|" + g.rax + "|" + g.req));
-  const sigs = [...learned, ...base.filter((g) => !lkeys.has(g.hdr + "|" + g.rax + "|" + g.req))].map((g) => Object.assign({}, g));
+  // what 🔎 Find every reading found on this car before (standard readings are built in now, so old saved ones are dropped)
+  const learned = isCan && Array.isArray(ARGS.learned) ? ARGS.learned.filter((g) => !String(g.req || "").startsWith("01")) : [];
+  const lkeys = new Set(learned.map(cmdKey));
+  // every other standard reading this car says it supports (the main screen already shows the common ones)
+  const std = isCan && sup01 ? STD_SIGS.filter((g) => sup01.has(g.req.slice(2))).map((g) => Object.assign({}, g, { hdr: baseHeader })) : [];
+  const sigs = [...learned, ...base.filter((g) => !lkeys.has(cmdKey(g))), ...std].map((g) => Object.assign({}, g));
   const byCmd = new Map();
   sigs.forEach((g) => {
     prepSig(g);
-    const k = g.hdr + "|" + g.rax + "|" + g.req;
-    if (!byCmd.has(k)) byCmd.set(k, { hdr: g.hdr, rax: g.rax, req: g.req, sigs: [], state: "new", miss: 0 });
+    const k = cmdKey(g);
+    if (!byCmd.has(k)) byCmd.set(k, { hdr: g.hdr, rax: g.rax || "", req: g.req, pri: g.pri, tst: g.tst, din: g.din, dout: g.dout,
+                                      std: !!g.std, sigs: [], state: "new", miss: 0 });
     byCmd.get(k).sigs.push(g);
   });
   oemCmds = [...byCmd.values()];
   if (!model) {
     // Make-level list mixes layouts from several models: keep one layout per quantity so values never conflict.
     oemCmds.forEach((c) => {
+      if (c.std) return;
       const seen = new Set();
       c.sigs = c.sigs.filter((g) => (seen.has(g.label) ? false : (seen.add(g.label), true)));
     });
   }
   // Probe the most useful systems first
-  const rank = (c) => Math.min(...c.sigs.map((g) => GROUP_ORDER.indexOf(g.group)));
+  // standard readings first (the car already said it has them), then the most useful systems
+  const rank = (c) => (c.std ? -1 : Math.min(...c.sigs.map((g) => { const i = GROUP_ORDER.indexOf(g.group); return i < 0 ? 99 : i; })));
   oemCmds.sort((a, b) => rank(a) - rank(b));
   oemRR = 0; oemFound = 0; oemModules = {}; oemTile.n = 0;
   $("enhBox").innerHTML = '<div class="box">' + (oemCmds.length
-    ? `Checking ${oemCmds.length} factory data requests (${esc(oemSourceName())}${learned.length ? " + what this car taught the app" : ""})…`
+    ? `Checking ${oemCmds.length} requests (${esc(oemSourceName() || "standard readings")}${learned.length ? " + what this car taught the app" : ""})…`
     : (isCan ? "No factory definitions for this exact vehicle yet. Tap 🔎 Find every reading this car has to try every list for this make."
              : "OEM data needs a CAN vehicle (most 2008+).")) + "</div>";
   updateEnhNote();
@@ -5475,7 +5871,7 @@ function oemTile(sig) {
     box.insertBefore(sec, after || null);
   }
   const id = "oem" + (oemTile.n = (oemTile.n || 0) + 1);
-  LABEL[id] = `${sig.label} [OEM ${sig.hdr} ${sig.req}]`;
+  LABEL[id] = sig.std ? `${sig.label} [PID ${sig.req.slice(2)}]` : `${sig.label} [OEM ${sig.hdr} ${sig.req}]`;
   sec.lastElementChild.insertAdjacentHTML("beforeend",
     `<div class="tile" id="t_${id}" title="${esc(sig.hdr + " " + sig.req)}"><div class="l">${esc(sig.label)}</div><div class="v" id="v_${id}" style="color:var(--p)">--</div></div>`);
   sec.querySelector(".cnt").textContent = `(${sec.lastElementChild.children.length})`;
@@ -5488,15 +5884,28 @@ function oemTile(sig) {
 //  - 7F 22 7E / 7F = "not allowed in this session": open the extended diagnostic session (10 03) on that
 //    module once and try again. 7F xx 31 (not supported) and 7F xx 33 (security locked) are left alone.
 const extSession = {};   // header -> true (opened OK) / false (module refused it, don't try again)
+const sessAt = {}, sessOut = new Map();   // sessions this pass opened: when, and how to close them again
 async function readOem(cmd, retry = true) {
-  await setAddr(cmd.hdr, cmd.rax);
+  await setAddr(cmd.hdr, cmd.rax, cmd.pri, cmd.tst);
+  if (cmd.din) {   // this request only answers inside a diagnostic session (Nissan's 10 C0, some Stellantis 10 03): open it first
+    const k = cmd.hdr + "|" + cmd.din;
+    if (sessAt[k] === false) return { bytes: null, replied: true };   // this module refused the session: don't keep asking
+    if (!(sessAt[k] && performance.now() - sessAt[k] < 2500)) {   // sessions lapse after a few seconds: open it again
+      const r = messages(await sendCmd("10" + cmd.din, 1200));
+      if (r.some((m) => m.startsWith("50" + cmd.din))) {
+        sessAt[k] = performance.now();
+        if (cmd.dout) sessOut.set(k, cmd);
+      } else if (r.some((m) => m.startsWith("7F10"))) { sessAt[k] = false; return { bytes: null, replied: true }; }
+      else return { bytes: null, replied: r.length > 0 };
+    }
+  }
   const pre = respCode(cmd.req.slice(0, 2)) + cmd.req.slice(2);
   const nrc = (ms) => { const m = ms.find((x) => x.startsWith("7F")); return m ? m.slice(4, 6) : ""; };
   let msgs = messages(await sendCmd(cmd.req, 500));
   if (!msgs.some((m) => m.startsWith(pre)) && nrc(msgs) === "78") msgs = messages(await sendCmd(cmd.req, 2500));
   for (const m of msgs) if (m.startsWith(pre)) return { bytes: bytesOf(m.slice(pre.length)), replied: true };
   const code = nrc(msgs);
-  if (retry && cmd.req.startsWith("22") && (code === "7E" || code === "7F") && extSession[cmd.hdr] !== false) {
+  if (retry && !cmd.din && cmd.req.startsWith("22") && (code === "7E" || code === "7F") && extSession[cmd.hdr] !== false) {
     const r = messages(await sendCmd("1003", 1500));
     const ok = r.some((m) => m.startsWith("5003"));
     if (!ok && extSession[cmd.hdr] !== true) extSession[cmd.hdr] = false;
@@ -5507,6 +5916,27 @@ async function readOem(cmd, retry = true) {
     }
   }
   return { bytes: null, replied: msgs.length > 0 };   // any reply (even a refusal) means the module is there
+}
+// Put modules back in their normal session when the list says how (Nissan: 10 81)
+async function closeSessions() {
+  for (const [k, cmd] of sessOut) {
+    try { await setAddr(cmd.hdr, cmd.rax, cmd.pri, cmd.tst); await sendCmd("10" + cmd.dout, 600); } catch (e) {}
+    delete sessAt[k];
+  }
+  sessOut.clear();
+}
+// One request's data bytes -> the readings in it. wrong = it disagrees with the same thing read the standard way.
+function decodeCmd(c, bytes) {
+  const vals = [];
+  for (const g of c.sigs) {
+    if (g.sup != null && !((bytes[g.sup >> 3] >> (7 - (g.sup & 7))) & 1)) continue;   // the car says this sensor isn't fitted
+    const v = extractBits(bytes, g.bix, g.len, g.lsb, g.sign);
+    const text = v == null ? null : fmtOem(g, v);
+    if (text == null) continue;
+    if (!g.std && oemDisagrees(g, text)) return { vals: [], wrong: true };
+    if (g.std || oemSane(g, text)) vals.push([g, text]);
+  }
+  return { vals, wrong: false };
 }
 async function pollEnhanced() {
   const fresh = oemCmds.filter((c) => c.state === "new").slice(0, 6);      // discovery: probe a few new requests
@@ -5520,19 +5950,12 @@ async function pollEnhanced() {
   const jobs = [...fresh, ...due].sort((a, b) => (a.hdr + a.rax).localeCompare(b.hdr + b.rax));   // fewer module switches
   for (const c of jobs) {
     if (c.state === "dead") continue;
-    const mod = oemModules[c.hdr] || (oemModules[c.hdr] = { alive: false, silent: 0 });
+    const mk = c.hdr + "|" + (c.pri || "") + "|" + (c.tst || "");
+    const mod = oemModules[mk] || (oemModules[mk] = { alive: false, silent: 0 });
     const { bytes, replied } = await readOem(c);
     if (replied || bytes) mod.alive = true; else mod.silent++;
-    let any = false, wrong = false;
-    const vals = [];
-    if (bytes) for (const g of c.sigs) {
-      const v = extractBits(bytes, g.bix, g.len, g.lsb, g.sign);
-      const text = v == null ? null : fmtOem(g, v);
-      if (text == null) continue;
-      if (oemDisagrees(g, text)) { wrong = true; break; }
-      if (!oemSane(g, text)) continue;
-      vals.push([g, text]);
-    }
+    let any = false;
+    const { vals, wrong } = bytes ? decodeCmd(c, bytes) : { vals: [], wrong: false };
     if (wrong) {   // it disagrees with the same reading done the standard way: this request's layout doesn't fit this car
       c.state = "dead";
       c.sigs.forEach((g) => { delete shown[oemTile(g)]; delete num[oemTile(g)]; });
@@ -5544,8 +5967,10 @@ async function pollEnhanced() {
     else if (any) c.miss = 0;
     else if (++c.miss >= 3) c.state = "dead";
     // A module that never answers (not fitted on this car): skip the rest of its requests
-    if (!mod.alive && mod.silent >= 2) oemCmds.forEach((o) => { if (o.hdr === c.hdr && o.state === "new") o.state = "dead"; });
+    if (!mod.alive && mod.silent >= 2) oemCmds.forEach((o) => {
+      if (o.hdr === c.hdr && (o.pri || "") === (c.pri || "") && (o.tst || "") === (c.tst || "") && o.state === "new") o.state = "dead"; });
   }
+  await closeSessions();
   await setAddr(baseHeader, "");
   updateEnhNote();
   if (oemCmds.length && !oemFound && oemCmds.every((c) => c.state !== "new"))
@@ -5553,103 +5978,125 @@ async function pollEnhanced() {
 }
 
 // ===================== 🔎 Find every reading this car has =====================
-// The open OBD database (OBDb) keeps a factory data list for each model. This downloads the lists for every model of this
-// make and its sister brands (plus the full standard list), tries every request on the car, keeps each one it answers,
+// The open OBD database (OBDb) keeps a master factory data list for every make, plus a list for each model. This downloads
+// the lists for this model, this make and its sister brands, tries every request on the car, keeps each one it answers,
 // and sends them to the app to save — so next time this car (or one just like it) shows them right away.
-const OBDB_INDEX = `Acura:CSX|ILX|Integra|MDX|RDX|TL|TLX|TSX|ZDX
-Aiways:U5
-Alfa-Romeo:
-Audi:A1|A3|A3-e-tron|A4|A5|A6|A7|Q2|Q3|Q4-e-tron|Q5|Q7|Q8|Q8-e-tron|RS-3|RS-5|RS-e-tron|S3|S4|S5|S6|SQ2|SQ5|SQ7|SQ8|TT|TTS|e-tron|e-tron-GT
-BMW:1-Series|2-Series|2-Series-Plug-in-Hybrid|3-Series|3-Series-eDrive|4-Series|5-Series|6-Series|6-Series-Gran-Coupe|6-Series-Gran-Turismo|7-Series|ALPINA-XB7|I3s|M2|M3|M3-CS|M4|M5|X1|X2|X3|X4|X5|X5-M|X6|X7|XM|Z4|i3|i3s|i4|i5|i8|iX|iX1|iX3
-BYD:Sealion-6
-Bentley:Bentayga
-Buick:Enclave|Encore|Envision|LaCrosse
-Cadillac:CT4|CT5|CT6|CTS|DTS|ELR|Escalade|LYRIQ|SRX|XT5
-Chevrolet:Avalanche|Aveo|Blazer|Bolt-EUV|Bolt-EV|Camaro|Caprice|Cobalt|Colorado|Corvette|Cruze|Cruze-Limited|Equinox|Equinox-EV|Express|Express-Cargo|HHR|Impala|Impala-Limited|Malibu|Orlando|S-10|Sail|Silverado|Silverado-1500|Silverado-2500|Silverado-3500|Sonic|Spark|Spin|Tahoe|Trailblazer|Traverse|Trax|Volt
-Chrysler:200|300|Pacifica
-Citroen:eC4-X
-Cupra:Born|Formentor|Leon|Tavascan|Terramar
-Dacia:Dokker|Duster|Sandero|Spring
-Daihatsu:|Hijet|Terios
-Dodge:Caliber|Challenger|Charger|Dakota|Dart|Durango|Grand-Caravan|Hornet|Journey
-FIAT:500|500X|500e|Bravo|Fastback|Panda|Qubo
-Ford:B-Max|Bronco|Bronco-Sport|C-Max|C-Max-Energi|C-Max-Hybrid|Crown-Victoria|E-Series|E-Series-Wagon|EcoSport|Edge|Escape|Everest|Expedition|Explorer|Explorer-Sport-Trac|F-150|F-150-Lightning|F-250|F-350|Fiesta|Flex|Focus|Focus-Electric|Focus-RS|Focus-ST|Fusion|Fusion-Energi|Fusion-Hybrid|Kuga|Maverick|Mondeo|Mustang|Mustang-Mach-E|Puma|Ranger|S-Max|Taurus|Taurus-X|Territory|Tourneo|Transit|Transit-Connect
-GMC:Acadia|Canyon|Sierra-1500|Sierra-2500HD|Sierra-3500HD|Terrain|Yukon|Yukon-XL
-Genesis:G70|G80|GV60|GV80
-Haval:H6-HEV|Jolion|Jolion-HEV
-Holden:Colorado|Commodore|Cruze
-Honda:Accord|Accord-Hybrid|CR-V|CR-V-Hybrid|CR-Z|City|Civic|Clarity|Crosstour|Element|Fit|HR-V|Insight|Jazz|Odyssey|Pilot|Prelude|Prologue|Ridgeline|S2000|Shuttle|ZR-V
-Hyundai:Accent|Avante|Azera|Elantra|HB20|HB20S|IONIQ-5|IONIQ-6|IONIQ-9|IONIQ-Electric|IONIQ-PlugIn-Hybrid|Kona|Kona-Electric|Palisade|Santa-Cruz|Santa-Fe|Santa-Fe-Hybrid|Sonata|Tucson|Tucson-Hybrid|Veloster|Venue|Veracruz|Verna|i10|i20|i30|i40
-INFINITI:Q50|Q60|QX50|QX55|QX60|QX70|QX80
-Jaguar:E-PACE|F-PACE|F-TYPE|I-PACE
-Jeep:Avenger|Cherokee|Compass|Gladiator|Grand-Cherokee|Grand-Wagoneer|Patriot|Renegade|Wagoneer-L|Wrangler|Wrangler-4xe|Wrangler-JK
-Kia:Cadenza|Carens|Carnival|Ceed|Cerato|EV3|EV6|EV9|Forte|K4|K5|Niro|Niro-EV|Optima|Picanto|Rio|Seltos|Sonet|Sorento|Soul|Soul-EV|Sportage|Sportage-HEV|Stinger|Stonic|Tasman|Telluride|XCeed
-Land-Rover:|Defender|Discovery|LR4|Range-Rover|Range-Rover-Evoque|Range-Rover-Velar
-Lexus:CT-200h|ES|ES-300h|GX|GX-460|GX-470|IS|IS-300|LS-600h-L|NX|NX-350h|RC|RX|UX
-Lincoln:MKC|MKZ|Nautilus|Navigator|Town-Car
-Lotus:
-MG:EHS|HS|MG4|MG5|One|RX9|ZS|ZS-EV
-MINI:Clubman|Cooper|Cooper-SE|Countryman|Hardtop
-Mazda:2|3|5|6|B-Series-Pickup|BT50|CX-3|CX-30|CX-5|CX-50|CX-60|CX-9|CX-90|MX-30|MX-5|MX-5-Miata|Mazdaspeed-3|Mazdaspeed-MX-5|Tribute
-Mercedes-Benz:|A-180|B-Class|C-Class|CL-Class|CLK-Class|E-Class|EQA|EQB|EQV|G-Class|GLA-Class|GLC-Class|GLK-Class|M-Class|ML-350|SL-Class|SLC-Class|SLK-Class|Viano
-Mitsubishi:ASX|Eclipse-Cross|Outlander|Outlander-PHEV|Outlander-Sport|RVR|Triton
-Nissan:350Z|370Z|ARIYA|Altima|Armada|Frontier|Juke|Kicks|Leaf|Maxima|Micra|Murano|NV-Passenger|Pathfinder|Patrol|Pulsar|Qashqai|Rogue|Rogue-Sport|Sentra|Titan|Titan-XD|Versa|X-Trail|Xterra|Z
-NissanInfiniti:
-Peugeot:107|2008|207|208|3008|308|408|5008|508|Partner|RCZ|e-208
-Polestar:2|4
-Porsche:718|911|Cayenne|Cayman|Macan|Macan-Electric|Panamera|Taycan
-Ram:1500|1500-Classic|2500|3500|ProMaster-Window-Van
-Renault:Captur|Clio|Duster|Kadjar|Laguna|Megane|Megane-E-Tech|Scenic|Symbioz|Trafic|Twingo|ZOE
-Rolls-Royce:
-Scion:FR-S|iQ|tC|xB
-Seat:Alhambra|Arona|Ateca|Ibiza|Leon|Mii|Mii-Electric|Tarraco
-Skoda:Citigo-e-iV
-Subaru:Ascent|BRZ|Crosstrek|Forester|Impreza|Legacy|Outback|Solterra|Tribeca|WRX
-Suzuki:Baleno|Jimny|Splash|Swift|Vitara|XL7
-Toyota:4Runner|Allion|Aqua|Auris|Avalon|Avalon-Hybrid|Aygo|C-HR|Camry|Camry-Hybrid|Corolla|Corolla-Cross|Corolla-Hybrid|Crown|FJ-Cruiser|Fortuner|GR-Corolla|GR-Supra|GR86|GT86|Grand-Highlander|Grand-Highlander-Hybrid|Hiace|Highlander|Hilux|Land-Cruiser|Land-Cruiser-Hybrid|Matrix|Mirai|Prius|Prius-Prime|Prius-v|RAV4|RAV4-Hybrid|RAV4-Prime|Sequoia|Sienna|Sienna-Hybrid|Supra|Tacoma|Tundra|Veloz|Venza|Venza-Hybrid|Vios|Yaris|Yaris-Cross|Yaris-iA|bZ4X
-VauxhallOpel:|Corsa|Corsa-e|Mokka
-Volkswagen:Amarok|Arteon|Atlas|Beetle|Beetle-Convertible|CC|Crafter|Golf|ID-Buzz|ID3|ID5|ID7-Tourer|Jetta|Jetta-GLI|Multivan|Passat|Polo|Scirocco|T-Cross|T-Roc|T6-Transporter|Taigo|Taos|Tiguan|Touareg|Touran|Transporter|Up|Virtus|e-Golf|e-Up
-Volvo:S40|S60|S80|S90|V40|V60|XC40|XC40-Recharge|XC60|XC90
-smart:fortwo`;
+// It runs by itself the first time a car is connected (once per year / make / model / engine), and from the button.
+const OBDB_INDEX = `acura:Acura|Acura-CSX|Acura-ILX|Acura-Integra|Acura-MDX|Acura-RDX|Acura-TL|Acura-TLX|Acura-TSX|Acura-ZDX
+aiways:Aiways|Aiways-U5
+alfaromeo:Alfa-Romeo
+audi:Audi|Audi-A1|Audi-A3|Audi-A3-e-tron|Audi-A4|Audi-A5|Audi-A6|Audi-A7|Audi-e-tron|Audi-e-tron-GT|Audi-Q2|Audi-Q3|Audi-Q4-e-tron|Audi-Q5|Audi-Q7|Audi-Q8|Audi-Q8-e-tron|Audi-RS-3|Audi-RS-5|Audi-RS-e-tron|Audi-S3|Audi-S4|Audi-S5|Audi-S6|Audi-SQ2|Audi-SQ5|Audi-SQ7|Audi-SQ8|Audi-TT|Audi-TTS
+bentley:Bentley|Bentley-Bentayga
+bmw:BMW|BMW-1-Series|BMW-2-Series|BMW-2-Series-Plug-in-Hybrid|BMW-3-Series|BMW-3-Series-eDrive|BMW-4-Series|BMW-5-Series|BMW-6-Series|BMW-6-Series-Gran-Coupe|BMW-6-Series-Gran-Turismo|BMW-7-Series|BMW-ALPINA-XB7|BMW-i3|BMW-i3s|BMW-i4|BMW-i5|BMW-i8|BMW-iX|BMW-iX1|BMW-iX3|BMW-M2|BMW-M3|BMW-M3-CS|BMW-M4|BMW-M5|BMW-X1|BMW-X2|BMW-X3|BMW-X4|BMW-X5|BMW-X5-M|BMW-X6|BMW-X7|BMW-XM|BMW-Z4
+buick:Buick|Buick-Enclave|Buick-Encore|Buick-Envision|Buick-LaCrosse
+byd:BYD|BYD-Sealion-6
+cadillac:Cadillac|Cadillac-CT4|Cadillac-CT5|Cadillac-CT6|Cadillac-CTS|Cadillac-DTS|Cadillac-ELR|Cadillac-Escalade|Cadillac-LYRIQ|Cadillac-SRX|Cadillac-XT5
+chevrolet:Chevrolet|Chevrolet-Avalanche|Chevrolet-Aveo|Chevrolet-Blazer|Chevrolet-Bolt-EUV|Chevrolet-Bolt-EV|Chevrolet-Camaro|Chevrolet-Caprice|Chevrolet-Cobalt|Chevrolet-Colorado|Chevrolet-Corvette|Chevrolet-Cruze|Chevrolet-Cruze-Limited|Chevrolet-Equinox|Chevrolet-Equinox-EV|Chevrolet-Express|Chevrolet-Express-Cargo|Chevrolet-HHR|Chevrolet-Impala|Chevrolet-Impala-Limited|Chevrolet-Malibu|Chevrolet-Orlando|Chevrolet-S-10|Chevrolet-Sail|Chevrolet-Silverado|Chevrolet-Silverado-1500|Chevrolet-Silverado-2500|Chevrolet-Silverado-3500|Chevrolet-Sonic|Chevrolet-Spark|Chevrolet-Spin|Chevrolet-Tahoe|Chevrolet-Trailblazer|Chevrolet-Traverse|Chevrolet-Trax|Chevrolet-Volt
+chrysler:Chrysler|Chrysler-200|Chrysler-300|Chrysler-Pacifica
+citroen:Citroen|Citroen-eC4-X
+cupra:Cupra|Cupra-Born|Cupra-Formentor|Cupra-Leon|Cupra-Tavascan|Cupra-Terramar
+dacia:Dacia|Dacia-Dokker|Dacia-Duster|Dacia-Sandero|Dacia-Spring
+daihatsu:Daihatsu|Daihatsu-Hijet|Daihatsu-Terios
+datsun:Datsun
+dodge:Dodge|Dodge-Caliber|Dodge-Challenger|Dodge-Charger|Dodge-Dakota|Dodge-Dart|Dodge-Durango|Dodge-Grand-Caravan|Dodge-Hornet|Dodge-Journey
+ds:DS
+fiat:Fiat|FIAT-500|FIAT-500e|FIAT-500X|FIAT-Bravo|FIAT-Fastback|FIAT-Panda|FIAT-Qubo
+ford:Ford|Ford-B-Max|Ford-Bronco|Ford-Bronco-Sport|Ford-C-Max|Ford-C-Max-Energi|Ford-C-Max-Hybrid|Ford-Crown-Victoria|Ford-E-Series|Ford-E-Series-Wagon|Ford-EcoSport|Ford-Edge|Ford-Escape|Ford-Everest|Ford-Expedition|Ford-Explorer|Ford-Explorer-Sport-Trac|Ford-F-150|Ford-F-150-Lightning|Ford-F-250|Ford-F-350|Ford-Fiesta|Ford-Flex|Ford-Focus|Ford-Focus-Electric|Ford-Focus-RS|Ford-Focus-ST|Ford-Fusion|Ford-Fusion-Energi|Ford-Fusion-Hybrid|Ford-Kuga|Ford-Maverick|Ford-Mondeo|Ford-Mustang|Ford-Mustang-Mach-E|Ford-Puma|Ford-Ranger|Ford-S-Max|Ford-Taurus|Ford-Taurus-X|Ford-Territory|Ford-Tourneo|Ford-Transit|Ford-Transit-Connect
+genesis:Genesis|Genesis-G70|Genesis-G80|Genesis-GV60|Genesis-GV80
+gmc:GMC|GMC-Acadia|GMC-Canyon|GMC-Sierra-1500|GMC-Sierra-2500HD|GMC-Sierra-3500HD|GMC-Terrain|GMC-Yukon|GMC-Yukon-XL
+haval:Haval|Haval-H6-HEV|Haval-Jolion|Haval-Jolion-HEV
+holden:Holden|Holden-Colorado|Holden-Commodore|Holden-Cruze
+honda:Honda|Honda-Accord|Honda-Accord-Hybrid|Honda-City|Honda-Civic|Honda-Clarity|Honda-CR-V|Honda-CR-V-Hybrid|Honda-CR-Z|Honda-Crosstour|Honda-Element|Honda-Fit|Honda-HR-V|Honda-Insight|Honda-Jazz|Honda-Odyssey|Honda-Pilot|Honda-Prelude|Honda-Prologue|Honda-Ridgeline|Honda-S2000|Honda-Shuttle|Honda-ZR-V
+hyundai:Hyundai|Hyundai-Accent|Hyundai-Avante|Hyundai-Azera|Hyundai-Elantra|Hyundai-HB20|Hyundai-HB20S|Hyundai-i10|Hyundai-i20|Hyundai-i30|Hyundai-i40|Hyundai-IONIQ-5|Hyundai-IONIQ-6|Hyundai-IONIQ-9|Hyundai-IONIQ-Electric|Hyundai-IONIQ-PlugIn-Hybrid|Hyundai-Kona|Hyundai-Kona-Electric|Hyundai-Palisade|Hyundai-Santa-Cruz|Hyundai-Santa-Fe|Hyundai-Santa-Fe-Hybrid|Hyundai-Sonata|Hyundai-Tucson|Hyundai-Tucson-Hybrid|Hyundai-Veloster|Hyundai-Venue|Hyundai-Veracruz|Hyundai-Verna
+infiniti:INFINITI|INFINITI-Q50|INFINITI-Q60|INFINITI-QX50|INFINITI-QX55|INFINITI-QX60|INFINITI-QX70|INFINITI-QX80
+jaguar:Jaguar|Jaguar-E-PACE|Jaguar-F-PACE|Jaguar-F-TYPE|Jaguar-I-PACE
+jeep:Jeep|Jeep-Avenger|Jeep-Cherokee|Jeep-Compass|Jeep-Gladiator|Jeep-Grand-Cherokee|Jeep-Grand-Wagoneer|Jeep-Patriot|Jeep-Renegade|Jeep-Wagoneer-L|Jeep-Wrangler|Jeep-Wrangler-4xe|Jeep-Wrangler-JK
+kia:Kia|Kia-Cadenza|Kia-Carens|Kia-Carnival|Kia-Ceed|Kia-Cerato|Kia-EV3|Kia-EV6|Kia-EV9|Kia-Forte|Kia-K4|Kia-K5|Kia-Niro|Kia-Niro-EV|Kia-Optima|Kia-Picanto|Kia-Rio|Kia-Seltos|Kia-Sonet|Kia-Sorento|Kia-Soul|Kia-Soul-EV|Kia-Sportage|Kia-Sportage-HEV|Kia-Stinger|Kia-Stonic|Kia-Tasman|Kia-Telluride|Kia-XCeed
+lamborghini:Lamborghini
+landrover:Land-Rover|Land-Rover-Defender|Land-Rover-Discovery|Land-Rover-LR4|Land-Rover-Range-Rover|Land-Rover-Range-Rover-Evoque|Land-Rover-Range-Rover-Velar
+lexus:Lexus|Lexus-CT-200h|Lexus-ES|Lexus-ES-300h|Lexus-GX|Lexus-GX-460|Lexus-GX-470|Lexus-IS|Lexus-LS-600h-L|Lexus-NX|Lexus-NX-350h|Lexus-RC|Lexus-RX|Lexus-UX
+lincoln:Lincoln|Lincoln-MKC|Lincoln-MKZ|Lincoln-Nautilus|Lincoln-Navigator|Lincoln-Town-Car
+lotus:Lotus
+maserati:Maserati
+mazda:Mazda|Mazda-2|Mazda-3|Mazda-5|Mazda-6|Mazda-B-Series-Pickup|Mazda-BT50|Mazda-CX-3|Mazda-CX-30|Mazda-CX-5|Mazda-CX-50|Mazda-CX-60|Mazda-CX-9|Mazda-CX-90|Mazda-Mazdaspeed-3|Mazda-Mazdaspeed-MX-5|Mazda-MX-30|Mazda-MX-5|Mazda-Tribute
+mercedesbenz:Mercedes-Benz|Mercedes-Benz-A-180|Mercedes-Benz-B-Class|Mercedes-Benz-C-Class|Mercedes-Benz-CL-Class|Mercedes-Benz-CLK-Class|Mercedes-Benz-E-Class|Mercedes-Benz-EQA|Mercedes-Benz-EQB|Mercedes-Benz-EQV|Mercedes-Benz-G-Class|Mercedes-Benz-GLA-Class|Mercedes-Benz-GLC-Class|Mercedes-Benz-GLK-Class|Mercedes-Benz-M-Class|Mercedes-Benz-ML-350|Mercedes-Benz-SL-Class|Mercedes-Benz-SLC-Class|Mercedes-Benz-SLK-Class|Mercedes-Benz-Viano
+mg:MG|MG-EHS|MG-HS|MG-MG4|MG-MG5|MG-One|MG-RX9|MG-ZS|MG-ZS-EV
+mini:MINI|MINI-Clubman|MINI-Cooper|MINI-Cooper-SE|MINI-Countryman|MINI-Hardtop
+mitsubishi:Mitsubishi|Mitsubishi-ASX|Mitsubishi-Eclipse-Cross|Mitsubishi-Outlander|Mitsubishi-Outlander-PHEV|Mitsubishi-Outlander-Sport|Mitsubishi-RVR|Mitsubishi-Triton
+nissan:Nissan|Nissan-350Z|Nissan-370Z|Nissan-Altima|Nissan-ARIYA|Nissan-Armada|Nissan-Frontier|Nissan-Juke|Nissan-Kicks|Nissan-Leaf|Nissan-Maxima|Nissan-Micra|Nissan-Murano|Nissan-NV-Passenger|Nissan-Pathfinder|Nissan-Patrol|Nissan-Pulsar|Nissan-Qashqai|Nissan-Rogue|Nissan-Rogue-Sport|Nissan-Sentra|Nissan-Titan|Nissan-Titan-XD|Nissan-Versa|Nissan-X-Trail|Nissan-Xterra|Nissan-Z
+nissaninfiniti:NissanInfiniti
+peugeot:Peugeot|Peugeot-107|Peugeot-2008|Peugeot-207|Peugeot-208|Peugeot-3008|Peugeot-308|Peugeot-408|Peugeot-5008|Peugeot-508|Peugeot-e-208|Peugeot-Partner|Peugeot-RCZ
+polestar:Polestar|Polestar-2|Polestar-4
+porsche:Porsche|Porsche-718|Porsche-911|Porsche-Cayenne|Porsche-Cayman|Porsche-Macan|Porsche-Macan-Electric|Porsche-Panamera|Porsche-Taycan
+ram:Ram|Ram-1500|Ram-1500-Classic|Ram-2500|Ram-3500|Ram-ProMaster-Window-Van
+renault:Renault|Renault-Captur|Renault-Clio|Renault-Duster|Renault-Kadjar|Renault-Laguna|Renault-Megane|Renault-Megane-E-Tech|Renault-Scenic|Renault-Symbioz|Renault-Trafic|Renault-Twingo|Renault-ZOE
+rollsroyce:Rolls-Royce
+scion:Scion|Scion-FR-S|Scion-iQ|Scion-tC|Scion-xB
+seat:SEAT|Seat-Alhambra|Seat-Arona|Seat-Ateca|Seat-Ibiza|Seat-Leon|Seat-Mii|Seat-Mii-Electric|Seat-Tarraco
+skoda:Skoda|Skoda-Citigo-e-iV
+smart:smart|smart-fortwo
+subaru:Subaru|Subaru-Ascent|Subaru-BRZ|Subaru-Crosstrek|Subaru-Forester|Subaru-Impreza|Subaru-Legacy|Subaru-Outback|Subaru-Solterra|Subaru-Tribeca|Subaru-WRX
+suzuki:Suzuki|Suzuki-Baleno|Suzuki-Jimny|Suzuki-Splash|Suzuki-Swift|Suzuki-Vitara|Suzuki-XL7
+tata:Tata
+toyota:Toyota|Toyota-4Runner|Toyota-Allion|Toyota-Aqua|Toyota-Auris|Toyota-Avalon|Toyota-Avalon-Hybrid|Toyota-Aygo|Toyota-bZ4X|Toyota-C-HR|Toyota-Camry|Toyota-Camry-Hybrid|Toyota-Corolla|Toyota-Corolla-Cross|Toyota-Corolla-Hybrid|Toyota-Crown|Toyota-FJ-Cruiser|Toyota-Fortuner|Toyota-GR-Corolla|Toyota-GR-Supra|Toyota-GR86|Toyota-Grand-Highlander|Toyota-Grand-Highlander-Hybrid|Toyota-GT86|Toyota-Hiace|Toyota-Highlander|Toyota-Hilux|Toyota-Land-Cruiser|Toyota-Land-Cruiser-Hybrid|Toyota-Matrix|Toyota-Mirai|Toyota-Prius|Toyota-Prius-Prime|Toyota-Prius-v|Toyota-RAV4|Toyota-RAV4-Hybrid|Toyota-RAV4-Prime|Toyota-Sequoia|Toyota-Sienna|Toyota-Sienna-Hybrid|Toyota-Tacoma|Toyota-Tundra|Toyota-Veloz|Toyota-Venza|Toyota-Venza-Hybrid|Toyota-Vios|Toyota-Yaris|Toyota-Yaris-Cross|Toyota-Yaris-iA
+vauxhallopel:VauxhallOpel|VauxhallOpel-Corsa-e|VauxhallOpel-Mokka
+volkswagen:Volkswagen|Volkswagen-Amarok|Volkswagen-Arteon|Volkswagen-Atlas|Volkswagen-Beetle|Volkswagen-Beetle-Convertible|Volkswagen-CC|Volkswagen-Crafter|Volkswagen-e-Golf|Volkswagen-e-Up|Volkswagen-Golf|Volkswagen-ID-Buzz|Volkswagen-ID.4|Volkswagen-ID3|Volkswagen-ID5|Volkswagen-ID7-Tourer|Volkswagen-Jetta|Volkswagen-Jetta-GLI|Volkswagen-Multivan|Volkswagen-Passat|Volkswagen-Polo|Volkswagen-Scirocco|Volkswagen-T-Cross|Volkswagen-T-Roc|Volkswagen-T6-Transporter|Volkswagen-Taigo|Volkswagen-Taos|Volkswagen-Tiguan|Volkswagen-Touareg|Volkswagen-Touran|Volkswagen-Transporter|Volkswagen-Up|Volkswagen-Virtus
+volvo:Volvo|Volvo-S40|Volvo-S60|Volvo-S80|Volvo-S90|Volvo-V40|Volvo-V60|Volvo-XC40|Volvo-XC40-Recharge|Volvo-XC60|Volvo-XC90`;
 const normName = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
-const OBDB_REPOS = {};   // "chevrolet" -> [{ repo: "Chevrolet-Tahoe", model: "Tahoe" }, ...]
-OBDB_INDEX.split("\n").forEach((line) => {
-  const i = line.indexOf(":"), mk = line.slice(0, i);
-  OBDB_REPOS[normName(mk)] = line.slice(i + 1).split("|").map((m) => ({ repo: m ? mk + "-" + m : mk, model: m }));
-});
-const MAKE_ALIAS = { vauxhall: "vauxhallopel", opel: "vauxhallopel", mercedes: "mercedesbenz", alfa: "alfaromeo" };
+const OBDB_REPOS = {};   // "chevrolet" -> ["Chevrolet", "Chevrolet-Tahoe", ...]  (the first one without a model is the make's master list)
+OBDB_INDEX.split("\n").forEach((line) => { const i = line.indexOf(":"); OBDB_REPOS[line.slice(0, i)] = line.slice(i + 1).split("|"); });
+const MAKE_ALIAS = { vauxhall: "vauxhallopel", opel: "vauxhallopel", mercedes: "mercedesbenz", alfa: "alfaromeo", vw: "volkswagen",
+  marutisuzuki: "maruti", chevy: "chevrolet", ramtrucks: "ram" };
 const FAMILY = {   // sister brands that share computers (and so most factory requests)
   chevrolet: ["gmc", "buick", "cadillac", "holden"], gmc: ["chevrolet", "buick", "cadillac"], buick: ["chevrolet", "gmc", "cadillac"],
   cadillac: ["chevrolet", "gmc", "buick"], holden: ["chevrolet", "gmc"], pontiac: ["chevrolet", "gmc", "buick"], saturn: ["chevrolet", "gmc"],
+  oldsmobile: ["chevrolet", "buick"], hummer: ["chevrolet", "gmc"], saab: ["chevrolet", "cadillac"], isuzu: ["chevrolet", "gmc"],
+  geo: ["chevrolet", "toyota"], daewoo: ["chevrolet"],
   ford: ["lincoln"], lincoln: ["ford"], mercury: ["ford", "lincoln"],
-  toyota: ["lexus", "scion"], lexus: ["toyota", "scion"], scion: ["toyota", "lexus"],
-  honda: ["acura"], acura: ["honda"], nissan: ["infiniti", "nissaninfiniti"], infiniti: ["nissan", "nissaninfiniti"],
+  toyota: ["lexus", "scion"], lexus: ["toyota", "scion"], scion: ["toyota", "lexus"], daihatsu: ["toyota"],
+  honda: ["acura"], acura: ["honda"],
+  nissan: ["infiniti", "nissaninfiniti", "datsun"], infiniti: ["nissan", "nissaninfiniti"], datsun: ["nissan"],
   hyundai: ["kia", "genesis"], kia: ["hyundai", "genesis"], genesis: ["hyundai", "kia"],
-  chrysler: ["dodge", "jeep", "ram"], dodge: ["chrysler", "jeep", "ram"], jeep: ["chrysler", "dodge", "ram"], ram: ["chrysler", "dodge", "jeep"],
+  chrysler: ["dodge", "jeep", "ram"], dodge: ["chrysler", "jeep", "ram"], jeep: ["chrysler", "dodge", "ram"], ram: ["dodge", "chrysler", "jeep"],
+  plymouth: ["chrysler", "dodge"], eagle: ["chrysler"], fiat: ["chrysler", "alfaromeo", "jeep"], alfaromeo: ["fiat", "jeep"], maserati: ["chrysler"],
+  mazda: ["ford"],
   volkswagen: ["audi", "seat", "cupra", "skoda"], audi: ["volkswagen", "seat", "cupra", "skoda"], seat: ["volkswagen", "cupra", "audi"],
-  cupra: ["seat", "volkswagen", "audi"], skoda: ["volkswagen", "seat"], bmw: ["mini"], mini: ["bmw"],
-  landrover: ["jaguar"], jaguar: ["landrover"], peugeot: ["citroen", "vauxhallopel"], citroen: ["peugeot"], vauxhallopel: ["peugeot"],
-  renault: ["dacia"], dacia: ["renault"],
+  cupra: ["seat", "volkswagen", "audi"], skoda: ["volkswagen", "seat"], porsche: ["volkswagen", "audi"], bentley: ["audi"], lamborghini: ["audi"],
+  bmw: ["mini"], mini: ["bmw"], landrover: ["jaguar"], jaguar: ["landrover"], volvo: ["polestar"], polestar: ["volvo"],
+  peugeot: ["citroen", "vauxhallopel", "ds"], citroen: ["peugeot", "ds"], ds: ["peugeot", "citroen"], vauxhallopel: ["peugeot", "chevrolet"],
+  renault: ["dacia", "nissan"], dacia: ["renault"], smart: ["mercedesbenz"],
 };
 const OBDB_UNITS_JS = {
   celsius: "C", fahrenheit: "F", kilopascal: "kPa", psi: "psi", bars: "bar", volts: "V", millivolts: "mV", rpm: "rpm", percent: "%",
   degrees: "deg", scalar: "", unknown: "", kilometersPerHour: "kph", kilometers: "km", miles: "mi", offon: "onoff", onoff: "onoff",
   noyes: "yesno", yesno: "yesno", milliseconds: "ms", seconds: "s", minutes: "min", hours: "h", milliamps: "mA", amps: "A",
-  gramsPerSecond: "gps", newtonMeters: "Nm", liters: "L", hex: "hex", metersPerSecondSquared: "m/s²", gravity: "g",
-  ampereHours: "Ah", kilowatts: "kW", millimeters: "mm", megaohms: "MΩ",
+  gramsPerSecond: "g/s", newtonMeters: "Nm", liters: "L", hex: "hex", metersPerSecondSquared: "m/s²", gravity: "g",
+  ampereHours: "Ah", kilowatts: "kW", millimeters: "mm", megaohms: "MΩ", litersPerHour: "L/h", kilowattHours: "kWh",
 };
 const OBDB_SKIP = new Set(["Trips", "Seatbelts", "Lights", "Doors", "Clocks", "Details", "Stats", "DTCs", "ECU", "Cruise control"]);
+const LEARN_VER = 2;   // bumped when the search learns to ask more (so cars searched the old way get searched again once)
 
 function huntRepos() {
   const mk0 = normName(ARGS.vmake), mk = MAKE_ALIAS[mk0] || mk0, mdl = normName(ARGS.vmodel);
   const out = [], seen = new Set();
-  const add = (repo, tier) => { if (!seen.has(repo)) { seen.add(repo); out.push([repo, tier]); } };
+  const add = (repo, tier) => { if (repo && !seen.has(repo)) { seen.add(repo); out.push([repo, tier]); } };
   const mine = OBDB_REPOS[mk] || [];
-  // 0 = this model · 1 = a model with a close name (Silverado / Silverado-1500) · 2 = the make's other models · 3 = sister brands
-  mine.forEach((r) => { if (mdl && normName(r.model) === mdl) add(r.repo, 0); });
-  mine.forEach((r) => { const m = normName(r.model); if (mdl && m && (m.startsWith(mdl) || mdl.startsWith(m))) add(r.repo, 1); });
-  mine.forEach((r) => add(r.repo, 2));
-  (FAMILY[mk] || []).forEach((f) => (OBDB_REPOS[f] || []).forEach((r) => add(r.repo, 3)));
+  const prefixes = [mk, ...Object.keys(MAKE_ALIAS).filter((a) => MAKE_ALIAS[a] === mk)];
+  const modelOf = (repo) => {
+    const n = normName(repo);
+    for (const p of prefixes) if (n.startsWith(p) && n.length > p.length) return n.slice(p.length);
+    const i = repo.indexOf("-");
+    return i < 0 ? "" : normName(repo.slice(i + 1));
+  };
+  const isMaster = (repo) => !repo.includes("-") || normName(repo) === mk;
+  // 0 = this exact model · 1 = a model with a close name (Silverado / Silverado-1500) · 2 = the make's master list
+  // 3 = sister brands' master lists · 4 = (only when the make has no master list) the make's other models
+  mine.forEach((r) => { if (mdl && !isMaster(r) && modelOf(r) === mdl) add(r, 0); });
+  mine.forEach((r) => { const m = modelOf(r); if (mdl && !isMaster(r) && m && (m.startsWith(mdl) || mdl.startsWith(m))) add(r, 1); });
+  const masters = mine.filter(isMaster);
+  masters.forEach((r) => add(r, 2));
+  (FAMILY[mk] || []).forEach((f) => (OBDB_REPOS[f] || []).filter((r) => !r.includes("-") || normName(r) === f).forEach((r) => add(r, 3)));
+  if (!masters.length) mine.forEach((r) => add(r, 4));
   return out;
 }
 async function obdbFetch(repo) {
@@ -5667,53 +6114,59 @@ function obdbYearOk(f, y) {
   if (!("from" in f) && !("to" in f)) return !(f.years && f.years.length);
   return (f.from ?? 0) <= y && y <= (f.to ?? 9999);
 }
-// One OBDb file -> requests [[sig, sig...], ...]. std = the standard (SAE J1979) list: only PIDs this car says it has that
-// the main screen doesn't already show, asked of the engine computer the same way as the main screen.
-function obdbCmds(json, year, src, tier, std) {
+const SAFE_SESSIONS = new Set(["03", "C0"]);   // extended diagnostic session / Nissan's — what every scan tool opens to read data
+// One OBDb file -> requests [[sig, sig...], ...]. Reads only (service 21 / 22). Left out: BMW-style extended addressing and
+// K-line requests (this adapter path can't do them) and requests that need an unusual diagnostic session.
+function obdbCmds(json, year, src, tier) {
   const out = [];
   for (const c of (json && json.commands) || []) {
-    let hdr = String(c.hdr || "").toUpperCase(), rax = String(c.rax || "").toUpperCase();
-    if (c.eax || c.tst || c.fcm1 || c.pri || !/^([0-9A-F]{3}|DA[0-9A-F]{2})$/.test(hdr)) continue;
+    const hdr = String(c.hdr || "").toUpperCase(), rax = String(c.rax || "").toUpperCase();
+    if (c.eax || c.proto || c.baud || c.init) continue;
+    if (!(/^[0-9A-F]{3}$/.test(hdr) || (/^[0-9A-F]{4}$/.test(hdr) && (hdr.startsWith("DA") || rax.length >= 6)))) continue;
+    const din = String(c.din || "").toUpperCase();
+    if (din && !SAFE_SESSIONS.has(din)) continue;
     if (!obdbYearOk(c.filter, year)) continue;
     const [svc, pid0] = Object.entries(c.cmd || {})[0] || ["", ""];
-    const pid = String(pid0).toUpperCase();
-    if (std) {
-      if (svc !== "01" || PIDS[pid] || !(sup01 && sup01.has(pid))) continue;
-      hdr = baseHeader; rax = "";
-    } else if (svc !== "21" && svc !== "22") continue;   // reads only
+    if (svc !== "21" && svc !== "22") continue;
+    const ext = hdr.length === 4;
     const sigs = [];
     for (const s of c.signals || []) {
       const f = s.fmt || {};
       if (OBDB_SKIP.has(s.path) || !f.len || f.len > 32) continue;
-      sigs.push({ hdr, rax, req: (svc + pid).toUpperCase(), bix: f.bix || 0, len: f.len, mul: f.mul ?? 1, div: f.div ?? 1, add: f.add ?? 0,
+      const g = { hdr, rax, req: (svc + String(pid0)).toUpperCase(), bix: f.bix || 0, len: f.len, mul: f.mul ?? 1, div: f.div ?? 1, add: f.add ?? 0,
         sign: !!f.sign, lsb: !!f.blsb, unit: OBDB_UNITS_JS[f.unit] ?? (f.unit || ""), min: f.min ?? null, max: f.max ?? null,
         nmin: f.nullmin ?? null, nmax: f.nullmax ?? null,
         map: f.map ? Object.fromEntries(Object.entries(f.map).map(([k, v]) => [k, v && typeof v === "object" ? (v.description || v.value) : v])) : null,
-        name: s.name || s.id || "", path: std ? "" : (s.path || ""), grp: std ? "More standard readings" : "", src, tier });
+        name: s.name || s.id || "", path: s.path || "", src, tier };
+      if (ext && c.pri) g.pri = String(c.pri).toUpperCase();
+      if (ext && c.tst) g.tst = String(c.tst).toUpperCase();
+      if (din) { g.din = din; if (c.dout) g.dout = String(c.dout).toUpperCase(); }
+      sigs.push(g);
     }
     if (sigs.length) out.push(sigs);
   }
   return out;
 }
+// one request = module address + what is asked (+ the 29-bit priority / tester address when they aren't the usual ones)
+const cmdKey = (g) => g.hdr + "|" + g.req + "|" + (g.pri || "") + "|" + (g.tst || "");
 async function gatherCandidates(progress) {
   const year = parseInt(ARGS.year, 10) || 0;
-  const std29 = baseProto === "7" || baseProto === "9";
-  const jobs = [...(std29 ? [] : [["SAEJ1979", 0, true]]), ...huntRepos().map(([r, t]) => [r, t, false])];
+  const jobs = huntRepos();
   const lists = new Array(jobs.length);
   let next = 0, done = 0;
   const worker = async () => {
     while (next < jobs.length && !(hunt && hunt.stop)) {
-      const i = next++, [repo, tier, std] = jobs[i];
+      const i = next++, [repo, tier] = jobs[i];
       const j = await obdbFetch(repo);
-      lists[i] = j ? obdbCmds(j, year, std ? "standard list" : repo.replace(/-/g, " "), tier, std) : [];
+      lists[i] = j ? obdbCmds(j, year, repo.replace(/-/g, " "), tier) : [];
       progress(++done, jobs.length);
     }
   };
-  await Promise.all([1, 2, 3, 4, 5, 6].map(worker));
-  // One layout per request: the closest model wins; between equals, the layout the most models use.
+  await Promise.all([1, 2, 3, 4].map(worker));
+  // One layout per request: the closest list wins; between equals, the layout the most lists use.
   const byKey = new Map();
   lists.forEach((cmds) => (cmds || []).forEach((sigs) => {
-    const g0 = sigs[0], key = g0.hdr + "|" + g0.rax + "|" + g0.req;
+    const g0 = sigs[0], key = cmdKey(g0);
     const lay = sigs.map((g) => [g.name, g.bix, g.len, g.mul, g.div, g.add, g.unit].join(",")).join(";");
     let k = byKey.get(key);
     if (!k) byKey.set(key, (k = new Map()));
@@ -5725,25 +6178,28 @@ async function gatherCandidates(progress) {
   for (const [key, lays] of byKey) {
     const best = [...lays.values()].sort((a, b) => a.tier - b.tier || b.n - a.n)[0];
     const g0 = best.sigs[0];
-    out.push({ key, hdr: g0.hdr, rax: g0.rax, req: g0.req, tier: best.tier, sigs: best.sigs.map((g) => Object.assign({}, g)), state: "new", miss: 0 });
+    out.push({ key, hdr: g0.hdr, rax: g0.rax, req: g0.req, pri: g0.pri, tst: g0.tst, din: g0.din, dout: g0.dout, tier: best.tier,
+      sigs: best.sigs.map((g) => Object.assign({}, g)), state: "new", miss: 0 });
   }
   out.sort((a, b) => a.tier - b.tier || (a.hdr + a.rax).localeCompare(b.hdr + b.rax) || a.req.localeCompare(b.req));
   return out;
 }
 function prepSig(g) {
   if (g.label) return g;
-  g.label = (g.tier >= 1 ? "≈ " : "") + cleanName(g.name);
+  g.label = (g.tier >= 3 ? "≈ " : "") + cleanName(g.name);
   g.group = oemGroup(g);
   g.watch = tccRole(g.name, g.unit, g.map);
   return g;
 }
 const slimSig = (g) => {
   const o = {};
-  for (const k of ["hdr", "rax", "req", "bix", "len", "mul", "div", "add", "sign", "lsb", "unit", "min", "max", "nmin", "nmax", "map", "name", "path", "grp", "src", "tier"])
-    if (g[k] !== undefined) o[k] = g[k];
+  for (const k of ["hdr", "rax", "req", "pri", "tst", "din", "dout", "bix", "len", "mul", "div", "add", "sign", "lsb", "unit", "min", "max",
+    "nmin", "nmax", "map", "name", "path", "grp", "src", "tier"])
+    if (g[k] !== undefined && g[k] !== "" && g[k] !== null) o[k] = g[k];
+  o.unit = g.unit || "";
   return o;
 };
-let hunt = null, myLearnedId = null;
+let hunt = null, myLearnedId = null, autoHuntTried = false;
 function huntShow(text) {
   const b = $("huntBox");
   b.hidden = false;
@@ -5752,46 +6208,46 @@ function huntShow(text) {
   b.innerHTML = h.done
     ? `✅ ${h.stop ? "Stopped" : "Done"} (${t}) — checked ${h.checked.toLocaleString()} factory requests and found <b>${h.found}</b> new readings` +
       (h.learned.length ? ". Saved for this car, so next time they show up right away." : ".") +
-      (h.learned.some((c) => c.tier >= 1) ? `<br><span class="note">≈ = from a sister model's list. Double-check those against your Topdon before you trust them.</span>` : "")
-    : `🔎 Checking ${h.checked.toLocaleString()} of ${h.total.toLocaleString()} factory requests · <b>${h.found}</b> new readings found · ${t}`;
+      (h.stop && h.paused ? " It stopped for the test — it will finish the next time you connect." : "") +
+      (h.learned.some((c) => c.tier >= 3) ? `<br><span class="note">≈ = from a sister brand's list. Double-check those against your Topdon before you trust them.</span>` : "")
+    : `🔎 ${h.auto ? "First time on this car — finding every reading it has. " : ""}Checking ${h.checked.toLocaleString()} of ${h.total.toLocaleString()} factory requests · <b>${h.found}</b> new readings found · ${t}`;
   fitHeight();
 }
-async function findEverything() {
-  if (hunt && !hunt.done) { hunt.stop = true; $("huntBtn").textContent = "Stopping…"; return; }   // the button doubles as Stop
+const huntBusy = () => T.drive.on || (T.trans && T.trans.on) || !!FOCUS;
+async function findEverything(auto) {
+  if (hunt && !hunt.done) { if (!auto) { hunt.stop = true; $("huntBtn").textContent = "Stopping…"; } return; }   // the button doubles as Stop
   if (!connected) return;
-  if (!isCan) { alert("Factory readings need a CAN vehicle (most 2008 and newer)."); return; }
-  if (!ARGS.vmake) { alert("Set the vehicle first (VIN search above), so the app knows which factory lists to try."); return; }
-  if (T.drive.on || (T.trans && T.trans.on) || FOCUS) { alert("Finish the test drive or guided test first, then try again."); return; }
-  hunt = { stop: false, done: false, checked: 0, total: 0, found: 0, learned: [], t0: Date.now() };
+  const say = (m) => { if (!auto) alert(m); };
+  if (!isCan) return say("Factory readings need a CAN vehicle (most 2008 and newer).");
+  if (!ARGS.vmake) return say("Set the vehicle first (VIN search above), so the app knows which factory lists to try.");
+  if (huntBusy()) return say("Finish the test drive or guided test first, then try again.");
+  hunt = { stop: false, done: false, checked: 0, total: 0, found: 0, learned: [], t0: Date.now(), auto: !!auto };
   $("huntBtn").textContent = "⏹ Stop searching";
   huntShow("📥 Getting the factory lists for this make…");
   let cands = [];
   try { cands = await gatherCandidates((d, n) => huntShow(`📥 Getting the factory lists… ${d} of ${n}`)); }
   catch (e) { logEvent("scanner", "Find every reading", "Couldn't get the factory lists: " + e.message, e.stack); }
-  const have = new Set(oemCmds.map((c) => c.hdr + "|" + c.rax + "|" + c.req));
+  const have = new Set(oemCmds.map((c) => cmdKey(c)));
   const todo = cands.filter((c) => !have.has(c.key));
   hunt.total = todo.length;
   const mods = {};
+  const other = { tried: 0, alive: false };   // requests on the "other" kind of address (29-bit on an 11-bit car, or the reverse)
   for (let i = 0; i < todo.length && !hunt.stop && connected; i += 4) {
+    if (huntBusy()) { hunt.stop = hunt.paused = true; break; }   // a test or test drive started: live data comes first
     await txn(async () => {   // a few at a time, so the live readings keep updating in between
       for (const c of todo.slice(i, i + 4)) {
         if (hunt.stop || !connected) break;
         hunt.checked++;
-        const m = mods[c.hdr] || (mods[c.hdr] = { alive: false, silent: 0 });
+        const mk = c.hdr + "|" + (c.pri || "") + "|" + (c.tst || "");
+        const m = mods[mk] || (mods[mk] = { alive: false, silent: 0 });
         if (!m.alive && m.silent >= 3) continue;   // nothing at that address on this car
+        const odd = (c.hdr.length === 4) !== base29();
+        if (odd && !other.alive && other.tried >= 9) continue;   // this car has nothing on that kind of address at all
         const { bytes, replied } = await readOem(c);
-        if (replied || bytes) m.alive = true; else m.silent++;
+        if (replied || bytes) { m.alive = true; if (odd) other.alive = true; } else { m.silent++; if (odd) other.tried++; }
         if (!bytes) continue;
         c.sigs.forEach(prepSig);
-        const vals = [];
-        let wrong = false;
-        for (const g of c.sigs) {
-          const v = extractBits(bytes, g.bix, g.len, g.lsb, g.sign);
-          const text = v == null ? null : fmtOem(g, v);
-          if (text == null) continue;
-          if (oemDisagrees(g, text)) { wrong = true; break; }
-          if (oemSane(g, text)) vals.push([g, text]);
-        }
+        const { vals, wrong } = decodeCmd(c, bytes);
         if (wrong || !vals.length) continue;
         c.state = "live";
         oemCmds.push(c);
@@ -5799,30 +6255,599 @@ async function findEverything() {
         for (const [g, text] of vals) setTile(oemTile(g), text);
         hunt.found += vals.length;
       }
+      await closeSessions();
       await setAddr(baseHeader, "");
     });
     huntShow();
   }
   hunt.done = true;
+  const complete = cands.length > 0 && !hunt.stop && connected;
   $("huntBtn").textContent = "🔎 Find every reading this car has";
   updateEnhNote();
-  if (!cands.length) huntShow("Couldn't get the factory lists (no internet on this phone?). Try again in a minute.");
-  else if (!todo.length) huntShow("Already checked every factory request on file for this car.");
+  if (!cands.length) huntShow(auto ? "" : "Couldn't get the factory lists (no internet on this phone?). Try again in a minute.");
+  else if (!todo.length) huntShow(auto ? "" : "Already checked every factory request on file for this car.");
   else huntShow();
-  if (hunt.learned.length) {
+  if (!cands.length && auto) $("huntBox").hidden = true;
+  if (hunt.learned.length || complete) {
     myLearnedId = "L" + Date.now();
     const sigs = [];
     hunt.learned.forEach((c) => c.sigs.forEach((g) => sigs.push(slimSig(g))));
-    sendValue({ type: "oem_learned", id: myLearnedId, sigs, checked: hunt.checked, found: hunt.found });
+    sendValue({ type: "oem_learned", id: myLearnedId, sigs, checked: hunt.checked, found: hunt.found, complete, ver: LEARN_VER });
   }
 }
 $("huntBtn").addEventListener("click", () => {
-  findEverything().catch((e) => {
+  findEverything(false).catch((e) => {
     if (hunt) hunt.done = true;
     $("huntBtn").textContent = "🔎 Find every reading this car has";
     logEvent("scanner", "Find every reading", e.message, e.stack);
   });
 });
+// The first time a car is connected (nothing saved for its year / make / model / engine yet), search by itself.
+function maybeAutoHunt() {
+  if (autoHuntTried || !connected || !isCan || !ARGS.vmake || !streaming || huntBusy()) return;
+  if ((+ARGS.learned_ver || 0) >= LEARN_VER || (hunt && !hunt.done)) { autoHuntTried = true; return; }
+  autoHuntTried = true;
+  findEverything(true).catch((e) => { if (hunt) hunt.done = true; logEvent("scanner", "Find every reading", e.message, e.stack); });
+}
+
+// ===================== Every standard (SAE J1979) reading =====================
+// The main screen shows the readings every car has. These are ALL the others in the standard — second O2 banks, wide-range
+// sensors, torque, turbo, EGR, diesel aftertreatment, hybrid battery, transmission gear and more. A car only gets asked for
+// the ones it says it supports, and a sensor the car says isn't fitted is left out.
+// pid|first bit|bits|×|÷|+|flags|unit|min|max|"fitted" bit|group|name|value names      (list: OBDb SAEJ1979, CC BY-SA 4.0)
+const STD_RAW = `12|5|3|1|1|0||||||E|Commanded secondary air status|1=Upstream of first catalytic converter~2=Downstream of first catalytic converter inlet~4=Atmosphere / off~8=Pump commanded on for diagnostics
+1A|0|8|1|200|0||V||1.275||F|O2S Output Voltage Bank 2, Sensor 3|
+1A|8|8|100|128|-100||%|-100|99.22||F|SHRTFT associated with O2S23|
+1B|0|8|1|200|0||V||1.275||F|O2S Output Voltage Bank 2, Sensor 4|
+1B|8|8|100|128|-100||%|-100|99.22||F|SHRTFT associated with O2S24|
+1C|0|8|1|1|0||||||E|OBD requirements to which vehicle is designed|1=OBD II (California ARB)~2=OBD (Federal EPA)~3=OBD & OBD II~4=OBD I~5=Not OBD compliant~6=EOBD~7=EOBD & OBD II~8=EOBD & OBD~9=EOBD, OBD, OBD II~10=JOBD~11=JOBD & OBD II~12=JOBD & EOBD~13=JOBD, EOBD, OBD II~14=Heavy duty vehicles (EURO IV) B1~15=Heavy duty vehicles (EURO V) B2~16=Heavy duty vehicles (EURO EEC) C (gas engines)~17=Engine manufacturer diagnostics (EMD)~18=Engine Manufacturer Diagnostics Enhanced (EMD+)~19=Heavy Duty On-Board Diagnostics (Child/Partial)~20=Heavy Duty On-Board Diagnostics~21=World Wide Harmonized OBD~23=Heavy Duty Euro OBD Stage I without NOx Control~24=Heavy Duty Euro OBD Stage I with NOx Control~25=Heavy Duty Euro OBD Stage II without NOx Control~26=Heavy Duty Euro OBD Stage II with NOx Control~27=Heavy Duty ZEV~28=Brazil OBD Phase 1~29=Brazil OBD Phase 2 and Phase 2+~30=Korean OBD~31=India BS4 OBD I~32=India BS4 OBD II~33=Euro VI~34=OBD, OBD II and HD OBD~35=Brazil OBD Phase 3~36=Motorcycle, Euro OBD-I~37=Motorcycle, Euro OBD-II~38=Motorcycle, China OBD-I~39=Motorcycle, Taiwan OBD-I~40=Motorcycle, Japan OBD-I~41=China Nationwide Stage 6~42=Brazil OBD Phase 7~43=China Heavy Duty VI~44=India BS6 OBD I~45=India BS6 OBD II~46=India BSVI HD OBD~47=Brazil OBD Phase 8~48=Japan Heavy Duty OBD-II~49=Korea Heavy Duty OBD-II~50=China Off-Road IV OBD~51=Light Duty ZEV, ACC-II~52=Motorcycle, Japan OBD-II~53=Motorcycle, California (CARB) OBD~54=Motorcycle, Federal (EPA) OBD~55=Motorcycle, 50-State (CARB & EPA) OBD~56=Heavy Duty ZEV, CARB ZEP~57=Light Duty ZEV, CARB ACC-II and EPA Tier 4 (GTR 22)~58=Light Duty ZEV, EPA Tier 4 (GTR 22)~59=EPA HD OBD
+1E|7|1|1|1|0||onoff||1||E|Power take off (PTO) status|
+22|0|16|0.079|1|0||kPa||5177.27||E|Fuel pressure relative to manifold vacuum|
+25|0|16|1|32768|0||||1.99||F|Lambda value, Equivalence Ratio Bank 1, Sensor 2|
+25|16|16|1|8192|0||V||7.999||F|Wide Range O2S Voltage, O2 Sensor Bank 1, Sensor 2|
+27|0|16|1|32768|0||||1.99||F|Lambda value, Equivalence Ratio Bank 1, Sensor 4|
+27|16|16|1|8192|0||V||7.999||F|Wide Range O2S Voltage, O2 Sensor Bank 1, Sensor 4|
+29|0|16|1|32768|0||||1.99||F|Lambda value, Equivalence Ratio Bank 2, Sensor 2|
+29|16|16|1|8192|0||V||7.999||F|Wide Range O2S Voltage, O2 Sensor Bank 2, Sensor 2|
+2A|0|16|1|32768|0||||1.99||F|Lambda value, Equivalence Ratio Bank 2, Sensor 3|
+2A|16|16|1|8192|0||V||7.999||F|Wide Range O2S Voltage, O2 Sensor Bank 2, Sensor 3|
+2B|0|16|1|32768|0||||1.99||F|Lambda value, Equivalence Ratio Bank 2, Sensor 4|
+2B|16|16|1|8192|0||V||7.999||F|Wide Range O2S Voltage, O2 Sensor Bank 2, Sensor 4|
+35|0|16|1|32768|0||||1.99||F|Lambda value, Equivalence Ratio Bank 1, Sensor 2|
+35|16|16|1|256|-128||mA|-128|127.996||F|Wide Range O2S Current, O2 Sensor Bank 1, Sensor 2|
+37|0|16|1|32768|0||||1.99||F|Lambda value, Equivalence Ratio Bank 1, Sensor 4|
+37|16|16|1|256|-128||mA|-128|127.996||F|Wide Range O2S Current, O2 Sensor Bank 1, Sensor 4|
+39|0|16|1|32768|0||||1.99||F|Lambda value, Equivalence Ratio Bank 2, Sensor 2|
+39|16|16|1|256|-128||mA|-128|127.996||F|Wide Range O2S Current, O2 Sensor Bank 2, Sensor 2|
+3A|0|16|1|32768|0||||1.99||F|Lambda value, Equivalence Ratio Bank 2, Sensor 3|
+3A|16|16|1|256|-128||mA|-128|127.996||F|Wide Range O2S Current, O2 Sensor Bank 2, Sensor 3|
+3B|0|16|1|32768|0||||1.99||F|Lambda value, Equivalence Ratio Bank 2, Sensor 4|
+3B|16|16|1|256|-128||mA|-128|127.996||F|Wide Range O2S Current, O2 Sensor Bank 2, Sensor 4|
+3E|0|16|1|10|-40||C|-40|6513.5||E|Catalyst temperature bank 1, sensor 2|
+3F|0|16|1|10|-40||C|-40|6513.5||E|Catalyst temperature bank 2, sensor 2|
+45|0|8|100|255|0||%||100||E|Relative throttle position|
+47|0|8|100|255|0||%||100||E|Absolute throttle position B|
+48|0|8|100|255|0||%||100||E|Absolute throttle position C|
+4B|0|8|100|255|0||%||100||E|Accelerator pedal position F|
+4C|0|8|100|255|0||%||100||E|Commanded throttle actuator control|
+51|0|8|1|1|0||||||E|Type of fuel currently being used by the vehicle|1=Gasoline/petrol~2=Methanol~3=Ethanol~4=Diesel~5=Liquefied petroleum gas~6=Compressed natural gas~7=Propane~8=Battery/electric~9=Bi-fuel vehicle using gasoline/petrol~10=Bi-fuel vehicle using methanol~11=Bi-fuel vehicle using ethanol~12=Bi-fuel vehicle using LPG~13=Bi-fuel vehicle using CNG~14=Bi-fuel vehicle using propane~15=Bi-fuel vehicle using battery~16=Bi-fuel vehicle using battery and combustion engine for propulsion~17=Hybrid vehicle using gasoline engine for propulsion~18=Hybrid vehicle using gasoline engine on ethanol for propulsion~19=Hybrid vehicle using diesel engine for propulsion~20=Hybrid vehicle using battery for propulsion~21=Hybrid vehicle using battery and combustion engine for propulsion~22=Hybrid vehicle in regeneration mode~23=Bi-fuel vehicle using diesel~24=Bi-fuel vehicle using natural gas~25=Bi-fuel vehicle using diesel~26=Natural gas~27=Dual fuel vehicle using diesel and CNG~28=Dual fuel vehicle using diesel and LNG~29=Fuel cell utilizing hydrogen~30=Hydrogen Internal Combustion Engine~31=Kerosene~32=Heavy Fuel Oil
+53|0|16|1|200|0||kPa||327.675||E|Absolute evap system vapor pressure|
+54|0|16|1|1000|0|s|kPa||||E|Evap system vapor pressure (wide)|
+55|0|8|100|128|-100||%|-100|99.22||E|Short term secondary O2 sensor fuel trim (bank 1)|
+56|0|8|100|128|-100||%|-100|99.22||E|Long term secondary O2 sensor fuel trim (bank 1)|
+57|0|8|100|128|-100||%|-100|99.22||E|Short term secondary O2 sensor fuel trim (bank 2)|
+58|0|8|100|128|-100||%|-100|99.22||E|Long term secondary O2 sensor fuel trim (bank 2)|
+5A|0|8|100|255|0||%||100||E|Accelerator pedal position (relative)|
+5B|0|8|100|255|0||%||100||H|Hybrid battery pack remaining charge|
+5D|0|16|1|128|-210||deg|-210|301.992||E|Fuel injection timing|
+61|0|8|1|1|-125||%|-125|130||E|Driver's demand engine torque|
+62|0|8|1|1|-125||%|-125|130||E|Actual engine torque|
+63|0|16|1|1|0||Nm||65535||E|Engine reference torque|
+65|8|4|1|1|0||yesno||15||E|Recommended gear|
+65|12|1|1|1|0||yesno||1||E|Glow plug lamp status|
+65|13|1|1|1|0||yesno||1||E|Manual Trans Neutral Gear Status|
+65|14|1|1|1|0||yesno||1||E|Auto Trans Neutral Drive Status|
+65|15|1|1|1|0||yesno||1||E|Power Take Off (PTO) Output Status|
+66|8|16|1|32|0||g/s||2047.97|7|E|Mass Air Flow Sensor A|
+66|24|16|1|32|0||g/s||2047.97|6|E|Mass Air Flow Sensor B|
+67|8|8|1|1|-40||C|-40|215|7|E|Engine coolant temperature 1|
+67|16|8|1|1|-40||C|-40|215|6|E|Engine coolant temperature 2|
+68|8|8|1|1|-40||C|-40|215|7|E|Intake air temperature, bank 1, sensor 1|
+68|16|8|1|1|-40||C|-40|215|6|E|Intake air temperature, bank 1, sensor 2|
+68|24|8|1|1|-40||C|-40|215|5|E|Intake air temperature, bank 1, sensor 3|
+68|32|8|1|1|-40||C|-40|215|4|E|Intake air temperature, bank 2, sensor 1|
+68|40|8|1|1|-40||C|-40|215|3|E|Intake air temperature, bank 2, sensor 2|
+68|48|8|1|1|-40||C|-40|215|2|E|Intake air temperature, bank 2, sensor 3|
+69|8|8|100|255|0||%||100|7|E|Commanded EGR A duty cycle/position|
+69|16|8|100|255|0||%||100|6|E|Actual EGR A duty cycle/position|
+69|24|8|100|128|-100||%|-100|99.22|5|E|EGR A error|
+69|32|8|100|255|0||%||100|4|E|Commanded EGR B duty cycle/position|
+69|40|8|100|255|0||%||100|3|E|Actual EGR B duty cycle/position|
+69|48|8|100|128|-100||%|-100|99.22|2|E|EGR B error|
+6A|8|8|100|255|0||%||100|7|E|Commanded intake air flow A control|
+6A|16|8|100|255|0||%||100|6|E|Relative intake air flow A position|
+6A|24|8|100|255|0||%||100|5|E|Commanded intake air flow B control|
+6A|32|8|100|255|0||%||100|4|E|Relative intake air flow B position|
+6B|8|8|1|1|-40||C|-40|215|7|E|Exhaust Gas Recirculation Temp Sensor A (Bank 1, Sensor 1)|
+6B|16|8|1|1|-40||C|-40|215|6|E|Exhaust Gas Recirculation Temp Sensor C (Bank 1, Sensor 2)|
+6B|24|8|1|1|-40||C|-40|215|5|E|Exhaust Gas Recirculation Temp Sensor B (Bank 2, Sensor 1)|
+6B|32|8|1|1|-40||C|-40|215|4|E|Exhaust Gas Recirculation Temp Sensor D (Bank 2, Sensor 2)|
+6C|8|8|100|255|0||%||100||E|Commanded Throttle Actuator A Control|
+6C|16|8|100|255|0||%||100||E|Relative Throttle A Position|
+6C|24|8|100|255|0||%||100||E|Commanded Throttle Actuator B Control|
+6C|32|8|100|255|0||%||100||E|Relative Throttle B Position|
+6D|8|16|10|1|0||kPa||655350|7|F|Commanded Fuel Rail Pressure A|
+6D|24|16|10|1|0||kPa||655350|6|F|Fuel Rail Pressure A|
+6D|40|8|1|1|-40||C|-40|215|5|F|Fuel Rail Temperature A|
+6D|48|16|10|1|0||kPa||655350|4|F|Commanded Fuel Rail Pressure B|
+6D|64|16|10|1|0||kPa||655350|3|F|Fuel Rail Pressure B|
+6D|80|8|1|1|-40||C|-40|215|2|F|Fuel Rail Temperature B|
+6E|8|16|10|1|0||kPa||655350|7|E|Commanded injection control pressure A|
+6E|24|16|10|1|0||kPa||655350|6|E|Injection control pressure A|
+6E|40|16|10|1|0||kPa||655350|5|E|Commanded injection control pressure B|
+6E|56|16|10|1|0||kPa||655350|4|E|Injection control pressure B|
+70|8|16|1|32|0||kPa||2047.97|7|E|Commanded boost pressure A|
+70|40|16|1|32|0||kPa||2047.97|4|E|Commanded boost pressure B|
+70|56|16|1|32|0||kPa||2047.97|3|E|Boost pressure sensor B|
+71|8|8|100|255|0||%||100|7|E|Commanded variable geometry turbo A position|
+71|16|8|100|255|0||%||100|6|E|Variable geometry turbo A position|
+71|24|8|100|255|0||%||100|4|E|Commanded variable geometry turbo B position|
+71|32|8|100|255|0||%||100|3|E|Variable geometry turbo B position|
+71|44|2|1|1|0|||||2|E|Variable geometry turbo B control status|1=Open loop, no fault present~2=Closed loop, no fault present~3=Fault present, VGT data unreliable
+71|46|2|1|1|0|||||5|E|Variable geometry turbo A control status|1=Open loop, no fault present~2=Closed loop, no fault present~3=Fault present, VGT data unreliable
+72|8|8|100|255|0||%||100|7|E|Commanded wastegate A position|
+72|16|8|100|255|0||%||100|6|E|Wastegate A position|
+72|24|8|100|255|0||%||100|5|E|Commanded wastegate B position|
+72|32|8|100|255|0||%||100|4|E|Wastegate B position|
+73|8|16|1|100|0||kPa||655.35|7|E|Exhaust pressure bank 1, sensor 1|
+73|24|16|1|100|0||kPa||655.35|6|E|Exhaust pressure bank 2, sensor 1|
+74|8|16|10|1|0||rpm||655350|7|E|Turbocharger A speed|
+74|24|16|10|1|0||rpm||655350|6|E|Turbocharger B speed|
+75|8|8|1|1|-40||C|-40|215|7|E|Turbocharger A compressor inlet temperature|
+75|16|8|1|1|-40||C|-40|215|6|E|Turbocharger A compressor outlet temperature|
+75|24|16|1|10|-40||C|-40|6513.5|5|E|Turbocharger A turbine inlet temperature|
+75|40|16|1|10|-40||C|-40|6513.5|4|E|Turbocharger A turbine outlet temperature|
+76|8|8|1|1|-40||C|-40|215|7|E|Turbocharger B compressor inlet temperature|
+76|16|8|1|1|-40||C|-40|215|6|E|Turbocharger B compressor outlet temperature|
+76|24|16|1|10|-40||C|-40|6513.5|5|E|Turbocharger B turbine inlet temperature|
+76|40|16|1|10|-40||C|-40|6513.5|4|E|Turbocharger B turbine outlet temperature|
+77|8|8|1|1|-40||C|-40|215|7|E|Charge air cooler temperature bank 1, sensor 1|
+77|16|8|1|1|-40||C|-40|215|6|E|Charge air cooler temperature bank 1, sensor 2|
+77|24|8|1|1|-40||C|-40|215|5|E|Charge air cooler temperature bank 2, sensor 1|
+77|32|8|1|1|-40||C|-40|215|4|E|Charge air cooler temperature bank 2, sensor 2|
+78|24|16|1|10|-40||C|-40|6513.5|6|E|Exhaust gas temperature bank 1, sensor 2|
+78|40|16|1|10|-40||C|-40|6513.5|5|E|Exhaust gas temperature bank 1, sensor 3|
+78|56|16|1|10|-40||C|-40|6513.5|4|E|Exhaust gas temperature bank 1, sensor 4|
+79|8|16|1|10|-40||C|-40|6513.5|7|E|Exhaust gas temperature bank 2, sensor 1|
+79|24|16|1|10|-40||C|-40|6513.5|6|E|Exhaust gas temperature bank 2, sensor 2|
+79|40|16|1|10|-40||C|-40|6513.5|5|E|Exhaust gas temperature bank 2, sensor 3|
+79|56|16|1|10|-40||C|-40|6513.5|4|E|Exhaust gas temperature bank 2, sensor 4|
+7A|8|16|1|100|0|s|kPa|-327.68|327.67|7|E|Particulate filter bank 1 delta pressure|
+7A|24|16|1|100|0||kPa||655.35|6|E|Particulate filter bank 1 inlet pressure|
+7A|40|16|1|100|0||kPa||655.35|5|E|Particulate filter bank 1 outlet pressure|
+7B|8|16|1|100|0|s|kPa|-327.68|327.67|7|E|Particulate filter bank 2 delta pressure|
+7B|24|16|1|100|0||kPa||655.35|6|E|Particulate filter bank 2 inlet pressure|
+7B|40|16|1|100|0||kPa||655.35|5|E|Particulate filter bank 2 outlet pressure|
+7C|8|16|1|10|-40||C|-40|6513.5|7|E|Particulate filter bank 1 inlet temperature|
+7C|24|16|1|10|-40||C|-40|6513.5|6|E|Particulate filter bank 1 outlet temperature|
+7C|40|16|1|10|-40||C|-40|6513.5|5|E|Particulate filter bank 2 inlet temperature|
+7C|56|16|1|10|-40||C|-40|6513.5|4|E|Particulate filter bank 2 outlet temperature|
+7E|4|1|1|1|0||yesno||1||D|NTE deficiency for PM active area|
+7E|5|1|1|1|0||yesno||1||D|Inside manufacturer-specific PM NTE carve-out area|
+7E|6|1|1|1|0||yesno||1||D|Outside PM control area|
+7E|7|1|1|1|0||yesno||1||D|Inside PM control area|
+7F|8|32|1|1|0||s||4.29497e+09|7|E|Total Engine Run Time|
+7F|40|32|1|1|0||s||4.29497e+09|6|E|Total Idle Run Time|
+7F|72|32|1|1|0||s||4.29497e+09|5|E|Total Run Time With PTO Active|
+81|8|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #1 timer 1 active|
+81|40|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #1 timer 2 active|
+81|72|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #2 timer 1 active|
+81|104|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #2 timer 2 active|
+81|136|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #3 timer 1 active|
+81|168|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #3 timer 2 active|
+81|200|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #4 timer 1 active|
+81|232|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #4 timer 2 active|
+81|264|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #5 timer 1 active|
+81|296|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #5 timer 2 active|
+82|8|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #6 timer 1 active|
+82|40|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #6 timer 2 active|
+82|72|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #7 timer 1 active|
+82|104|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #7 timer 2 active|
+82|136|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #8 timer 1 active|
+82|168|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #8 timer 2 active|
+82|200|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #9 timer 1 active|
+82|232|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #9 timer 2 active|
+82|264|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #10 timer 1 active|
+82|296|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #10 timer 2 active|
+83|8|16|1|1|0||||65535|7|D|NOx concentration bank 1, sensor 1|
+83|24|16|1|1|0||||65535|6|D|NOx concentration bank 1, sensor 2|
+83|40|16|1|1|0||||65535|5|D|NOx concentration bank 2, sensor 1|
+83|56|16|1|1|0||||65535|4|D|NOx concentration bank 2, sensor 2|
+84|0|8|1|1|-40||C|-40|215||E|Manifold surface temperature|
+85|8|16|1|200|0||L/h||327.675|7|D|Average reagent consumption|
+85|24|16|1|200|0||L/h||327.675|6|D|Average demanded reagent consumption|
+85|40|8|100|255|0||%||100|5|D|Reagent tank level|
+85|48|32|1|1|0||s||4.29497e+09|4|D|Run time with NOx warning active|
+86|8|16|1|80|0||||819.188|7|D|PM mass concentration bank 1, sensor 1|
+86|24|16|1|80|0||||819.188|6|D|PM mass concentration bank 2, sensor 1|
+88|0|1|1|1|0||yesno||1||D|SCR inducement system active|
+88|4|1|1|1|0||yesno||1||D|SCR inducement for NOx emissions too high|
+88|5|1|1|1|0||yesno||1||D|SCR inducement for reagent consumption deviation|
+88|6|1|1|1|0||yesno||1||D|SCR inducement for incorrect reagent|
+88|7|1|1|1|0||yesno||1||D|SCR inducement for reagent level too low|
+88|8|1|1|1|0||yesno||1||D|SCR inducement for NOx emissions too high in the 10,000-20,000 km history block|
+88|9|1|1|1|0||yesno||1||D|SCR inducement for reagent consumption deviation in the 10,000-20,000 km history block|
+88|10|1|1|1|0||yesno||1||D|SCR inducement for incorrect reagent in the 10,000-20,000 km history block|
+88|11|1|1|1|0||yesno||1||D|SCR inducement for reagent level too low in the 10,000-20,000 km history block|
+88|12|1|1|1|0||yesno||1||D|SCR inducement for NOx emissions too high in the 0-10,000 km history block|
+88|13|1|1|1|0||yesno||1||D|SCR inducement for reagent consumption deviation in the 0-10,000 km history block|
+88|14|1|1|1|0||yesno||1||D|SCR inducement for incorrect reagent in the 0-10,000 km history block|
+88|15|1|1|1|0||yesno||1||D|SCR inducement for reagent level too low in the 0-10,000 km history block|
+88|16|1|1|1|0||yesno||1||D|SCR inducement for NOx emissions too high in the 30,000-40,000 km history block|
+88|17|1|1|1|0||yesno||1||D|SCR inducement for reagent consumption deviation in the 30,000-40,000 km history block|
+88|18|1|1|1|0||yesno||1||D|SCR inducement for incorrect reagent in the 30,000-40,000 km history block|
+88|19|1|1|1|0||yesno||1||D|SCR inducement for reagent level too low in the 30,000-40,000 km history block|
+88|20|1|1|1|0||yesno||1||D|SCR inducement for NOx emissions too high in the 20,000-30,000 km history block|
+88|21|1|1|1|0||yesno||1||D|SCR inducement for reagent consumption deviation in the 20,000-30,000 km history block|
+88|22|1|1|1|0||yesno||1||D|SCR inducement for incorrect reagent in the 20,000-30,000 km history block|
+88|23|1|1|1|0||yesno||1||D|SCR inducement for reagent level too low in the 20,000-30,000 km history block|
+88|24|16|1|1|0||km||65535||D|Distance with SCR inducement active in the current 10,000 km block|
+88|40|16|1|1|0||km||65535||D|Distance travelled in the current 10,000 km block|
+88|56|16|1|1|0||km||65535||D|Distance with SCR inducement active in the 10,000-20,000 km block|
+88|72|16|1|1|0||km||65535||D|Distance with SCR inducement active in the 20,000-30,000 km block|
+88|88|16|1|1|0||km||65535||D|Distance with SCR inducement active in the 30,000-40,000 km block|
+89|8|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #11 timer 1 active|
+89|40|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #11 timer 2 active|
+89|72|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #12 timer 1 active|
+89|104|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #12 timer 2 active|
+89|136|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #13 timer 1 active|
+89|168|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #13 timer 2 active|
+89|200|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #14 timer 1 active|
+89|232|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #14 timer 2 active|
+89|264|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #15 timer 1 active|
+89|296|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #15 timer 2 active|
+8A|8|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #16 timer 1 active|
+8A|40|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #16 timer 2 active|
+8A|72|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #17 timer 1 active|
+8A|104|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #17 timer 2 active|
+8A|136|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #18 timer 1 active|
+8A|168|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #18 timer 2 active|
+8A|200|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #19 timer 1 active|
+8A|232|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #19 timer 2 active|
+8A|264|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #20 timer 1 active|
+8A|296|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #20 timer 2 active|
+8B|12|1|1|1|0||yesno||1|4|D|NOx adsorber desulfurization in progress|
+8B|13|1|1|1|0||yesno||1|5|D|NOx adsorber regen in progress|
+8B|15|1|1|1|0||yesno||1|7|D|Particulate filter regen in progress|
+8B|16|8|100|255|0||%||100|3|D|Normalized trigger for particulate filter regen|
+8B|24|16|1|1|0||min||65535|2|D|Average time between particulate filter regens|
+8B|40|16|1|1|0||km||65535|1|D|Average distance between particulate filter regens|
+8B|14|1|1|1|0|||||6|D|Particulate filter regen type|0=Passive regen~1=Active regen
+8C|8|16|100|65535|0||%||100|7|F|O2 concentration bank 1, sensor 1|
+8C|24|16|100|65535|0||%||100|6|F|O2 concentration bank 1, sensor 2|
+8C|40|16|100|65535|0||%||100|5|F|O2 concentration bank 2, sensor 1|
+8C|56|16|100|65535|0||%||100|4|F|O2 concentration bank 2, sensor 2|
+8C|72|16|1|8192|0||||7.99988|3|F|O2 sensor lambda bank 1, sensor 1|
+8C|88|16|1|8192|0||||7.99988|2|F|O2 sensor lambda bank 1, sensor 2|
+8C|104|16|1|8192|0||||7.99988|1|F|O2 sensor lambda bank 2, sensor 1|
+8C|120|16|1|8192|0||||7.99988|0|F|O2 sensor lambda bank 2, sensor 2|
+8D|0|8|100|255|0||%||100||E|Absolute Throttle Position G|
+8E|0|8|1|1|-125||%|-125|130||E|Engine Friction - Percent Torque|
+8F|14|1|1|1|0||yesno||1||D|PM sensor bank 1, sensor 1 regenerating|
+8F|15|1|1|1|0||yesno||1||D|PM sensor bank 1, sensor 1 measuring|
+8F|16|16|1|100|0|s|%|-327.68|327.67|6|D|PM sensor normalized output bank 1, sensor 1|
+8F|38|1|1|1|0||yesno||1||D|PM sensor bank 2, sensor 1 regenerating|
+8F|39|1|1|1|0||yesno||1||D|PM sensor bank 2, sensor 1 measuring|
+8F|40|16|1|100|0|s|%|-327.68|327.67|4|D|PM sensor normalized output bank 2, sensor 1|
+92|8|1|1|1|0||yesno||1|0|F|Idle fuel balance control 2 in closed loop|
+92|9|1|1|1|0||yesno||1|1|F|Fuel injection timing control 2 in closed loop|
+92|10|1|1|1|0||yesno||1|2|F|Fuel injection quantity control 2 in closed loop|
+92|11|1|1|1|0||yesno||1|3|F|Fuel pressure control 2 in closed loop|
+92|12|1|1|1|0||yesno||1|4|F|Idle fuel balance control 1 in closed loop|
+92|13|1|1|1|0||yesno||1|5|F|Fuel injection timing control 1 in closed loop|
+92|14|1|1|1|0||yesno||1|6|F|Fuel injection quantity control 1 in closed loop|
+92|15|1|1|1|0||yesno||1|7|F|Fuel pressure control 1 in closed loop|
+94|15|1|1|1|0||yesno||1|7|D|NOx warning system active|
+94|16|16|1|1|0||h||65535|6|D|Engine hours with incorrect reagent quality|
+94|32|16|1|1|0||h||65535|5|D|Engine hours with incorrect reagent consumption|
+94|48|16|1|1|0||h||65535|4|D|Engine hours with reagent dosing interrupted|
+94|64|16|1|1|0||h||65535|3|D|Engine hours with an impeded EGR valve|
+94|80|16|1|1|0||h||65535|2|D|Engine hours with a NOx control monitoring system fault|
+94|9|2|1|1|0||||||D|Level three inducement status|0=Level three inducement inactive~1=Level three inducement enabled~2=Level three inducement active~3=Level three inducement not supported
+94|11|2|1|1|0||||||D|Level two inducement status|0=Level two inducement inactive~1=Level two inducement enabled~2=Level two inducement active~3=Level two inducement not supported
+94|13|2|1|1|0||||||D|Level one inducement status|0=Level one inducement inactive~1=Level one inducement enabled~2=Level one inducement active~3=Level one inducement not supported
+95|8|16|1|10000|0||g/L||6.5535|7|D|Target SCR catalyst A NH3 storage|
+95|24|16|1|10000|0||g/L||6.5535|6|D|Actual SCR catalyst A NH3 storage|
+95|40|16|1|10000|0||g/L||6.5535|5|D|Target SCR catalyst B NH3 storage|
+95|56|16|1|10000|0||g/L||6.5535|4|D|Actual SCR catalyst B NH3 storage|
+96|8|16|1|1200|0||g/s||54.6125|7|D|Hydrocarbon doser flow rate|
+96|24|8|100|255|0||%||100|6|D|Hydrocarbon doser injector duty cycle|
+96|32|16|1|10|0||kPa||6553.5|5|D|Aftertreatment fuel pressure|
+97|8|16|1|10000|0||g/s||6.5535|7|D|Engine-out NOx mass emission rate|
+97|24|16|1|10000|0||g/s||6.5535|6|D|Tailpipe NOx mass emission rate|
+9A|16|16|1|64|0||V||1023.98|6|H|Hybrid/EV Battery System Voltage|
+9A|32|16|1|10|0|s|A|-3276.8|3276.7|5|H|Hybrid/EV Battery System Current|
+9A|13|2|1|1|0|||||4|H|Enhanced Hybrid/EV Vehicle Charging State|0=Charge sustaining mode~1=Charge depleting mode~2=Charge increasing mode~3=Not PSA
+9A|15|1|1|1|0|||||7|H|Hybrid/EV Vehicle Charging State|0=Charge sustaining mode~1=Charge depleting mode
+9B|8|8|1|4|0||%||63.75|6|D|DEF concentration|
+9B|16|8|1|1|-40||C|-40|215|5|D|DEF tank temperature|
+9B|24|8|100|255|0||%||100|4|D|DEF tank level|
+9B|0|4|1|1|0|||||7|D|DEF type|0=Urea concentration too high~1=Urea concentration too low~2=Fluid is diesel or another fluid~3=DEF is the proper mixture~13=No concentration sensor fault, fluid type cannot be determined~14=Concentration sensor fault, no result
+9C|8|16|100|65535|0||%||100|7|F|O2 concentration bank 1, sensor 3|
+9C|24|16|100|65535|0||%||100|6|F|O2 concentration bank 1, sensor 4|
+9C|40|16|100|65535|0||%||100|5|F|O2 concentration bank 2, sensor 3|
+9C|56|16|100|65535|0||%||100|4|F|O2 concentration bank 2, sensor 4|
+9C|72|16|1|8192|0||||7.99988|3|F|O2 sensor lambda bank 1, sensor 3|
+9C|88|16|1|8192|0||||7.99988|2|F|O2 sensor lambda bank 1, sensor 4|
+9C|104|16|1|8192|0||||7.99988|1|F|O2 sensor lambda bank 2, sensor 3|
+9C|120|16|1|8192|0||||7.99988|0|F|O2 sensor lambda bank 2, sensor 4|
+9D|0|16|1|50|0||g/s||1310.7||F|Engine fuel rate (alternate)|
+9D|16|16|1|50|0||g/s||1310.7||F|Vehicle fuel rate|
+9E|0|16|1|5|0||kg/h||13107||F|Engine exhaust flow rate|
+9F|8|8|100|255|0||%||100|7|F|Fuel system A use percentage bank 1|
+9F|16|8|100|255|0||%||100|6|F|Fuel system B use percentage bank 1|
+9F|24|8|100|255|0||%||100|5|F|Fuel system A use percentage bank 2|
+9F|32|8|100|255|0||%||100|4|F|Fuel system B use percentage bank 2|
+9F|40|8|100|255|0||%||100|3|F|Fuel system A use percentage bank 3|
+9F|48|8|100|255|0||%||100|2|F|Fuel system B use percentage bank 3|
+9F|56|8|100|255|0||%||100|1|F|Fuel system A use percentage bank 4|
+9F|64|8|100|255|0||%||100|0|F|Fuel system B use percentage bank 4|
+A1|8|16|1|1|0||||65535|7|D|Corrected NOx concentration bank 1, sensor 1|
+A1|24|16|1|1|0||||65535|6|D|Corrected NOx concentration bank 1, sensor 2|
+A1|40|16|1|1|0||||65535|5|D|Corrected NOx concentration bank 2, sensor 1|
+A1|56|16|1|1|0||||65535|4|D|Corrected NOx concentration bank 2, sensor 2|
+A2|0|16|1|32|0||mg/stroke||2047.97||E|Cylinder fuel rate|
+A3|2|1|1|1|0||yesno||1|3|F|Evap system sealed|
+A3|8|16|1|4000|0|s|kPa|-8.192|8.19175|7|F|Evap system vapor pressure A|
+A3|24|16|1|500|0|s|kPa|-65.536|65.534|6|F|Evap system vapor pressure A, wide range|
+A3|40|16|1|4000|0|s|kPa|-8.192|8.19175|5|F|Evap system vapor pressure B|
+A3|56|16|1|500|0|s|kPa|-65.536|65.534|4|F|Evap system vapor pressure B, wide range|
+A4|8|4|1|1|0||||15|7|E|Transmission actual gear|
+A4|16|16|1|1000|0||||65.535|6|E|Transmission actual gear ratio|
+A5|8|8|1|2|0||%||100|7|D|Commanded DEF dosing|
+A5|16|16|1|2000|0||L||32.7675|6|D|DEF used in the current driving cycle|
+A7|8|16|1|1|0||||65535|7|D|NOx concentration bank 1, sensor 3|
+A7|24|16|1|1|0||||65535|6|D|NOx concentration bank 1, sensor 4|
+A7|40|16|1|1|0||||65535|5|D|NOx concentration bank 2, sensor 3|
+A7|56|16|1|1|0||||65535|4|D|NOx concentration bank 2, sensor 4|
+A8|8|16|1|1|0||||65535|7|D|Corrected NOx concentration bank 1, sensor 3|
+A8|24|16|1|1|0||||65535|6|D|Corrected NOx concentration bank 1, sensor 4|
+A8|40|16|1|1|0||||65535|5|D|Corrected NOx concentration bank 2, sensor 3|
+A8|56|16|1|1|0||||65535|4|D|Corrected NOx concentration bank 2, sensor 4|
+AA|0|8|1|1|0||kph||255||E|Maximum current vehicle speed limit|
+AB|8|16|1|32|0||kPa||2047.97|7|F|Alternative fuel rail pressure|
+AB|24|8|1|1|-40||C|-40|215|6|F|Alternative fuel rail temperature|
+AB|32|16|1|8|0||kPa||8191.88|5|F|Alternative fuel tank pressure|
+AB|48|16|1|1|0||kPa||65535|4|F|Alternative fuel tank pressure, wide range|
+AB|64|8|2|1|-256||C|-256|254|3|F|Alternative fuel tank temperature|
+AC|8|8|1|1|0||||255|7|D|DEF doser A dosing mode|
+AC|16|16|3|10000|0||kg/h||19.6605|6|D|DEF doser A maximum dosing rate|
+AE|8|16|1|4000|0|s|kPa|-8.192|8.19175|7|F|Evap system purge pressure|
+AE|24|16|1|500|0|s|kPa|-65.536|65.534|6|F|Evap system purge pressure, wide range|
+AF|0|16|1|20|0||kg/h||3276.75||E|Commanded fresh air flow|
+B0|8|16|1|20|0||kg/h||3276.75|7|E|EGR mass flow rate A|
+B0|24|16|1|20|0||kg/h||3276.75|6|E|EGR mass flow rate B|
+B1|9|1|1|1|0||yesno||1||F|Fuel system bank 2 in open loop due to a malfunction|
+B1|10|1|1|1|0||yesno||1||F|Fuel system bank 2 in closed loop|
+B1|11|1|1|1|0||yesno||1||F|Fuel system bank 2 in open loop|
+B1|13|1|1|1|0||yesno||1||F|Fuel system bank 1 in open loop due to a malfunction|
+B1|14|1|1|1|0||yesno||1||F|Fuel system bank 1 in closed loop|
+B1|15|1|1|1|0||yesno||1||F|Fuel system bank 1 in open loop|
+B1|16|8|100|128|-100||%|-100|99.2188|5|F|Short term fuel trim bank 1, compression ignition|
+B1|24|8|100|128|-100||%|-100|99.2188|4|F|Long term fuel trim bank 1, compression ignition|
+B1|32|8|100|128|-100||%|-100|99.2188|3|F|Short term fuel trim bank 2, compression ignition|
+B1|40|8|100|128|-100||%|-100|99.2188|2|F|Long term fuel trim bank 2, compression ignition|
+B2|0|8|100|255|0||%||100||H|Traction battery pack State of Health|
+B3|8|16|1|20|0||kW||3276.75||H|HV battery actual charge rate|
+B3|24|16|1|20|0||kW||3276.75|7|H|HV battery pack A actual charge rate|
+B3|40|16|1|20|0||kW||3276.75|6|H|HV battery pack B actual charge rate|
+B3|56|16|1|20|0||kW||3276.75|5|H|HV battery pack C actual charge rate|
+B3|72|16|1|20|0||kW||3276.75|4|H|HV battery pack D actual charge rate|
+B3|88|16|1|20|0||kW||3276.75|3|H|HV battery pack E actual charge rate|
+B3|104|16|1|20|0||kW||3276.75|2|H|HV battery pack F actual charge rate|
+B3|120|16|1|20|0||kW||3276.75|1|H|HV battery pack G actual charge rate|
+B3|136|16|1|20|0||kW||3276.75|0|H|HV battery pack H actual charge rate|
+B4|8|8|1|1|-40||C|-40|215||H|HV battery temperature|
+B4|16|8|1|1|-40||C|-40|215|7|H|HV battery pack A temperature|
+B4|24|8|1|1|-40||C|-40|215|6|H|HV battery pack B temperature|
+B4|32|8|1|1|-40||C|-40|215|5|H|HV battery pack C temperature|
+B4|40|8|1|1|-40||C|-40|215|4|H|HV battery pack D temperature|
+B4|48|8|1|1|-40||C|-40|215|3|H|HV battery pack E temperature|
+B4|56|8|1|1|-40||C|-40|215|2|H|HV battery pack F temperature|
+B4|64|8|1|1|-40||C|-40|215|1|H|HV battery pack G temperature|
+B4|72|8|1|1|-40||C|-40|215|0|H|HV battery pack H temperature|
+B5|8|16|1|20|-1600||A|-1600|1676.75||H|HV battery current|
+B5|24|16|1|20|-1600||A|-1600|1676.75|7|H|HV battery pack A current|
+B5|40|16|1|20|-1600||A|-1600|1676.75|6|H|HV battery pack B current|
+B5|56|16|1|20|-1600||A|-1600|1676.75|5|H|HV battery pack C current|
+B5|72|16|1|20|-1600||A|-1600|1676.75|4|H|HV battery pack D current|
+B5|88|16|1|20|-1600||A|-1600|1676.75|3|H|HV battery pack E current|
+B5|104|16|1|20|-1600||A|-1600|1676.75|2|H|HV battery pack F current|
+B5|120|16|1|20|-1600||A|-1600|1676.75|1|H|HV battery pack G current|
+B5|136|16|1|20|-1600||A|-1600|1676.75|0|H|HV battery pack H current|
+B6|8|16|1|20|0||V||3276.75||H|HV battery voltage|
+B6|24|16|1|20|0||V||3276.75|7|H|HV battery pack A voltage|
+B6|40|16|1|20|0||V||3276.75|6|H|HV battery pack B voltage|
+B6|56|16|1|20|0||V||3276.75|5|H|HV battery pack C voltage|
+B6|72|16|1|20|0||V||3276.75|4|H|HV battery pack D voltage|
+B6|88|16|1|20|0||V||3276.75|3|H|HV battery pack E voltage|
+B6|104|16|1|20|0||V||3276.75|2|H|HV battery pack F voltage|
+B6|120|16|1|20|0||V||3276.75|1|H|HV battery pack G voltage|
+B6|136|16|1|20|0||V||3276.75|0|H|HV battery pack H voltage|
+B7|8|8|1|1|-40||C|-40|215|7|H|HV battery minimum cell temperature|
+B7|16|8|1|1|-40||C|-40|215|6|H|HV battery maximum cell temperature|
+B7|24|8|1|1|-40||C|-40|215|5|H|HV battery average cell temperature|
+B7|32|8|1|1|-40||C|-40|215|4|H|HV battery bus bar temperature|
+B7|40|8|1|1|-40||C|-40|215|3|H|HV battery coolant temperature|
+B7|48|8|1|1|0|||||2|H|HV battery thermal state|0=Thermal system off~1=Active cooling~2=Passive cooling~3=Active heating~4=Passive heating
+B8|0|16|1|1|0||min||65535||H|HV battery active time since cell balancing|
+B9|0|16|1|1000|0||V||65.535||H|HV battery minimum cell voltage|
+B9|16|16|1|1000|0||V||65.535||H|HV battery maximum cell voltage|
+BA|0|8|100|255|0||%||100||H|HV battery continuous rated power available|
+BA|8|16|1|10|0|s|A|-3276.8|3276.7||H|HV battery continuous charge current limit|
+BA|24|16|1|10|0|s|A|-3276.8|3276.7||H|HV battery continuous discharge current limit|
+BB|8|32|1|1|0||kWh||4.29497e+09||H|HV battery cumulative energy in|
+BB|40|32|1|1|0||kWh||4.29497e+09|7|H|HV battery pack A cumulative energy in|
+BB|72|32|1|1|0||kWh||4.29497e+09|6|H|HV battery pack B cumulative energy in|
+BB|104|32|1|1|0||kWh||4.29497e+09|5|H|HV battery pack C cumulative energy in|
+BB|136|32|1|1|0||kWh||4.29497e+09|4|H|HV battery pack D cumulative energy in|
+BB|168|32|1|1|0||kWh||4.29497e+09|3|H|HV battery pack E cumulative energy in|
+BB|200|32|1|1|0||kWh||4.29497e+09|2|H|HV battery pack F cumulative energy in|
+BB|232|32|1|1|0||kWh||4.29497e+09|1|H|HV battery pack G cumulative energy in|
+BB|264|32|1|1|0||kWh||4.29497e+09|0|H|HV battery pack H cumulative energy in|
+BC|8|32|1|1|0||kWh||4.29497e+09||H|HV battery cumulative energy out|
+BC|40|32|1|1|0||kWh||4.29497e+09|7|H|HV battery pack A cumulative energy out|
+BC|72|32|1|1|0||kWh||4.29497e+09|6|H|HV battery pack B cumulative energy out|
+BC|104|32|1|1|0||kWh||4.29497e+09|5|H|HV battery pack C cumulative energy out|
+BC|136|32|1|1|0||kWh||4.29497e+09|4|H|HV battery pack D cumulative energy out|
+BC|168|32|1|1|0||kWh||4.29497e+09|3|H|HV battery pack E cumulative energy out|
+BC|200|32|1|1|0||kWh||4.29497e+09|2|H|HV battery pack F cumulative energy out|
+BC|232|32|1|1|0||kWh||4.29497e+09|1|H|HV battery pack G cumulative energy out|
+BC|264|32|1|1|0||kWh||4.29497e+09|0|H|HV battery pack H cumulative energy out|
+BD|8|32|1|10|0||kWh||4.29497e+08||H|HV battery total energy throughput|
+BD|40|32|1|10|0||kWh||4.29497e+08|7|H|HV battery pack A total energy throughput|
+BD|72|32|1|10|0||kWh||4.29497e+08|6|H|HV battery pack B total energy throughput|
+BD|104|32|1|10|0||kWh||4.29497e+08|5|H|HV battery pack C total energy throughput|
+BD|136|32|1|10|0||kWh||4.29497e+08|4|H|HV battery pack D total energy throughput|
+BD|168|32|1|10|0||kWh||4.29497e+08|3|H|HV battery pack E total energy throughput|
+BD|200|32|1|10|0||kWh||4.29497e+08|2|H|HV battery pack F total energy throughput|
+BD|232|32|1|10|0||kWh||4.29497e+08|1|H|HV battery pack G total energy throughput|
+BD|264|32|1|10|0||kWh||4.29497e+08|0|H|HV battery pack H total energy throughput|
+BE|8|8|2|5|0||%||102||H|HV battery state of health|
+BE|16|8|2|5|0||%||102|7|H|HV battery pack A state of health|
+BE|24|8|2|5|0||%||102|6|H|HV battery pack B state of health|
+BE|32|8|2|5|0||%||102|5|H|HV battery pack C state of health|
+BE|40|8|2|5|0||%||102|4|H|HV battery pack D state of health|
+BE|48|8|2|5|0||%||102|3|H|HV battery pack E state of health|
+BE|56|8|2|5|0||%||102|2|H|HV battery pack F state of health|
+BE|64|8|2|5|0||%||102|1|H|HV battery pack G state of health|
+BE|72|8|2|5|0||%||102|0|H|HV battery pack H state of health|
+BF|8|16|1|640|0||%||102.398||H|HV battery recommended minimum state of charge|
+BF|24|16|1|640|0||%||102.398|7|H|HV battery pack A recommended minimum state of charge|
+BF|40|16|1|640|0||%||102.398|6|H|HV battery pack B recommended minimum state of charge|
+BF|56|16|1|640|0||%||102.398|5|H|HV battery pack C recommended minimum state of charge|
+BF|72|16|1|640|0||%||102.398|4|H|HV battery pack D recommended minimum state of charge|
+BF|88|16|1|640|0||%||102.398|3|H|HV battery pack E recommended minimum state of charge|
+BF|104|16|1|640|0||%||102.398|2|H|HV battery pack F recommended minimum state of charge|
+BF|120|16|1|640|0||%||102.398|1|H|HV battery pack G recommended minimum state of charge|
+BF|136|16|1|640|0||%||102.398|0|H|HV battery pack H recommended minimum state of charge|
+C1|8|16|1|640|0||%||102.398||H|HV battery recommended maximum state of charge|
+C1|24|16|1|640|0||%||102.398|7|H|HV battery pack A recommended maximum state of charge|
+C1|40|16|1|640|0||%||102.398|6|H|HV battery pack B recommended maximum state of charge|
+C1|56|16|1|640|0||%||102.398|5|H|HV battery pack C recommended maximum state of charge|
+C1|72|16|1|640|0||%||102.398|4|H|HV battery pack D recommended maximum state of charge|
+C1|88|16|1|640|0||%||102.398|3|H|HV battery pack E recommended maximum state of charge|
+C1|104|16|1|640|0||%||102.398|2|H|HV battery pack F recommended maximum state of charge|
+C1|120|16|1|640|0||%||102.398|1|H|HV battery pack G recommended maximum state of charge|
+C1|136|16|1|640|0||%||102.398|0|H|HV battery pack H recommended maximum state of charge|
+C2|8|24|1|1000|0||kWh||16777.2||H|HV battery discharge energy capacity|
+C2|32|24|1|1000|0||kWh||16777.2|7|H|HV battery pack A discharge energy capacity|
+C2|56|24|1|1000|0||kWh||16777.2|6|H|HV battery pack B discharge energy capacity|
+C2|80|24|1|1000|0||kWh||16777.2|5|H|HV battery pack C discharge energy capacity|
+C2|104|24|1|1000|0||kWh||16777.2|4|H|HV battery pack D discharge energy capacity|
+C2|128|24|1|1000|0||kWh||16777.2|3|H|HV battery pack E discharge energy capacity|
+C2|152|24|1|1000|0||kWh||16777.2|2|H|HV battery pack F discharge energy capacity|
+C2|176|24|1|1000|0||kWh||16777.2|1|H|HV battery pack G discharge energy capacity|
+C2|200|24|1|1000|0||kWh||16777.2|0|H|HV battery pack H discharge energy capacity|
+C3|8|8|100|255|0||%||100|7|F|Fuel level input A|
+C3|16|8|100|255|0||%||100|6|F|Fuel level input B|
+C4|0|32|1|1|0||s||4.29497e+09||D|Exhaust particulate control diagnostic time|
+C4|32|32|1|1|0||||4.29497e+09||D|Exhaust particulate control diagnostic count|
+C5|8|16|79|1000|0||kPa||5177.27|7|F|Low-pressure fuel pressure A|
+C5|24|16|79|1000|0||kPa||5177.27|6|F|Low-pressure fuel pressure B|
+C6|15|1|1|1|0||yesno||1|7|D|Particulate warning system active|
+C6|16|16|1|1|0||h||65535|6|D|Engine hours with the particulate filter removed or blocked|
+C6|32|16|1|1|0||h||65535|5|D|Engine hours with a liquid reagent injection system failure|
+C6|48|16|1|1|0||h||65535|4|D|Engine hours with a particulate control monitoring system fault|
+C6|9|2|1|1|0||||||D|Particulate level three inducement status|0=Level three inducement inactive~1=Level three inducement enabled~2=Level three inducement active~3=Level three inducement not supported
+C6|11|2|1|1|0||||||D|Particulate level two inducement status|0=Level two inducement inactive~1=Level two inducement enabled~2=Level two inducement active~3=Level two inducement not supported
+C6|13|2|1|1|0||||||D|Particulate level one inducement status|0=Level one inducement inactive~1=Level one inducement enabled~2=Level one inducement active~3=Level one inducement not supported
+C8|2|2|1|1|0||||||D|Particulate control (PCD) warning lamp|0=Warning lamp off~1=Warning lamp continuously on~2=Warning lamp blinking~3=Not utilized
+C8|4|2|1|1|0||||||D|NOx control (NCD) warning lamp|0=Warning lamp off~1=Warning lamp continuously on~2=Warning lamp blinking~3=Not utilized
+C8|6|2|1|1|0||||||D|Shared NCD and PCD warning lamp|0=Warning lamp off~1=Warning lamp continuously on~2=Warning lamp blinking~3=Not utilized
+C9|8|16|100|65535|0||%||100|7|F|O2 concentration bank 1, sensor 5|
+C9|24|16|100|65535|0||%||100|6|F|O2 concentration bank 1, sensor 6|
+C9|40|16|100|65535|0||%||100|5|F|O2 concentration bank 2, sensor 5|
+C9|56|16|100|65535|0||%||100|4|F|O2 concentration bank 2, sensor 6|
+C9|72|16|1|8192|0||||7.99988|3|F|O2 sensor lambda bank 1, sensor 5|
+C9|88|16|1|8192|0||||7.99988|2|F|O2 sensor lambda bank 1, sensor 6|
+C9|104|16|1|8192|0||||7.99988|1|F|O2 sensor lambda bank 2, sensor 5|
+C9|120|16|1|8192|0||||7.99988|0|F|O2 sensor lambda bank 2, sensor 6|
+CB|8|16|1|100|0||kPa||655.35|7|E|Exhaust pressure bank 1, sensor 2|
+CB|24|16|1|100|0||kPa||655.35|6|E|Exhaust pressure bank 2, sensor 2|
+CC|8|16|1|1|0|s|rpm|-32768|32767|7|E|Electric motor A speed|
+CC|24|16|1|1|0|s|rpm|-32768|32767|6|E|Electric motor B speed|
+CC|40|16|1|1|0|s|rpm|-32768|32767|5|E|Electric motor C speed|
+CC|56|16|1|1|0|s|rpm|-32768|32767|4|E|Electric motor D speed|
+CC|72|16|1|1|0|s|rpm|-32768|32767|3|E|Electric motor E speed|
+CC|88|16|1|1|0|s|rpm|-32768|32767|2|E|Electric motor F speed|
+CC|104|16|1|1|0|s|rpm|-32768|32767|1|E|Electric motor G speed|
+CC|120|16|1|1|0|s|rpm|-32768|32767|0|E|Electric motor H speed|
+CD|8|16|1|1|0|s|Nm|-32768|32767|7|E|Electric motor A torque|
+CD|24|16|1|1|0|s|Nm|-32768|32767|6|E|Electric motor B torque|
+CD|40|16|1|1|0|s|Nm|-32768|32767|5|E|Electric motor C torque|
+CD|56|16|1|1|0|s|Nm|-32768|32767|4|E|Electric motor D torque|
+CD|72|16|1|1|0|s|Nm|-32768|32767|3|E|Electric motor E torque|
+CD|88|16|1|1|0|s|Nm|-32768|32767|2|E|Electric motor F torque|
+CD|104|16|1|1|0|s|Nm|-32768|32767|1|E|Electric motor G torque|
+CD|120|16|1|1|0|s|Nm|-32768|32767|0|E|Electric motor H torque|
+CE|8|16|1|4000|0|s|kPa|-8.192|8.19175|7|F|Evap system vapor pressure C|
+CE|24|16|1|500|0|s|kPa|-65.536|65.534|6|F|Evap system vapor pressure C, wide range|
+CE|40|16|1|4000|0|s|kPa|-8.192|8.19175|5|F|Evap system vapor pressure D|
+CE|56|16|1|500|0|s|kPa|-65.536|65.534|4|F|Evap system vapor pressure D, wide range|
+CF|8|16|1|10|-40||C|-40|6513.5|7|E|Catalyst temperature A|
+CF|24|16|1|10|-40||C|-40|6513.5|6|E|Catalyst temperature B|
+CF|40|16|1|10|-40||C|-40|6513.5|5|E|Catalyst temperature C|
+CF|56|16|1|10|-40||C|-40|6513.5|4|E|Catalyst temperature D|
+D0|8|16|1|1|0||km||65535|7|H|Distance since state of health update|
+D0|24|16|1|10|0||kWh||6553.5|6|H|HV battery remaining reserve energy|
+D0|40|16|1|10|0||kWh||6553.5|5|H|HV battery initial reserve energy|
+D1|0|16|1|20|0||kW||3276.75||H|HV battery charging limit|
+D1|16|16|1|20|0||kW||3276.75||H|HV battery charging power|
+D2|8|8|100|255|0||%||100|7|H|State of certified energy|
+D2|16|8|100|255|0||%||100|6|H|State of certified range|
+D4|0|32|36|1e+07|0|s|kW|-7730.94|7730.94||H|HV battery power over the last second|
+D5|8|16|1|20|0||V||3276.75|7|H|Fuel cell system voltage|
+D5|24|16|1|2000|0||g/s||32.7675|6|H|Fuel cell fuel consumption|
+D5|40|16|72|1000|0||A||4718.52|5|H|Fuel cell current over the last second|
+D5|56|32|36|100000|0||kW||1.54619e+06|4|H|Fuel cell power over the last second|
+D7|8|8|1|2|0||%||100|7|D|DEF doser B commanded dosing|
+D7|16|8|1|1|0||||255|6|D|DEF doser B dosing mode|
+D7|24|16|3|10000|0||kg/h||19.2765|5|D|DEF doser B maximum dosing rate|
+D8|0|8|1|1|0||||||H|Battery capacity calculation|0=Not ready~1=Ready
+D9|0|32|1|1000|0||kWh||4.29497e+06||H|HV battery calculated usable energy|
+DA|0|32|36|10000|0|s|A|-7.73094e+06|7.73094e+06||H|HV battery current over the last second|
+DC|8|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #21 timer 1 active|
+DC|40|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #21 timer 2 active|
+DC|72|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #22 timer 1 active|
+DC|104|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #22 timer 2 active|
+DC|136|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #23 timer 1 active|
+DC|168|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #23 timer 2 active|
+DC|200|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #24 timer 1 active|
+DC|232|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #24 timer 2 active|
+DC|264|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #25 timer 1 active|
+DC|296|32|1|1|0||s||4.29497e+09||E|Total run time with EI-AECD #25 timer 2 active|`;
+const STD_GROUPS = { E: "Std · engine", F: "Std · fuel & O2", D: "Std · emissions & diesel", H: "Std · hybrid / EV" };
+const STD_SIGS = STD_RAW.split("\n").filter(Boolean).map((line) => {
+  const f = line.split("|");
+  return { std: true, hdr: "", rax: "", req: "01" + f[0], bix: +f[1], len: +f[2], mul: +f[3], div: +f[4], add: +f[5],
+    sign: f[6].includes("s"), lsb: f[6].includes("l"), unit: f[7], min: f[8] === "" ? null : +f[8], max: f[9] === "" ? null : +f[9],
+    sup: f[10] === "" ? null : +f[10], grp: STD_GROUPS[f[11]] || STD_GROUPS.E, name: f[12],
+    map: f[13] ? Object.fromEntries(f[13].split("~").map((kv) => { const i = kv.indexOf("="); return [kv.slice(0, i), kv.slice(i + 1)]; })) : null };
+});
+const STD_PIDS = new Set(STD_SIGS.map((g) => g.req.slice(2)));
+// Standard readings for one PID's data bytes -> [[name, text], ...] (used by the freeze frame)
+function stdDecode(pid, bytes) {
+  const out = [];
+  for (const g of STD_SIGS) {
+    if (g.req !== "01" + pid) continue;
+    if (g.sup != null && !((bytes[g.sup >> 3] >> (7 - (g.sup & 7))) & 1)) continue;
+    const v = extractBits(bytes, g.bix, g.len, g.lsb, g.sign);
+    const text = v == null ? null : fmtOem(g, v);
+    if (text != null) out.push([cleanName(g.name), text]);
+  }
+  return out;
+}
 
 // ===================== DTCs, VIN, Readiness, Mode $06 =====================
 let dtcs = { stored: [], pending: [], permanent: [] }, vinRead = "";
@@ -5844,7 +6869,7 @@ function parseDtcs(raw, svc) {
   return [...out];
 }
 async function readDtcs() {
-  await setHeader("7DF");   // functional: every emissions module answers
+  await setHeader(funcHeader());   // functional: every emissions module answers
   for (const [svc, key] of [["03", "stored"], ["07", "pending"], ["0A", "permanent"]]) {
     if (svc === "0A" && !isCan) { dtcs[key] = []; continue; }
     dtcs[key] = parseDtcs(await sendCmd(svc, 3000), svc);
@@ -5887,16 +6912,19 @@ let modResults = [], modScanning = false;
 
 function moduleList() {
   const map = new Map();
-  const add = (hdr, rax, name) => {
+  const add = (hdr, rax, name, pri, tst) => {
     if (!hdr || hdr === "7DF" || !/^([0-9A-F]{3}|DA[0-9A-F]{2})$/.test(hdr)) return;
-    const m = map.get(hdr) || { hdr, rax: rax || "", names: {} };
+    if (hdr.length === 3 && base29()) return;   // an 11-bit address on a 29-bit car: nobody there
+    const m = map.get(hdr) || { hdr, rax: rax || "", pri: pri || "", tst: tst || "", names: {} };
     if (rax && !m.rax) m.rax = rax;
     if (name) m.names[name] = (m.names[name] || 0) + 1;
     map.set(hdr, m);
   };
   SWEEP.ALL.forEach((a) => add(a));
   (SWEEP[profile()] || []).forEach((a) => { const [h, r] = a.split("|"); add(h, r); });
-  (Array.isArray(ARGS.oem) ? ARGS.oem : []).forEach((g) => add(g.hdr, g.rax, PATH_MODULE[g.path]));
+  if (base29()) SWEEP.HONDA.forEach((a) => add(a));
+  (Array.isArray(ARGS.oem) ? ARGS.oem : []).forEach((g) => add(g.hdr, g.rax, PATH_MODULE[g.path], g.pri, g.tst));
+  (Array.isArray(ARGS.learned) ? ARGS.learned : []).forEach((g) => add(g.hdr, g.rax, PATH_MODULE[g.path], g.pri, g.tst));
   (OEM_DB[profile()] || []).forEach((g) => add(g.hdr, g.rax));
   return [...map.values()].map((m) => {
     const best = Object.entries(m.names).sort((a, b) => b[1] - a[1])[0];
@@ -5930,7 +6958,7 @@ function udsStatus(st) {
   return "history";
 }
 async function askModule(mod, req, timeout) {
-  await setAddr(mod.hdr, mod.rax);
+  await setAddr(mod.hdr, mod.rax, mod.pri, mod.tst);
   let msgs = messages(await sendCmd(req, timeout));
   // "busy, wait" (7F xx 78) with no real answer yet -> ask again with a longer wait
   if (msgs.some((m) => /^7F..78/.test(m)) && !msgs.some((m) => !m.startsWith("7F"))) msgs = messages(await sendCmd(req, 2000));
@@ -6033,6 +7061,38 @@ async function readVin() {
   const ascii = bytesOf(hex).map((c) => String.fromCharCode(c)).join("").toUpperCase();
   const m = ascii.match(/[A-HJ-NPR-Z0-9]{17}/);
   vinRead = m ? m[0] : "";
+}
+
+// Calibration (software) IDs, their check numbers (CVN) and the computer's name — what a reflash TSB is matched against
+let ecuInfo = null;
+async function readEcuInfo() {
+  ecuInfo = null;
+  const text = (hex) => bytesOf(hex).filter((b) => b >= 32 && b < 127).map((b) => String.fromCharCode(b)).join("").trim();
+  // every reply starts 49 <pid> <count or line number>; what's left is fixed-size items (16 / 4 / 20 bytes)
+  const get = async (pid) => messages(await sendCmd("09" + pid, 2500)).filter((m) => m.startsWith("49" + pid)).map((m) => m.slice(6)).join("");
+  try {
+    const cal = [], cvn = [], name = [];
+    let has = null;   // which info items this car has (so it isn't asked for ones it doesn't)
+    try { has = await supported("09", ["00"]); } catch (_) {}
+    const ok = (pid) => !has || has.has(pid);
+    let d = ok("04") ? await get("04") : "";
+    for (let i = 0; i + 32 <= d.length; i += 32) { const t = text(d.substr(i, 32)); if (t) cal.push(t); }
+    d = ok("06") ? await get("06") : "";
+    for (let i = 0; i + 8 <= d.length; i += 8) if (!/^0+$/.test(d.substr(i, 8))) cvn.push(d.substr(i, 8));
+    d = ok("0A") ? await get("0A") : "";
+    for (let i = 0; i + 40 <= d.length; i += 40) { const t = text(d.substr(i, 40)); if (t) name.push(t); }
+    const uniq = (a) => [...new Set(a)];
+    if (cal.length || cvn.length || name.length) ecuInfo = { cal: uniq(cal), cvn: uniq(cvn), name: uniq(name) };
+  } catch (_) {}
+  const box = $("ecuBox");
+  if (!ecuInfo) { box.style.display = "none"; return; }
+  if (ecuInfo.cal.length) { shown.calid = ecuInfo.cal.join(", "); LABEL.calid = "Calibration ID (software)"; }
+  if (ecuInfo.cvn.length) { shown.cvn = ecuInfo.cvn.join(", "); LABEL.cvn = "Calibration check number (CVN)"; }
+  box.style.display = "block";
+  box.innerHTML = `<b style="color:var(--w)">🪪 Computer software</b> ` +
+    [ecuInfo.name.length ? "Module: " + esc(ecuInfo.name.join(", ")) : "", ecuInfo.cal.length ? "Calibration ID: <b>" + esc(ecuInfo.cal.join(", ")) + "</b>" : "",
+     ecuInfo.cvn.length ? "CVN: " + esc(ecuInfo.cvn.join(", ")) : ""].filter(Boolean).join(" · ") +
+    `<div class="note">Reflash TSBs list the calibration IDs they fix — compare this one before replacing parts.</div>`;
 }
 
 let readinessSummary = "";
@@ -6140,6 +7200,7 @@ async function liveLoop(token) {
     }
     const discovering = oemCmds.some((c) => c.state === "new");
     if (oemCmds.length && !FOCUS && cycle % (discovering ? 2 : 3) === 0) await txn(pollEnhanced);
+    if (cycle > 12 && cycle % 6 === 0) maybeAutoHunt();   // first time on this kind of car: find every reading it has
     if (!FOCUS) await extraPolls(cycle);
     if (cycle % 10 === 0) {
       const secs = (performance.now() - t0) / 1000;
@@ -6449,17 +7510,19 @@ async function initVehicle() {
 
   const dpn = (await sendCmd("ATDPN", 500)).replace(/[\s>]/g, "").toUpperCase();
   isCan = /^A?[6-9]$/.test(dpn);
-  baseProto = curProto = dpn.slice(-1); curCra = "";
+  baseProto = curProto = dpn.slice(-1); curCra = ""; curPri = "";
   batchOK = false; fastOK = true; baseHeader = "7DF";
 
   if (isCan) {   // talk to the engine computer directly: no duplicate replies from other modules, faster
-    await setHeader("7E0");
-    if (messages(await sendCmd("0100", 1500)).some((m) => m.startsWith("4100"))) baseHeader = "7E0";
-    else await setHeader("7DF");
+    const direct = base29() ? "DA10" : "7E0";   // 29-bit cars (most Hondas): the engine computer is 18 DA 10 F1
+    baseHeader = funcHeader();
+    await setHeader(direct);
+    if (messages(await sendCmd("0100", 1500)).some((m) => m.startsWith("4100"))) baseHeader = direct;
+    else await setHeader(baseHeader);
   }
 
   log("Reading supported PIDs…");
-  const sup = await supported("01", ["00", "20", "40", "60", "80", "A0"]);
+  const sup = await supported("01", ["00", "20", "40", "60", "80", "A0", "C0"]);
   sup01 = sup;
   choosePids(sup);
 
@@ -6490,11 +7553,12 @@ $("bleBtn").addEventListener("click", async () => {
       logEvent("scanner", "Connect", "ECM did not answer 0100 on CAN or auto protocol");
       $("bleBtn").disabled = false; return;
     }
-    connected = true; enableBtns(true);
+    connected = true; enableBtns(true); autoHuntTried = false;
     $("bleBtn").textContent = "✅ Connected";
 
     log("Reading VIN & codes…");
     await readVin(); await readDtcs(); await readFreezeFrame();
+    try { await readEcuInfo(); } catch (_) {}
     log("Reading I/M readiness…"); await loadReadiness();
     log("Reading Mode $06…"); await loadMode6();
     startStream();
@@ -6512,7 +7576,7 @@ $("bleBtn").addEventListener("click", async () => {
 function sendSync(auto) {
   const modules = modResults.filter((m) => m.codes.length).map((m) => ({ name: m.name, addr: m.hdr, codes: m.codes }));
   sendValue({ type: "sync", id: "sync-" + Date.now(), vin: vinRead, dtcs: Object.assign({}, dtcs, { modules, freeze: freezeFrame }), auto: !!auto,
-    pids: snapshot(), readiness: readinessSummary, mode6: mode6Summary, flags: plausNow(), at: new Date().toLocaleTimeString() });
+    pids: snapshot(), readiness: readinessSummary, mode6: mode6Summary, flags: plausNow(), at: new Date().toLocaleTimeString(), ecu: ecuInfo });
   log(`Sent to app → VIN ${vinRead || "not reported"} · ${dtcs.stored.length} stored / ${dtcs.pending.length} pending code(s)`);
 }
 
@@ -6540,7 +7604,7 @@ $("evapBtn").addEventListener("click", async () => {
                "Cycling the key releases it.")) return;
   log("Sending EVAP seal request (Mode $08)…");
   const ok = await txn(async () => {
-    await setHeader("7DF");
+    await setHeader(funcHeader());
     const raw = await sendCmd("0801", 4000);
     await setHeader(baseHeader);
     return messages(raw).some((m) => m.startsWith("4801"));
@@ -6558,7 +7622,7 @@ $("clearBtn").addEventListener("click", async () => {
   if (!confirm("Clear ALL fault codes and reset ALL readiness monitors?\n\nBest done key ON, engine OFF. Freeze frame data will be lost.")) return;
   log("Sending Mode 04…");
   const ok = await txn(async () => {
-    await setHeader("7DF");
+    await setHeader(funcHeader());
     const raw = await sendCmd("04", 5000);
     await setHeader(baseHeader);
     return messages(raw).some((m) => m.startsWith("44"));
@@ -7158,16 +8222,32 @@ async function readFreezeFrame() {
     const r = messages(await sendCmd("020200", 1500)).find((m) => m.startsWith("420200"));
     const code = r && r.length >= 10 && r.substr(6, 4) !== "0000" ? decodeDtc(r.substr(6, 4)) : null;
     if (!code) { freezeFrame = null; renderFreeze(); return; }
-    const want = ["03", "04", "05", "06", "07", "08", "09", "0A", "0B", "0C", "0D", "0E", "0F", "10", "11", "23", "2F", "33", "42", "43", "44", "1F", "31", "21", "46"];
+    const first = ["03", "04", "05", "06", "07", "08", "09", "0A", "0B", "0C", "0D", "0E", "0F", "10", "11", "23", "2F", "33", "42", "43", "44", "1F", "31", "21", "46"];
+    // Ask the car which readings its freeze frame holds, then read every one of them (the usual ones first)
+    let ffSup = null;
+    try {
+      const set = new Set();
+      for (const r of ["00", "20", "40", "60", "80", "A0", "C0"]) {
+        const m = messages(await sendCmd("02" + r + "00", 1000)).find((x) => x.startsWith("42" + r + "00") && x.length >= 14);
+        if (!m) break;
+        const bits = parseInt(m.substr(6, 8), 16) >>> 0;
+        for (let i = 0; i < 32; i++) if ((bits >>> (31 - i)) & 1) set.add((parseInt(r, 16) + i + 1).toString(16).toUpperCase().padStart(2, "0"));
+        if (!(bits & 1)) break;
+      }
+      if (set.size) ffSup = set;
+    } catch (_) {}
+    const want = ffSup ? [...first.filter((p) => ffSup.has(p)), ...[...ffSup].filter((p) => !first.includes(p) && (PIDS[p] || STD_PIDS.has(p)))].slice(0, 70)
+                       : first.filter((p) => !sup01 || sup01.has(p));
     const vals = {};
     for (const p of want) {
-      if (sup01 && !sup01.has(p)) continue;
       const m = messages(await sendCmd("02" + p + "00", 700)).find((x) => x.startsWith("42" + p + "00"));
-      const d = PIDS[p];
-      if (!m || !d) continue;
+      if (!m) continue;
       const b = bytesOf(m.slice(6));
-      if (b.length < d.len) continue;
-      const t = d.fn(b); if (t != null) vals[LABEL[d.tile] || d.tile] = t;
+      const d = PIDS[p];
+      if (d) {
+        if (b.length < d.len) continue;
+        const t = d.fn(b); if (t != null) vals[LABEL[d.tile] || d.tile] = t;
+      } else for (const [name, text] of stdDecode(p, b)) vals[name] = text;   // any other standard reading
     }
     freezeFrame = { dtc: code, vals };
   } catch (_) { freezeFrame = null; }
@@ -8572,7 +9652,7 @@ def _eye_read(img_b64: str) -> dict:
   try:
     if secret("GEMINI_API_KEY"):   # quick and cheap for reading a screen every half minute
       raw = gemini([{"text": EYE_READ_PROMPT}, {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}],
-                   json_mode=True, timeout=45)
+                   json_mode=True, timeout=45, think="low")
     else:
       raw, _who = quick_ai(EYE_READ_PROMPT, image_b64=img_b64, max_tokens=3000, effort="low")
   except AIError as e:
@@ -8769,12 +9849,13 @@ if hasattr(st, "fragment"):
     _ai_jobs().pop(p["job"], None)
     ss._ai_pending = None
     if j["state"] == "done":
-      text, research, draft, ds_draft, *more = j["result"]
-      if len(more) > 1:
-        add_diagram_requests(more[1], "AI Check")
+      text, research, draft, ds_draft, *rest = j["result"]
+      if len(rest) > 1:
+        add_diagram_requests(rest[1], "AI Check")
       ss.ble_ai = {"id": p["comp_id"], "text": text, "label": " · ".join(x for x in (
-          p["label"], team_names(draft, ds_draft, research), f"{int(j['finished'] - j['started'])} s") if x),
-                   "tests": (more[0] if more else []) or []}
+          p["label"], rest[2] if len(rest) > 2 else team_names(draft, ds_draft, research),
+          f"{int(j['finished'] - j['started'])} s") if x),
+                   "tests": (rest[0] if rest else []) or []}
     else:
       log_problem("ai", p["what"], j.get("error", "failed"))
       ss.ble_ai = {"id": p["comp_id"], "text": f"⚠️ The AI check failed: {j.get('error')}", "label": p["label"]}
@@ -8970,8 +10051,8 @@ Use clean bold section headers and direct shop-floor language. Skip sections wit
     eye_img = [eye["img"]] if eye else ""
     # Live checks read the live data — no web research here (that's what the Diagnostic Tree is for), so they answer fast.
     def job():
-      text, research, draft, ds_draft = team_answer(prompt, vehicle, dtcs, symptoms, use_web=False, status=None, fast=drive_mode,
-                                                    effort="low" if drive_mode else "medium", image_b64=eye_img)
+      text, research, draft, ds_draft, more = team_answer(prompt, vehicle, dtcs, symptoms, use_web=False, status=None, fast=drive_mode,
+                                                    effort="low" if drive_mode else None, image_b64=eye_img)
       tests, diag = [], []
       if not drive_mode:
         notify("🧪 Test follow-up ready" if ev.get("mode") == "followup" else "🤖 AI Check done", f"{vehicle} — {first_line(text)}",
@@ -8982,15 +10063,15 @@ Use clean bold section headers and direct shop-floor language. Skip sections wit
         if tests is None:   # the reviewer dropped the line: ask which tests quickly
           tests = pick_tests(text, ran_before)
         tests = [t for t in tests if t not in ran_before]
-      return text, research, draft, ds_draft, tests, diag
+      return text, research, draft, ds_draft, tests, diag, team_names(draft, ds_draft, research, more)
     if start_ai_job(ev.get("id"), job):
       ss._ai_pending = {"job": ev.get("id"), "comp_id": ev.get("id"), "label": label,
                         "what": "Live drive check" if drive_mode else ("Follow-up on the tests" if ev.get("mode") == "followup" else "AI check")}
       return
     with st.spinner("🤖 AI team is checking the live data..."):   # older Streamlit: the old way
-      text, research, draft, ds_draft, tests, diag = job()
+      text, research, draft, ds_draft, tests, diag, who_ = job()
     add_diagram_requests(diag, "AI Check")
-    ss.ble_ai = {"id": ev.get("id"), "text": text, "label": label + " · " + team_names(draft, ds_draft, research), "tests": tests}
+    ss.ble_ai = {"id": ev.get("id"), "text": text, "label": label + " · " + who_, "tests": tests}
     st.rerun()
 
 
@@ -9012,7 +10093,8 @@ with _scan_box, guard("Vehicle Scan — scanner"):
                                  (re.search(r"[VIL](\d{1,2})\b|(\d{1,2})\s*cyl", str(_vd.get("Engine", "")), re.I) or [None, ""])[1] or ""),
                          oem=oem_sigs, oem_src=oem_repo, ai=ss.ble_ai,
                          vmake=_vd.get("Make", ""), vmodel=_vd.get("Model", ""),
-                         learned=_learned.get("sigs") or [], learned_id=_learned.get("lid", ""), key="ble", default=None)
+                         learned=_learned.get("sigs") or [], learned_id=_learned.get("lid", ""),
+                         learned_ver=int(_learned.get("ver") or 0), key="ble", default=None)
   if isinstance(event, dict) and event.get("id") and event["id"] != ss.ble_last_event:
     ss.ble_last_event = event["id"]
     handle_ble_event(event)
@@ -9197,7 +10279,7 @@ def run_chat_ai(job_id: str, prompt: str, question: str, photos_b64: list, vrefs
       try:
         report = gemini([{"text": DOC_READ_PROMPT.format(question=question, vehicle=vehicle or "not given",
                                                           codes=codes or "none", symptoms=symptoms or "not given")}]
-                        + video_parts(docs), timeout=240)
+                        + video_parts(docs), timeout=240, think="high")
         prompt += ("\n\nPDF REPORT (✨ Gemini read the technician's PDF; the other team members can't open it and work from "
                    "this report):\n" + report)
       except AIError as e:
@@ -9208,16 +10290,16 @@ def run_chat_ai(job_id: str, prompt: str, question: str, photos_b64: list, vrefs
       try:
         report = gemini([{"text": VIDEO_WATCH_PROMPT.format(question=question, vehicle=vehicle or "not given",
                                                              codes=codes or "none", symptoms=symptoms or "not given")}]
-                        + video_parts(vids), timeout=180)
+                        + video_parts(vids), timeout=240, think="high")
         prompt += ("\n\nVIDEO REPORT (✨ Gemini watched and listened to the technician's video; the other team members "
                    "can't see or hear it and work from this report):\n" + report)
       except AIError as e:
         log_problem("ai", "Video report", str(e))
         prompt += f"\n\nVIDEO REPORT: not available ({e}). Say that the video couldn't be checked."
-    reply, research, draft, ds_draft = team_answer(prompt, vehicle or "General vehicle", codes, symptoms,
+    reply, research, draft, ds_draft, more = team_answer(prompt, vehicle or "General vehicle", codes, symptoms,
                                                    bool(secret("PERPLEXITY_API_KEY")), status, question=question,
                                                    image_b64=photos_b64, extra_parts=vparts)
-    who = ("🎥 " if vids else "") + ("📄 " if docs else "") + team_names(draft, ds_draft, research) + " · all checked each other"
+    who = ("🎥 " if vids else "") + ("📄 " if docs else "") + team_names(draft, ds_draft, research, more) + " · all checked each other"
   elif vparts:   # quick answer about a video or PDF: Gemini is the one that can watch / read it
     status.update(label="📄 ✨ Gemini is reading the PDF..." if docs and not vids else "🎥 ✨ Gemini is watching and listening to the video...")
     try:
@@ -9528,7 +10610,7 @@ def transcribe_audio(data: bytes, mime: str = "audio/wav") -> str:
   txt = gemini([{"text": "Transcribe exactly what this auto technician says. Keep trouble codes (like P0300), VINs, part "
                          "names, numbers and units exactly as spoken (write codes as P0300, not 'P zero three hundred'). "
                          "Return only their words — no notes. If there is no speech, return the single word NONE."},
-                {"inline_data": {"mime_type": mime, "data": base64.b64encode(data).decode()}}], timeout=60)
+                {"inline_data": {"mime_type": mime, "data": base64.b64encode(data).decode()}}], timeout=60, think="low")
   txt = txt.strip().strip('"')
   return "" if txt.upper().startswith("NONE") else txt
 
@@ -9597,9 +10679,9 @@ def chat_home():
       st.toggle("👀 Let the AI see my screen or camera", key="eye_toggle",
                 help="Share your scan tool's screen (from a computer) or point the phone camera at it. The AI reads it every "
                      "half minute and uses it in every answer and AI Check — so it sees what you see.")
-      st.checkbox("🤝 All AIs check each other (about a minute)", value=True, key="qh_team",
-                  help="On: Perplexity researches, Gemini and DeepSeek each answer, and Claude checks them against each other. "
-                       "Off: one AI answers in a few seconds.")
+      st.checkbox("🤝 All AIs check each other (a minute or two)", value=True, key="qh_team",
+                  help="On: the web is searched, Gemini, ChatGPT and DeepSeek each write their own answer without seeing "
+                       "the others, and Claude checks them all against the data. Off: one AI answers in a few seconds.")
       st.toggle("🕘 Past chats", key="qh_past")
       n_kn = len(knowledge_entries())
       st.caption("The AI knows the open car, the codes, the scanner data, the test plan, your shop history and "
@@ -9968,10 +11050,10 @@ def scope_data_section():
                                 scan=scan_context("scope waveform " + " ".join(WAVE_TYPES.get(c_["type"], "") for c_ in setup["chans"])),
                                 capture=capture_summary(cap, setup, results), compare=compare_txt)
     with st.status("The AI team is reading the measurements...", expanded=False) as status:
-      text, _r, draft, ds_draft = team_answer(prompt, ss.vehicle_info or "vehicle", ", ".join(current_codes()),
+      text, _r, draft, ds_draft, more = team_answer(prompt, ss.vehicle_info or "vehicle", ", ".join(current_codes()),
                                               (ss.symptoms or "").strip(), False, status)
       status.update(label="Done", state="complete")
-    ss.wave_result = {"text": text, "team": team_names(draft, ds_draft, ""), "file": wf.name,
+    ss.wave_result = {"text": text, "team": team_names(draft, ds_draft, "", more), "file": wf.name,
                       "at": datetime.now().strftime("%Y-%m-%d %I:%M %p")}
   if ss.get("wave_result"):
     with st.expander(f"🔬 Scope data analysis · {ss.wave_result.get('team', '')}", expanded=True):
@@ -10079,13 +11161,13 @@ Format strictly using these Markdown sections:
 - Put any matching confirmed fix from THIS SHOP'S OWN HISTORY and any matching NHTSA recall first.
 """ + DIAGRAM_RULE
     with st.status("Working on it...", expanded=False) as status:
-      text, research, draft, ds_draft = team_answer(sym_prompt, vehicle, "", symptoms, use_web, status)
+      text, research, draft, ds_draft, more = team_answer(sym_prompt, vehicle, "", symptoms, use_web, status)
       status.update(label="Done", state="complete")
     text, _dg = split_need_diagram(text)
     add_diagram_requests(_dg, "test plan")
     ss._auto_steps = True
     ss.dtc_result = {"title": f"Symptoms · {vehicle}", "text": text, "research": research, "draft": draft, "ds_draft": ds_draft,
-                    "team": team_names(draft, ds_draft, research)}
+                    "team": team_names(draft, ds_draft, research, more), "gpt_draft": more.get("gpt", "")}
 
   if lookup_clicked and codes:
     vehicle = ss.vehicle_info or "General OBD-II Vehicle"
@@ -10127,14 +11209,14 @@ Format strictly using these Markdown sections:
 - Put any matching confirmed fix from THIS SHOP'S OWN HISTORY and any matching NHTSA recall first.
 """ + DIAGRAM_RULE
     with st.status("Working on it...", expanded=False) as status:
-      text, research, draft, ds_draft = team_answer(dtc_prompt, vehicle, code_str, symptoms, use_web, status)
+      text, research, draft, ds_draft, more = team_answer(dtc_prompt, vehicle, code_str, symptoms, use_web, status)
       status.update(label="Done", state="complete")
     text, _dg = split_need_diagram(text)
     add_diagram_requests(_dg, "test plan")
     notify("📋 Test plan ready", f"{code_str} · {vehicle} — {first_line(text)}", "clipboard", 3, app_link(ss.get("job_id")))
     ss._auto_steps = True
     ss.dtc_result = {"title": f"{code_str} · {vehicle}", "text": text, "research": research, "draft": draft, "ds_draft": ds_draft,
-                    "team": team_names(draft, ds_draft, research)}
+                    "team": team_names(draft, ds_draft, research, more), "gpt_draft": more.get("gpt", "")}
 
   if ss.dtc_result:  # stays on screen while you use other tabs
     team = ss.dtc_result.get("team") or team_names(ss.dtc_result.get("draft", ""), ss.dtc_result.get("ds_draft", ""),
@@ -10149,13 +11231,16 @@ Format strictly using these Markdown sections:
     if _simple:
       pass   # drafts and web research stay out of the way in Simple view
     elif ss.dtc_result.get("draft"):
-      with st.expander(f"✨ {gemini_label()}'s first draft (before {claude_label()}'s review)"):
+      with st.expander(f"✨ {gemini_label()}'s own draft (before the final check)"):
         st.markdown(ss.dtc_result["draft"])
+    if ss.dtc_result.get("gpt_draft") and not _simple:
+      with st.expander(f"💬 {openai_label()}'s own draft (written without seeing the others)"):
+        st.markdown(ss.dtc_result["gpt_draft"])
     if ss.dtc_result.get("ds_draft") and not _simple:
-      with st.expander(f"🐋 {deepseek_label()}'s draft (second opinion)"):
+      with st.expander(f"🐋 {deepseek_label()}'s own draft (text only)"):
         st.markdown(ss.dtc_result["ds_draft"])
     if ss.dtc_result.get("research") and not _simple:
-      with st.expander("🌐 Web research Perplexity found (TSBs, recalls, known fixes, sources)"):
+      with st.expander("🌐 Web research (TSBs, recalls, known fixes, sources)"):
         st.markdown(ss.dtc_result["research"])
 
   st.caption("💬 Questions about the plan or a reading? Ask in Chat — it knows this car, the codes and the plan. "
@@ -10265,20 +11350,24 @@ with tab_scope, guard("Scope & Tests"):
       if _wave_pick and pil_scope_image:
         img_b64.append(_wopts[_wave_pick].get("b64", ""))
       with st.status("Working on it...", expanded=False) as status:
-        text, _r, draft, ds_draft = team_answer(prompt, ss.vehicle_info or "vehicle", code_str, ss.symptoms.strip(), False, status,
+        text, _r, draft, ds_draft, more = team_answer(prompt, ss.vehicle_info or "vehicle", code_str, ss.symptoms.strip(), False, status,
                                                 image_b64=img_b64)
         status.update(label="Done", state="complete")
-      ss.scope_result = {"text": text, "team": team_names(draft, ds_draft, ""), "draft": draft, "ds_draft": ds_draft}
+      ss.scope_result = {"text": text, "team": team_names(draft, ds_draft, "", more), "draft": draft, "ds_draft": ds_draft,
+                         "gpt_draft": more.get("gpt", "")}
 
     if ss.scope_result:
       sr = ss.scope_result if isinstance(ss.scope_result, dict) else {"text": str(ss.scope_result), "team": ""}
       with st.expander(f"🔬 Scope & readings evaluation · {sr.get('team', '')}", expanded=True):
         st.markdown(sr["text"])
-      if sr.get("draft") or sr.get("ds_draft"):
+      if sr.get("draft") or sr.get("ds_draft") or sr.get("gpt_draft"):
         with st.expander("👀 See each AI's own read"):
           if sr.get("draft"):
             st.markdown(f"**✨ {gemini_label()}** (saw the photo)")
             st.markdown(sr["draft"])
+          if sr.get("gpt_draft"):
+            st.markdown(f"**💬 {openai_label()}** (saw the photo)")
+            st.markdown(sr["gpt_draft"])
           if sr.get("ds_draft"):
             st.markdown(f"**🐋 {deepseek_label()}** (readings only — can't see photos)")
             st.markdown(sr["ds_draft"])
@@ -10692,10 +11781,10 @@ def review_drive(rec: dict, status_label: str = "Reviewing the drive...") -> str
   with st.status(status_label) as status:
     same_car = not rec.get("vehicle") or rec.get("vehicle") == ss.vehicle_info
     ctx = shop_context("test drive fuel trim misfire stumble transmission shift converter slip charging catalyst") if same_car else ""
-    ans, research, draft, ds_draft = team_answer(DRIVE_REVIEW_TASK + drive_text(rec) + ctx, rec.get("vehicle") or ss.vehicle_info or "vehicle",
+    ans, research, draft, ds_draft, more = team_answer(DRIVE_REVIEW_TASK + drive_text(rec) + ctx, rec.get("vehicle") or ss.vehicle_info or "vehicle",
                                                  ss.active_dtc, ss.symptoms.strip(), False, status)
     status.update(label="Done", state="complete")
-  ss.setdefault("drive_reviews", {})[rec["id"]] = ans + f"\n\n_{team_names(draft, ds_draft, research)}_"
+  ss.setdefault("drive_reviews", {})[rec["id"]] = ans + f"\n\n_{team_names(draft, ds_draft, research, more)}_"
   notify("🚗 Test drive review ready", f"{rec.get('vehicle') or ss.vehicle_info or 'Test drive'} — {first_line(ans)}", "car", 3,
          app_link(ss.get("job_id")))
   return ans
