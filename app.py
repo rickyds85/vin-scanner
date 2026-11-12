@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-22"
+APP_VERSION = "2026-11-23"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -145,6 +145,8 @@ WHATS_NEW = [
     "once when their servers are busy; small hardening for two techs using the app at once",
     "The app remembers which bottom button you were on: if the phone drops the page while you're in another app, it comes "
     "back on that screen (within 4 hours) instead of starting at Chat",
+    "ALL MODULES: each module (engine, ABS, cluster…) is now a button with its code counts — red for stored, orange for "
+    "pending, grey for history; tap it to open its codes instead of scrolling past them all",
 ]
 
 st.markdown(
@@ -4653,6 +4655,18 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
   .grp { font-size:.75rem; color:var(--p); font-weight:700; text-transform:uppercase; margin:6px 0 4px; }
   .box { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:10px; margin-bottom:16px; font-size:.85rem; color:var(--muted); }
   .chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .modrow { display:flex; align-items:center; flex-wrap:wrap; gap:6px 8px; padding:11px 12px; min-height:46px; margin:0 0 6px;
+            background:var(--card); border:1px solid var(--line); border-radius:12px; list-style:none; }
+  summary.modrow { display:grid; grid-template-columns:1fr auto; align-items:center; gap:0 8px; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+  summary.modrow .bds { grid-column:1 / -1; display:flex; flex-wrap:wrap; gap:6px; margin-top:7px; }
+  summary.modrow::-webkit-details-marker { display:none; }
+  summary.modrow::marker { content:""; }
+  .modrow .mn { flex:1 1 150px; min-width:0; color:var(--w); font-weight:700; }
+  .modrow .bd { padding:2px 9px; border-radius:10px; border:1px solid; font-size:.74rem; font-weight:700; white-space:nowrap; }
+  .modrow .ar { color:var(--s); font-size:.9rem; transition:transform .15s; }
+  details.moddet[open] > summary .ar { transform:rotate(90deg); }
+  details.moddet[open] > summary.modrow { border-bottom-left-radius:0; border-bottom-right-radius:0; margin-bottom:0; }
+  .modcodes { padding:10px 12px 12px; margin:0 0 8px; border:1px solid var(--line); border-top:none; border-radius:0 0 12px 12px; background:rgba(15,22,36,.5); }
   .chip { padding:4px 10px; border-radius:12px; font-weight:700; font-family:monospace; font-size:.9rem; border:1px solid; }
   .mon { background:var(--bg); border:1px solid; padding:6px; border-radius:5px; text-align:center; }
   .mon .l { font-size:.74rem; color:var(--muted); } .mon .v { font-size:.88rem; font-weight:700; }
@@ -6997,6 +7011,11 @@ const PATH_MODULE = { Engine: "Engine", Transmission: "Transmission", Movement: 
   "Control.Traction": "ABS / chassis", Brakes: "ABS / brakes", Climate: "HVAC / A/C", Tires: "TPMS", Battery: "Body / power",
   Electrical: "Body / power", Lights: "Body (lighting)", Doors: "Body (doors)", Seatbelts: "Airbag / restraints" };
 let modResults = [], modScanning = false;
+const modOpen = new Set();   // which module buttons you have opened
+document.addEventListener("toggle", (e) => {
+  const d = e.target;
+  if (d && d.dataset && d.dataset.mod) { if (d.open) modOpen.add(d.dataset.mod); else modOpen.delete(d.dataset.mod); }
+}, true);
 
 function moduleList() {
   const map = new Map();
@@ -7116,14 +7135,22 @@ function renderModules(done, total) {
     ? `scanning ${done}/${total}…`
     : `${modResults.length} modules answered · ${found} code(s)`;
   if (!modResults.length) { $("modBox").textContent = total ? "Scanning…" : "No modules answered."; return; }
+  // every module is a button showing how many codes it has; tap it to open the codes (opened ones stay open as the list refreshes)
+  const rank = { active: 0, stored: 0, pending: 1, history: 2 };
   $("modBox").innerHTML = modResults.map((m, i) => {
-    const chips = m.codes.length
-      ? m.codes.map((c) => `<span class="chip" title="${c.status}${ftbText(c.code) ? " · " + ftbText(c.code) : ""}" style="color:var(--${color[c.status]});border-color:var(--${color[c.status]})">${esc(c.code)}<span style="font-weight:400;font-size:.7rem"> ${c.status}${ftbText(c.code) ? " · " + ftbText(c.code) : ""}</span></span>`).join("")
-      : `<span style="color:var(--g)">${m.unsupported ? "answered, but codes not readable with generic commands" : "no codes"}</span>`;
-    const clr = m.codes.length && m.proto ? `<button data-clrmod="${i}" style="padding:3px 8px;font-size:.72rem;background:var(--card);color:var(--r);border:1px solid var(--r)">Clear</button>` : "";
-    return `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:5px 0;border-bottom:1px solid var(--line)">
-      <span style="min-width:170px;color:var(--w);font-weight:700">${esc(m.name)} <span class="note">${m.hdr}</span></span>
-      <span class="chips" style="flex:1">${chips}</span>${clr}</div>`;
+    const codes = m.codes.slice().sort((x, y) => (rank[x.status] ?? 3) - (rank[y.status] ?? 3));   // current problems first
+    const nOf = (...st) => codes.filter((c) => st.includes(c.status)).length;
+    const badge = (n, word, col) => n ? `<span class="bd" style="color:var(--${col});border-color:var(--${col})">${n} ${word}</span>` : "";
+    const name = `<span class="mn">${esc(m.name)} <span class="note">${esc(m.hdr)}</span></span>`;
+    if (!codes.length) {
+      return `<div class="modrow">${name}<span style="color:var(--g);font-size:.8rem">${m.unsupported ? "answered, codes not readable with generic commands" : "no codes"}</span></div>`;
+    }
+    const current = nOf("stored", "active") + nOf("pending");
+    const chips = codes.map((c) => `<span class="chip" title="${c.status}${ftbText(c.code) ? " · " + ftbText(c.code) : ""}" style="color:var(--${color[c.status]});border-color:var(--${color[c.status]})">${esc(c.code)}<span style="font-weight:400;font-size:.7rem"> ${c.status}${ftbText(c.code) ? " · " + ftbText(c.code) : ""}</span></span>`).join("");
+    const clr = m.proto ? `<div style="margin-top:10px"><button data-clrmod="${i}" style="padding:6px 12px;font-size:.78rem;background:var(--card);color:var(--r);border:1px solid var(--r)">Clear codes in this module</button></div>` : "";
+    return `<details class="moddet" data-mod="${esc(m.hdr)}"${modOpen.has(m.hdr) ? " open" : ""}>
+      <summary class="modrow"${current ? ' style="border-color:var(--r)"' : ""}>${name}<span class="ar">▶</span><span class="bds">${badge(nOf("stored", "active"), "stored", "r")}${badge(nOf("pending"), "pending", "o")}${badge(nOf("history"), "history", "s")}</span></summary>
+      <div class="modcodes"><div class="chips">${chips}</div>${clr}</div></details>`;
   }).join("");
 }
 async function clearModule(i) {
