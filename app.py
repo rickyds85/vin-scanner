@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-21"
+APP_VERSION = "2026-11-22"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -143,6 +143,8 @@ WHATS_NEW = [
     "FIXES from a code review: a clipped or blank stretch in an injector scope capture no longer throws away the whole "
     "channel's measurements; VIN photos are read by Gemini and Claude at the same time (faster); Claude and DeepSeek retry "
     "once when their servers are busy; small hardening for two techs using the app at once",
+    "The app remembers which bottom button you were on: if the phone drops the page while you're in another app, it comes "
+    "back on that screen (within 4 hours) instead of starting at Chat",
 ]
 
 st.markdown(
@@ -3716,6 +3718,50 @@ def keep_screen_on(on: bool):
   </script>""" % ("true" if on else "false"), height=0)
 
 
+def remember_screen():
+  """Remember which bottom button (Chat, Vehicle Scan, Scope & Tests …) you were on, in this phone's browser. When the
+  phone drops the page (you switched apps for a while) and the app starts fresh, it puts you back on that screen instead
+  of Chat. Only within 4 hours — the same window the app uses to bring your car back — so a new day starts on Chat."""
+  components.html("""<script>
+  const w = window.parent, d = w.document, KEY = "tdg_screen", HOURS = 4;
+  if (w.__tdgScreenOff) { try { w.__tdgScreenOff(); } catch (e) {} }
+  const label = (t) => (t.textContent || "").trim().toLowerCase();
+  function bar() {   // the app's bottom button bar (not some other tab list inside a screen)
+    for (const l of d.querySelectorAll('[role="tablist"]')) {
+      const names = [...l.querySelectorAll('[role="tab"]')].map(label);
+      if (names.includes("chat") && names.includes("vehicle scan")) return l;
+    }
+    return null;
+  }
+  function read() { try { return JSON.parse(w.localStorage.getItem(KEY) || "null"); } catch (e) { return null; } }
+  function write(o) { try { w.localStorage.setItem(KEY, JSON.stringify(o)); } catch (e) {} }
+  let lastStamp = 0;
+  function onTap(e) {
+    const t = e.target && e.target.closest ? e.target.closest('[role="tab"]') : null, b = bar();
+    if (t && b && b.contains(t)) { write({ l: label(t), t: Date.now() }); lastStamp = Date.now(); return; }
+    const o = read();   // any other tap just keeps the 4 hours counting from now
+    if (o && Date.now() - lastStamp > 20000) { o.t = Date.now(); write(o); lastStamp = Date.now(); }
+  }
+  function check() {
+    const b = bar();
+    if (!b || b === w.__tdgBarSeen) return;   // act once for each fresh start of the app, never while you're using it
+    w.__tdgBarSeen = b;
+    const o = read();
+    if (!o || !o.l || Date.now() - o.t > HOURS * 3600 * 1000) return;
+    const tabs = [...b.querySelectorAll('[role="tab"]')];
+    const cur = tabs.find((t) => t.getAttribute("aria-selected") === "true"), dest = tabs.find((t) => label(t) === o.l);
+    if (!dest || !cur || cur === dest || cur !== tabs[0]) return;   // only when it just started on the first screen
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+      dest.dispatchEvent(new w.MouseEvent(type, { bubbles: true, cancelable: true, view: w }));
+    }
+  }
+  d.addEventListener("click", onTap, true);
+  const timer = w.setInterval(check, 700);
+  w.__tdgScreenOff = () => { d.removeEventListener("click", onTap, true); w.clearInterval(timer); };
+  check();
+  </script>""", height=0)
+
+
 def require_password():
   users = shop_users()
   if not users:
@@ -4186,6 +4232,7 @@ def pro_section(name: str):
 
 tab0, tab1, tab3, tab_scope, tab_ro, tab_sites, tab_more = st.tabs(["Chat", "Vehicle Scan", "Diagnostics", "Scope & Tests",
                                                                      "Customer & RO", "Sites", "More"])
+remember_screen()   # the phone dropped the page and the app started fresh? back to the screen you were on
 
 
 def _keyed_box(k: str):
