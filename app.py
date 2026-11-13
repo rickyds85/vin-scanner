@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-23"
+APP_VERSION = "2026-11-24"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -147,6 +147,8 @@ WHATS_NEW = [
     "back on that screen (within 4 hours) instead of starting at Chat",
     "ALL MODULES: each module (engine, ABS, cluster…) is now a button with its code counts — red for stored, orange for "
     "pending, grey for history; tap it to open its codes instead of scrolling past them all",
+    "MERGED GRAPHS: tap two or more readings, then 'Merge into one graph' to see them as colored lines on one chart; "
+    "'Fuel trims together' and 'O2 sensors together' do it in one tap",
 ]
 
 st.markdown(
@@ -4700,6 +4702,11 @@ BLE_DASHBOARD_HTML = r'''<!doctype html>
   .chart .hd b { color:var(--w); font-size:.95rem; }
   .chart .hd .x { cursor:pointer; padding:0 4px; color:var(--muted); }
   .chart canvas { width:100%; height:120px; display:block; touch-action:pan-y; }
+  .chart.merged canvas { height:210px; }
+  .chart .lgd { display:flex; flex-wrap:wrap; gap:6px 14px; margin:6px 0 4px; font-size:.8rem; color:var(--w); }
+  .chart .lg i { display:inline-block; width:11px; height:11px; border-radius:50%; margin-right:5px; vertical-align:-1px; }
+  .chart .lg .lv { margin-left:4px; font-family:monospace; }
+  .chart .lgx { cursor:pointer; color:var(--muted); padding:0 5px; }
   .note { font-size:.72rem; color:var(--s); font-weight:400; }
 </style>
 <style>
@@ -4889,8 +4896,10 @@ function setTile(id, text, n) {
 
 // ===================== Live graphs =====================
 // Every numeric reading is recorded (last ~10 min), so a graph opened later already has history.
-const HIST = {}, HIST_MAX = 4000, MAX_CHARTS = 4;
-let graphSel = [], graphWin = 60, frozenAt = null, hoverT = null;
+const HIST = {}, HIST_MAX = 4000;
+let graphSel = [], graphWin = 60, frozenAt = null, hoverT = null, graphMerge = false;
+const MERGE_COLORS = ["#22D3EE", "#F59E0B", "#EC4899", "#34D399", "#A78BFA", "#F87171"];
+const maxG = () => (graphMerge ? 6 : 4);   // separate graphs: 4 stacked; merged: up to 6 lines on one chart
 function toNumber(text) {
   const t = String(text).replace(/,/g, "");
   if (/^(ON|YES|Locked)$/i.test(t)) return 1;
@@ -4910,29 +4919,57 @@ function recordHist(id, text) {
 }
 function unitOf(id) { const t = shown[id] || ""; const u = t.replace(/,/g, "").replace(/^[^0-9-]*-?[0-9.]+\s*/, "").trim(); return u.length <= 8 ? u : ""; }
 function fmtNum(v) { const a = Math.abs(v); return a >= 100 ? Math.round(v).toString() : a >= 10 ? v.toFixed(1) : v.toFixed(2); }
+function presetIds(kind) {
+  const ids = kind === "trims" ? ["stft1", "ltft1", "stft2", "ltft2"] : ["o2b1s1", "o2b1s2", "o2b2s1", "o2b2s2"];
+  return ids.filter((id) => (HIST[id] || []).length);   // only the readings this car actually gives
+}
 function renderGraphBar() {
   const wins = [[30, "30 s"], [60, "1 min"], [180, "3 min"], [600, "10 min"]];
+  const presets = `<button data-preset="trims">Fuel trims together</button><button data-preset="o2">O2 sensors together</button>`;
   $("gbar").innerHTML = graphSel.length
     ? wins.map(([w, l]) => `<button data-win="${w}" class="${w === graphWin ? "on" : ""}">${l}</button>`).join("") +
       `<button id="gFreeze" class="${frozenAt ? "on" : ""}">${frozenAt ? "▶ Resume" : "⏸ Freeze"}</button>` +
-      `<button id="gClear">Clear graphs</button><span>Tap a reading to add or remove it.</span>`
-    : "📈 Tap any reading to graph it live (up to 4 at once).";
+      (graphSel.length > 1 || graphMerge ? `<button id="gMerge" class="${graphMerge ? "on" : ""}">${graphMerge ? "✓ Merged — tap to split" : "Merge into one graph"}</button>` : "") +
+      `<button id="gClear">Clear graphs</button>${presets}<span>Tap a reading to add or remove it.</span>`
+    : `📈 Tap any reading to graph it live. ${presets}`;
+}
+function rebuildCharts() {
+  document.querySelectorAll(".tile.sel").forEach((t) => t.classList.remove("sel"));
+  graphSel.forEach((g) => { const t = $("t_" + g); if (t) t.classList.add("sel"); });
+  if (graphMerge && graphSel.length > 1) {
+    $("charts").innerHTML = `<div class="chart merged"><div class="hd"><span><b>Merged graph</b> <span class="mnote"></span></span><span class="rng"></span></div>` +
+      `<div class="lgd">${graphSel.map((g, i) => `<span class="lg"><i style="background:${MERGE_COLORS[i % MERGE_COLORS.length]}"></i>${esc(LABEL[g] || g)} <b class="lv" data-lv="${g}"></b><span class="lgx" data-rm="${g}" title="Remove">✕</span></span>`).join("")}</div><canvas></canvas></div>`;
+  } else {
+    $("charts").innerHTML = graphSel.map((g) => `<div class="chart" data-id="${g}"><div class="hd"><span><b>${esc(LABEL[g] || g)}</b> <span class="cur"></span></span><span><span class="rng"></span> <span class="x" title="Remove">✕</span></span></div><canvas></canvas></div>`).join("");
+  }
+  renderGraphBar();
+  drawCharts();
 }
 function toggleGraph(id) {
   const i = graphSel.indexOf(id);
   if (i >= 0) graphSel.splice(i, 1);
-  else { if (graphSel.length >= MAX_CHARTS) graphSel.shift(); graphSel.push(id); }
-  document.querySelectorAll(".tile.sel").forEach((t) => t.classList.remove("sel"));
-  graphSel.forEach((g) => { const t = $("t_" + g); if (t) t.classList.add("sel"); });
-  $("charts").innerHTML = graphSel.map((g) => `<div class="chart" data-id="${g}"><div class="hd"><span><b>${esc(LABEL[g] || g)}</b> <span class="cur"></span></span><span><span class="rng"></span> <span class="x" title="Remove">✕</span></span></div><canvas></canvas></div>`).join("");
-  renderGraphBar();
-  drawCharts();
+  else { while (graphSel.length >= maxG()) graphSel.shift(); graphSel.push(id); }
+  rebuildCharts();
+}
+function applyPreset(kind) {
+  const ids = presetIds(kind);
+  if (!ids.length) {
+    renderGraphBar();
+    $("gbar").insertAdjacentHTML("beforeend", `<span style="color:var(--o)">This car isn't giving those readings yet — connect and let live data run first.</span>`);
+    return;
+  }
+  graphSel = ids; graphMerge = true; rebuildCharts();
 }
 document.addEventListener("click", (e) => {
   const tile = e.target.closest(".tile");
   if (tile && tile.id.startsWith("t_")) { toggleGraph(tile.id.slice(2)); return; }
+  const rm = e.target.closest("[data-rm]");
+  if (rm) { toggleGraph(rm.dataset.rm); return; }
   const x = e.target.closest(".chart .x");
   if (x) { toggleGraph(x.closest(".chart").dataset.id); return; }
+  if (e.target.id === "gMerge") { graphMerge = !graphMerge; if (!graphMerge) graphSel = graphSel.slice(-4); rebuildCharts(); return; }
+  const pr = e.target.closest("[data-preset]");
+  if (pr) { applyPreset(pr.dataset.preset); return; }
   const wb = e.target.closest("[data-win]");
   if (wb) { graphWin = +wb.dataset.win; renderGraphBar(); drawCharts(); return; }
   if (e.target.id === "gFreeze") { frozenAt = frozenAt ? null : performance.now() / 1000; renderGraphBar(); drawCharts(); return; }
@@ -4950,11 +4987,72 @@ function pointerT(ev, canvas) {
   if (c) drawCharts();
 }, { passive: true }));
 document.addEventListener("mouseleave", () => { hoverT = null; });
+// Several readings on ONE chart. Same unit (all %, all volts) = one shared scale; mixed units = each line scaled to itself.
+function drawMerged(now, t0, gridC, textC) {
+  const box = document.querySelector("#charts .chart.merged");
+  if (!box) return;
+  const cv = box.querySelector("canvas");
+  const dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const L = 44, R = 8, T = 6, B = 16, pw = W - L - R, ph = H - T - B;
+  const tr = graphSel.map((id, i) => ({ id, color: MERGE_COLORS[i % MERGE_COLORS.length], u: unitOf(id),
+    pts: (HIST[id] || []).filter((p) => p[0] >= t0 && p[0] <= now) }));
+  const units = new Set(tr.map((t) => t.u).filter(Boolean)), shared = units.size <= 1;
+  box.querySelector(".mnote").textContent = shared ? (units.size ? `all in ${[...units][0]} · same scale` : "same scale") : "different units · each line has its own scale";
+  tr.forEach((t) => { const el = box.querySelector(`[data-lv="${t.id}"]`); if (el) el.textContent = shown[t.id] || ""; });
+  const have = tr.filter((t) => t.pts.length);
+  if (!have.length) { g.fillStyle = textC; g.font = "12px sans-serif"; g.textAlign = "left"; g.fillText("Waiting for data…", L, T + ph / 2); box.querySelector(".rng").textContent = ""; return; }
+  const range = (pts) => {
+    let lo = Infinity, hi = -Infinity;
+    for (const p of pts) { if (p[1] < lo) lo = p[1]; if (p[1] > hi) hi = p[1]; }
+    if (hi - lo < 1e-9) { lo -= 1; hi += 1; } else { const pad = (hi - lo) * 0.08; lo -= pad; hi += pad; }
+    return [lo, hi];
+  };
+  const all = shared ? range(have.flatMap((t) => t.pts)) : null;
+  have.forEach((t) => { t.r = all || range(t.pts); });
+  const u = units.size === 1 ? " " + [...units][0] : "";
+  let mn = Infinity, mx = -Infinity;
+  have.forEach((t) => t.pts.forEach((p) => { if (p[1] < mn) mn = p[1]; if (p[1] > mx) mx = p[1]; }));
+  if (shared) {
+    box.querySelector(".rng").textContent = `min ${fmtNum(mn)} · max ${fmtNum(mx)}${u}`;
+  } else box.querySelector(".rng").textContent = "";
+  const X = (t) => L + (t - t0) / graphWin * pw;
+  const Yof = (t, v) => T + (1 - (v - t.r[0]) / (t.r[1] - t.r[0])) * ph;
+  g.strokeStyle = gridC; g.lineWidth = 1; g.fillStyle = textC; g.font = "10px sans-serif"; g.textAlign = "right"; g.textBaseline = "middle";
+  for (let k = 0; k <= 2; k++) {
+    const y = T + ph * (1 - k / 2); g.beginPath(); g.moveTo(L, y); g.lineTo(L + pw, y); g.stroke();
+    if (all) g.fillText(fmtNum(all[0] + (all[1] - all[0]) * k / 2), L - 4, y);
+  }
+  if (all && mn < 0 && mx > 0) {   // fuel trims: the zero line is the one that matters (only when the lines really cross it)
+    const y0 = T + (1 - (0 - all[0]) / (all[1] - all[0])) * ph;
+    g.save(); g.strokeStyle = textC; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(L, y0); g.lineTo(L + pw, y0); g.stroke(); g.restore();
+  }
+  g.textAlign = "left"; g.textBaseline = "alphabetic"; g.fillText(`-${graphWin >= 60 ? graphWin / 60 + " min" : graphWin + " s"}`, L, H - 3);
+  g.textAlign = "right"; g.fillText(frozenAt ? "frozen" : "now", L + pw, H - 3);
+  g.lineWidth = 2; g.lineJoin = "round";
+  have.forEach((t) => {
+    g.strokeStyle = t.color; g.beginPath();
+    t.pts.forEach((p, i) => (i ? g.lineTo(X(p[0]), Yof(t, p[1])) : g.moveTo(X(p[0]), Yof(t, p[1])))); g.stroke();
+    const last = t.pts[t.pts.length - 1];
+    g.fillStyle = t.color; g.beginPath(); g.arc(X(last[0]), Yof(t, last[1]), 3.5, 0, 7); g.fill();
+  });
+  if (hoverT != null && hoverT >= t0) {   // crosshair: every line's value at that moment
+    const x = X(Math.min(hoverT, now));
+    g.strokeStyle = textC; g.lineWidth = 1; g.beginPath(); g.moveTo(x, T); g.lineTo(x, T + ph); g.stroke();
+    have.forEach((t) => {
+      let best = t.pts[0]; for (const p of t.pts) if (Math.abs(p[0] - hoverT) < Math.abs(best[0] - hoverT)) best = p;
+      g.fillStyle = t.color; g.beginPath(); g.arc(X(best[0]), Yof(t, best[1]), 4, 0, 7); g.fill();
+      const el = box.querySelector(`[data-lv="${t.id}"]`); if (el) el.textContent = `${fmtNum(best[1])}${t.u ? " " + t.u : ""}`;
+    });
+  }
+}
 function drawCharts() {
   const now = frozenAt || performance.now() / 1000, t0 = now - graphWin;
   const css = getComputedStyle(document.documentElement);
   const gridC = css.getPropertyValue("--line").trim(), textC = css.getPropertyValue("--muted").trim();
-  document.querySelectorAll("#charts .chart").forEach((box) => {
+  drawMerged(now, t0, gridC, textC);
+  document.querySelectorAll("#charts .chart:not(.merged)").forEach((box) => {
     const id = box.dataset.id, cv = box.querySelector("canvas");
     const all = HIST[id] || [], pts = all.filter((p) => p[0] >= t0 && p[0] <= now);
     const color = getComputedStyle($("v_" + id) || box).color;
