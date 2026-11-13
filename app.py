@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-24"
+APP_VERSION = "2026-11-25"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -149,6 +149,9 @@ WHATS_NEW = [
     "pending, grey for history; tap it to open its codes instead of scrolling past them all",
     "MERGED GRAPHS: tap two or more readings, then 'Merge into one graph' to see them as colored lines on one chart; "
     "'Fuel trims together' and 'O2 sensors together' do it in one tap",
+    "CHAT NO LONGER MIXES UP CARS: 🧹 New chat asks 'same car or a different car' when a car is open; the AI only recalls "
+    "earlier chats about this car (or about no car) unless you name another car yourself; and when the app reopens your last "
+    "car on its own, the Chat screen says so with a 'different car' button",
 ]
 
 st.markdown(
@@ -3850,6 +3853,8 @@ if "ble_vin" in st.query_params or "ble_dtc" in st.query_params:
 # ========================================================
 if (_jr := ss.pop("_job_request", None)) is not None:
   ss.chat_conv, ss._chat_pending = None, None   # a different car = a new conversation
+  ss.pop("_picked_up", None)
+  ss.pop("_ask_new", None)
   if "chat" in st.query_params:
     del st.query_params["chat"]
   if _jr == "new":
@@ -3861,6 +3866,8 @@ elif "job_id" not in ss:
   if _qj := st.query_params.get("job"):
     if not load_job(_qj):   # e.g. the link is from before permanent storage was set up
       del st.query_params["job"]
+    else:
+      ss._picked_up = True
   elif store_on():   # opened on another device: pick up the car you were working on in the last few hours
     with guard("Pick up where you left off"):
       _now = datetime.now(timezone.utc)
@@ -3872,6 +3879,7 @@ elif "job_id" not in ss:
         _d = _r.get("data") or {}
         if _age < 4 * 3600 and (not ss.get("tech_user") or _d.get("tech") in ("", None, ss.get("tech_user"))):
           if load_job(_r["id"]):
+            ss._picked_up = True
             st.toast(f"🚗 Picked up where you left off: {_d.get('vehicle_info') or _d.get('customer_name') or 'your last car'} — switch in 🚗 Cars in the shop")
           break
 ss.active_dtc = ", ".join(current_codes())
@@ -10357,8 +10365,48 @@ def scan_context(extra: str = "") -> str:
 # ========================================================
 # --- CHAT (💬 the front screen: one conversation per car, every question and answer saved permanently) ---
 # ========================================================
+_EXTRA_MAKES = {"bmw", "mercedes", "benz", "volkswagen", "vw", "audi", "volvo", "tesla", "chevy", "chev", "land", "rover",
+                "mini", "porsche", "suzuki", "isuzu", "jaguar", "fiat", "mitsubishi", "alfa", "romeo", "harley", "freightliner"}
+
+
+_GENERIC_CAR_WORDS = {"series", "sport", "base", "limited", "hybrid", "truck", "van", "wagon", "sedan", "coupe", "cab", "crew",
+                      "extended", "regular", "classic", "touring", "premium", "luxury", "turbo", "diesel", "electric", "pickup"}
+
+
+def _car_norm(s_) -> str:
+  return re.sub(r"[^a-z0-9]+", " ", str(s_ or "").lower()).strip()
+
+
+def _model_keys(vehicle: str) -> set:
+  """The words that name a car's model, so a question can point at it: '2015 Ford Edge (2.0L)' -> {'edge'}, '2019 Ford F-150' ->
+  {'f150'}, '2012 Jeep Grand Cherokee' -> {'grand', 'cherokee'}. Years, makes, engine sizes and plain numbers never count."""
+  v = re.sub(r"\([^)]*\)", " ", str(vehicle or "").lower())
+  makes = {t for m in list(MANUAL_MAKES) + list(MAKE_PROFILES) for t in re.findall(r"[a-z]+", m.lower())} | _EXTRA_MAKES
+  toks = [t for t in re.findall(r"[a-z0-9]+", v) if t not in makes and not (len(t) == 4 and t.isdigit() and t[:2] in ("19", "20"))]
+  keys = set()
+  if toks:
+    a = toks[0]
+    if len(a) >= 3 and re.search(r"[a-z]", a):
+      keys.add(a)
+    if len(toks) > 1 and (len(a) < 3 or toks[1].isdigit()) and re.search(r"[a-z]", a):
+      keys.add(a + toks[1])   # f + 150, cx + 5
+    elif len(toks) > 1 and len(a) < 3 and a.isdigit():
+      keys.add(a + toks[1])   # 3 + series
+    if len(toks) > 1 and len(toks[1]) >= 5 and re.search(r"[a-z]", toks[1]) and not toks[1].isdigit():
+      keys.add(toks[1])       # grand + cherokee
+  return {k for k in keys if len(k) >= 3 and k not in _GENERIC_CAR_WORDS}
+
+
+def _question_names(question: str, keys: set) -> bool:
+  """True if the question says one of these model words (alone, or two words run together like 'f 150')."""
+  toks = re.findall(r"[a-z0-9]+", str(question or "").lower())
+  grams = set(toks) | {a + b for a, b in zip(toks, toks[1:])}
+  return bool(keys & grams)
+
+
 def chat_memory(question: str) -> str:
-  """Earlier saved chats worth remembering for this question: this same car first, then ones on the same subject."""
+  """Earlier saved chats worth remembering for this question. Only chats about THIS car, chats that weren't about any car, and
+  chats about another car the question itself names ('like that Edge we had'): a different car's answers never leak in."""
   try:
     rows = [r.get("data") or {} for r in store_list("chat", 300)]
   except Exception:
@@ -10366,7 +10414,23 @@ def chat_memory(question: str) -> str:
   in_convo = {m.get("chat_id") for m in (ss.chat_history or []) if m.get("chat_id")}
   rows = [d for d in rows if d.get("q") and d.get("a") and d.get("state", "done") == "done"
           and not str(d.get("a")).startswith("⚠️") and d.get("id") not in in_convo]
-  same = [d for d in rows if ss.active_vin and d.get("vin") == ss.active_vin][:4]
+  cur_vin, cur_car = str(ss.get("active_vin") or "").strip().upper(), _car_norm(ss.get("vehicle_info"))
+
+  def same_car(d) -> bool:
+    vin = str(d.get("vin") or "").strip().upper()
+    if vin and cur_vin:
+      return vin == cur_vin   # two VINs: same car only if they match
+    return bool(cur_car) and _car_norm(d.get("vehicle")) == cur_car
+
+  def fits(d) -> bool:
+    if same_car(d):
+      return True
+    if not str(d.get("vin") or "").strip() and not str(d.get("vehicle") or "").strip():
+      return True   # a general chat, not about any car
+    return _question_names(question, _model_keys(d.get("vehicle")))   # another car — only if the question names it
+
+  rows = [d for d in rows if fits(d)]
+  same = [d for d in rows if same_car(d)][:4]
   words = {w for w in re.findall(r"[a-z0-9]+", question.lower()) if len(w) >= 3} - KN_STOP
   sem = meaning_scores(f"{ss.vehicle_info or ''} {question}", "chat",
                        [(d["id"], f"{d.get('vehicle', '')}: {d.get('q', '')} — {str(d.get('a', ''))[:400]}") for d in rows if d.get("id")])
@@ -10380,11 +10444,13 @@ def chat_memory(question: str) -> str:
     if hit >= 2 or (sem and near >= top - 0.05 and near >= 0.6):
       scored.append((hit + near * 10, d))
   scored.sort(key=lambda x: -x[0])
-  pick = same + [d for _, d in scored[:3]]
+  named = [d for d in rows if d not in same and not same_car(d) and (d.get("vin") or d.get("vehicle"))][:3]   # the question names that car
+  pick = same + named + [d for _, d in scored if d not in same and d not in named][:3]
   if not pick:
     return ""
   return ("EARLIER CHATS (this technician's past questions and the AI's past answers — for continuity only, NOT proven "
-          "facts; re-check anything you rely on, and say so if one was wrong):\n"
+          "facts; re-check anything you rely on, and say so if one was wrong. Each one names its car: never carry a spec, "
+          "part or fix from a chat about a different car over to the car being asked about):\n"
           + "\n".join(f"- {d.get('at', '')} · {d.get('vehicle') or 'no car open'}: Q: {d.get('q', '')[:300]} → A: "
                       + " ".join(str(d.get("a", "")).split())[:450] for d in pick))
 
@@ -10407,7 +10473,7 @@ def chat_prompt_for(question: str, n_photos: int, n_videos: int = 0, n_docs: int
   return f"""
 You are an expert automotive diagnostic technician assisting a mechanic in the field.
 Vehicle: {(ss.vehicle_info + (" — " + vehicle_facts() if vehicle_facts() else "")) if ss.vehicle_info else 'none open — answer in general, and ask for the vehicle if the answer depends on it'}
-{"The technician already identified this vehicle in the app (VIN decoded) — use it, don't ask for it again. If a photo shows a different VIN or vehicle, point that out." if ss.vehicle_info else ""}
+{"The technician already identified this vehicle in the app (VIN decoded) — use it, don't ask for it again. If a photo shows a different VIN or vehicle, point that out. IMPORTANT: if the question is about a DIFFERENT car than this one (it names another make, model or year), answer for the car they named — don't use this car's specs, codes, symptoms or past results — and add one short line that the app still has the " + ss.vehicle_info + " open (they can switch cars in 🚗 Cars in the shop)." if ss.vehicle_info else ""}
 Fault codes being worked: {", ".join(current_codes()) or 'None'}
 Symptoms / complaint: {(ss.symptoms or '').strip() or 'not given'}
 {scan_context(question)}
@@ -10689,6 +10755,20 @@ def restore_chat(conv: str):
   ss.chat_history, ss.chat_conv = hist, conv
 
 
+def open_car_label() -> str:
+  """What's open in the app, in words, for 'New chat — about which car?' ('' when nothing is open)."""
+  v = str(ss.get("vehicle_info") or "").strip()
+  if v:
+    return v
+  c = str(ss.get("customer_name") or "").strip()
+  if c:
+    return f"{c}'s car"
+  try:
+    return "the job that's open" if job_has_content(job_snapshot()) else ""
+  except Exception:
+    return ""
+
+
 def new_chat():
   ss.chat_history, ss.chat_conv, ss._chat_pending = [], None, None
   if "chat" in st.query_params:
@@ -10911,12 +10991,45 @@ def chat_home():
 
   # ---------- top: the greeting on a fresh chat, a slim header once you're talking ----------
   with top:
+    _car = open_car_label()
     if msgs:   # 🧹 New chat — pinned at the very top of the screen, so it's always one tap away
-      with _keyed_box("newchat"):
-        if st.button("🧹 New chat", key="qh_new",
-                     help="Starts fresh. Earlier chats stay saved and the AI still remembers them."):
-          new_chat()
-          st.rerun()
+      _asking = bool(ss.get("_ask_new") and _car)
+      if not _asking:   # (while the question below is showing, the pinned button steps aside)
+        with _keyed_box("newchat"):
+          if st.button("🧹 New chat", key="qh_new",
+                       help="Starts fresh. Earlier chats stay saved and the AI still remembers them."):
+            if _car:
+              ss._ask_new = True   # a car is open: is the new chat about it, or about a different car?
+            else:
+              new_chat()
+            st.rerun()
+      if _asking:
+        with _keyed_box("newchat_ask"):
+          st.markdown("**🧹 New chat — about which car?**")
+          if st.button(f"🚗 Same car — {_car}", key="qh_new_same", use_container_width=True):
+            ss.pop("_ask_new", None)
+            new_chat()
+            st.rerun()
+          if st.button("➕ A different car", key="qh_new_diff", use_container_width=True,
+                       help="Puts the open car away (it stays saved in 🚗 Cars in the shop) and starts clean."):
+            ss.pop("_ask_new", None)
+            ss._job_request = "new"
+            st.rerun()
+          if st.button("Cancel", key="qh_new_cancel", use_container_width=True):
+            ss.pop("_ask_new", None)
+            st.rerun()
+    else:
+      ss.pop("_ask_new", None)
+      if not pending and ss.get("_picked_up") and _car:   # the app reopened your last car on its own — say so
+        with _keyed_box("pickedup"):
+          st.caption(f"🚗 Still on your {_car} from earlier.")
+          if st.button("➕ It's a different car", key="qh_diffcar", use_container_width=True,
+                       help="Puts that car away (it stays saved in 🚗 Cars in the shop) and starts clean."):
+            ss.pop("_picked_up", None)
+            ss._job_request = "new"
+            st.rerun()
+    if msgs:
+      ss.pop("_picked_up", None)
     if not store_on():
       st.warning("⚠️ Permanent storage isn't set up yet, so jobs and chats are erased when the app restarts. Add SUPABASE_URL "
                  "and SUPABASE_KEY to Secrets (⚙️ top right).")
