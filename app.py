@@ -24,7 +24,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-25"
+APP_VERSION = "2026-11-26"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -152,6 +152,8 @@ WHATS_NEW = [
     "CHAT NO LONGER MIXES UP CARS: 🧹 New chat asks 'same car or a different car' when a car is open; the AI only recalls "
     "earlier chats about this car (or about no car) unless you name another car yourself; and when the app reopens your last "
     "car on its own, the Chat screen says so with a 'different car' button",
+    "AI CHECK SURVIVES A DROPPED CONNECTION: if the phone loses signal while the AI team is checking (a test drive in a "
+    "dead spot, say), the answer is no longer lost: when the page comes back, the finished answer appears in the scanner panel",
 ]
 
 st.markdown(
@@ -3093,6 +3095,7 @@ def job_snapshot() -> dict:
                         "chat_id": m.get("chat_id"), "who": m.get("who", ""), "videos": m.get("videos") or [],
                         "video_names": m.get("video_names") or [], "reused_video": bool(m.get("reused_video"))}
                        for m in (ss.get("chat_history") or [])][-40:]
+  d["ai_pending"] = ss.get("_ai_pending") or None   # an AI Check still running: lets a fresh page collect its answer
   return d
 
 
@@ -3133,6 +3136,11 @@ def load_job(jid: str) -> bool:
     ss[k] = rec.get(k) if rec.get(k) is not None else copy.deepcopy(DEFAULTS.get(k, ""))
   ss.job_id, ss.job_status, ss.job_created = jid, rec.get("status") or "open", rec.get("created") or ""
   ss.ble_ai, ss.vin_error = None, ""
+  _p = rec.get("ai_pending")
+  try:
+    ss._ai_pending = _p if isinstance(_p, dict) and _p.get("job") and time.time() - float(_p.get("at") or 0) < 3600 else None
+  except (TypeError, ValueError):
+    ss._ai_pending = None
   ss.job_n = ss.get("job_n", 0) + 1   # empties the photo boxes
   ss._job_hash = hashlib.md5(json.dumps(job_snapshot(), sort_keys=True, default=str).encode()).hexdigest()
   st.query_params["job"] = jid
@@ -3144,6 +3152,7 @@ def new_job():
     ss[k] = copy.deepcopy(DEFAULTS.get(k, ""))
   ss.job_id, ss.job_status, ss.job_created, ss._job_hash = None, "open", "", None
   ss.ble_ai, ss.vin_error = None, ""
+  ss._ai_pending = None   # an old car's AI Check never lands in a new car's scanner panel
   ss.job_n = ss.get("job_n", 0) + 1
   if "job" in st.query_params:
     del st.query_params["job"]
@@ -10060,7 +10069,7 @@ if hasattr(st, "fragment"):
     j = _ai_jobs().get(p["job"])
     if j is None:   # the server restarted mid-job
       ss._ai_pending = None
-      ss.ble_ai = {"id": p["comp_id"] + "-lost", "text": "⚠️ The app restarted during the AI check. Tap AI Check again.",
+      ss.ble_ai = {"id": p["comp_id"] + "-lost", "text": "⚠️ That AI check didn't come back (the app restarted, or the page was away too long). Tap AI Check again.",
                    "label": p["label"]}
       st.rerun()
     if j["state"] == "running":
@@ -10286,7 +10295,7 @@ Use clean bold section headers and direct shop-floor language. Skip sections wit
         tests = [t for t in tests if t not in ran_before]
       return text, research, draft, ds_draft, tests, diag, team_names(draft, ds_draft, research, more)
     if start_ai_job(ev.get("id"), job):
-      ss._ai_pending = {"job": ev.get("id"), "comp_id": ev.get("id"), "label": label,
+      ss._ai_pending = {"job": ev.get("id"), "comp_id": ev.get("id"), "label": label, "at": time.time(),
                         "what": "Live drive check" if drive_mode else ("Follow-up on the tests" if ev.get("mode") == "followup" else "AI check")}
       return
     with st.spinner("🤖 AI team is checking the live data..."):   # older Streamlit: the old way
