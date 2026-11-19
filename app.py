@@ -25,7 +25,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-27"
+APP_VERSION = "2026-11-29"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -160,6 +160,15 @@ WHATS_NEW = [
     "empty); scope files with repeated time stamps or an off-scale sample no longer break the measurements; comebacks "
     "are found even with an unrelated visit in between and aren't cut off after 500 records; DeepSeek's retry, "
     "Perplexity's unreadable answers and a few save-time edge cases are handled",
+    "SAFETY CHECK: a chat answer that fails in an unexpected way is now saved as failed (it used to sit as 'working' and "
+    "later claim the app had restarted); a short or odd VIN can no longer trip the check-digit test",
+    "SECOND CODE REVIEW: the scanner's end-of-drive messages (test results, the saved drive and the AI request) are now sent "
+    "as ONE message, so a finished test drive is always saved and the AI follow-up is never dropped; typed trouble codes show on "
+    "the printed Repair Order; deleting a chat can never wipe every chat; the test drive review gets every recorded reading "
+    "(charging voltage, TCC slip, MAF, MAP and more) and is saved so a refresh doesn't lose it; the last AI Check answer is saved "
+    "with the job; the estimate table no longer duplicates rows; the backup now includes everything (no 1,000-row cut) plus "
+    "factory reading maps and links; scope boxes start empty on a new car; knowledge saves and imports are one request and "
+    "never duplicate notes; diesel monitors, catalyst, vacuum, idle, cranking and transmission test fixes",
 ]
 
 st.markdown(
@@ -753,8 +762,10 @@ def _store_list_all(kind: str, where_json: str, ver: int, online: bool) -> list[
   return rows
 
 
-def store_delete(kind: str, rid: str | None = None):
-  """Delete one record, or every record of this kind when rid is None."""
+def store_delete(kind: str, rid: str | None = None, *, delete_all: bool = False):
+  """Delete one record. Wiping EVERY record of a kind needs delete_all=True: a missing or empty id deletes nothing."""
+  if not rid and not delete_all:
+    return
   _bump(kind)
   if store_on():
     params = {"kind": f"eq.{kind}"}
@@ -766,8 +777,9 @@ def store_delete(kind: str, rid: str | None = None):
       _store_error(f"Deleting {kind} failed: {e}")
   try:
     d = _local_dir(kind)
+    target = re.sub(r"[^\w\-]", "", rid) + ".json" if rid else None
     for fn in os.listdir(d):
-      if rid is None or fn == re.sub(r"[^\w\-]", "", rid) + ".json":
+      if target is None or fn == target:
         os.remove(os.path.join(d, fn))
   except OSError:
     pass
@@ -1766,7 +1778,9 @@ _VIN_WEIGHTS = [8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2]
 
 
 def vin_check_digit_ok(vin: str) -> bool:
-  total = sum((int(c) if c.isdigit() else _VIN_VALUES.get(c, 0)) * w for c, w in zip(vin, _VIN_WEIGHTS))
+  if len(vin or "") != 17:
+    return False
+  total =sum((int(c) if c.isdigit() else _VIN_VALUES.get(c, 0)) * w for c, w in zip(vin, _VIN_WEIGHTS))
   r = total % 11
   return vin[8] == ("X" if r == 10 else str(r))
 
@@ -1838,7 +1852,7 @@ def vin_fixes(v: str) -> list[str]:
 def nhtsa_ok(vin: str) -> bool:
   """True when NHTSA decodes the VIN with no errors (error code 0)."""
   try:
-    r = http().get(f"https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/{vin}?format=json", timeout=10)
+    r = http().get(f"https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/{requests.utils.quote(str(vin), safe='')}?format=json", timeout=10)
     res = {i["Variable"]: i.get("Value") for i in r.json().get("Results", [])}
     return str(res.get("Error Code", "")).strip() == "0" and bool(res.get("Make"))
   except Exception:
@@ -1963,7 +1977,7 @@ def extract_customer(img_bytes: bytes) -> dict:
 
 @st.cache_data(ttl=7 * 86400, show_spinner=False, max_entries=500)
 def decode_vin(vin: str) -> dict:
-  r = http().get(f"https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/{vin}?format=json", timeout=10)
+  r = http().get(f"https://vpic.nhtsa.dot.gov/api/vehicles/decodevin/{requests.utils.quote(str(vin), safe='')}?format=json", timeout=10)
   r.raise_for_status()
   wanted = [
       "Model Year", "Make", "Model", "Trim", "Displacement (L)", "Engine Number of Cylinders",
@@ -3186,6 +3200,9 @@ def job_snapshot() -> dict:
                         "video_names": m.get("video_names") or [], "reused_video": bool(m.get("reused_video"))}
                        for m in (ss.get("chat_history") or [])][-40:]
   d["ai_pending"] = ss.get("_ai_pending") or None   # an AI Check still running: lets a fresh page collect its answer
+  _b = ss.get("ble_ai") or {}   # the last finished AI Check answer comes back when the job is opened again
+  d["ai_last"] = ({"id": _b.get("id"), "text": str(_b.get("text"))[:20000], "label": _b.get("label") or ""}
+                  if _b.get("text") and not str(_b.get("text")).startswith("⚠️") else None)
   return d
 
 
@@ -3253,6 +3270,9 @@ def load_job(jid: str) -> bool:
     ss[k] = rec.get(k) if rec.get(k) is not None else copy.deepcopy(DEFAULTS.get(k, ""))
   ss.job_id, ss.job_status, ss.job_created = jid, rec.get("status") or "open", rec.get("created") or ""
   ss.ble_ai, ss.vin_error = None, ""
+  _al = rec.get("ai_last")
+  if isinstance(_al, dict) and _al.get("text"):
+    ss.ble_ai = {"id": "saved-" + str(jid) + "-" + str(_al.get("id") or "0"), "text": str(_al["text"]), "label": _al.get("label") or "", "tests": []}
   _p = rec.get("ai_pending")
   try:
     ss._ai_pending = _p if isinstance(_p, dict) and _p.get("job") and time.time() - float(_p.get("at") or 0) < 3600 else None
@@ -4954,7 +4974,19 @@ canvas.tplot { background: rgba(15,22,36,.85); border: 1px solid var(--line); bo
 <script>
 // ===================== Streamlit bridge (no npm needed) =====================
 function toStreamlit(type, data) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type }, data || {}), "*"); }
-const sendValue = (value) => toStreamlit("streamlit:setComponentValue", { value, dataType: "json" });
+// Streamlit keeps only the LAST value sent before it reruns, so messages sent in the same instant (the end of a test drive sends
+// the test results, the drive record and the AI request together) are joined into ONE message and the app handles them in order.
+let _outbox = [], _outTimer = null;
+const sendValue = (value) => {
+  _outbox.push(value);
+  if (_outTimer) return;
+  _outTimer = setTimeout(() => {
+    _outTimer = null;
+    const batch = _outbox.splice(0);
+    const v = batch.length === 1 ? batch[0] : { type: "batch", id: "batch-" + Date.now() + "-" + batch.length, events: batch };
+    toStreamlit("streamlit:setComponentValue", { value: v, dataType: "json" });
+  }, 0);
+};
 let lastHeight = 0;
 function fitHeight() { const h = document.documentElement.scrollHeight; if (h !== lastHeight) { lastHeight = h; toStreamlit("streamlit:setFrameHeight", { height: h }); } }
 new ResizeObserver(fitHeight).observe(document.body);
@@ -6178,6 +6210,10 @@ function buildEnhanced() {
   const rank = (c) => (c.std ? -1 : Math.min(...c.sigs.map((g) => { const i = GROUP_ORDER.indexOf(g.group); return i < 0 ? 99 : i; })));
   oemCmds.sort((a, b) => rank(a) - rank(b));
   oemRR = 0; oemFound = 0; oemModules = {}; oemTile.n = 0;
+  // the "oemN" numbering starts over, so forget the old ones (graph history, labels, selected graphs): a new reading must not continue another one's line
+  for (const k of Object.keys(HIST)) if (/^oem\d+$/.test(k)) delete HIST[k];
+  for (const k of Object.keys(shown)) if (/^oem\d+$/.test(k)) { delete shown[k]; delete num[k]; delete numT[k]; delete LABEL[k]; }
+  if (graphSel.some((g) => /^oem\d+$/.test(g))) { graphSel = graphSel.filter((g) => !/^oem\d+$/.test(g)); if (typeof rebuildCharts === "function") rebuildCharts(); }
   $("enhBox").innerHTML = '<div class="box">' + (oemCmds.length
     ? `Checking ${oemCmds.length} requests (${esc(oemSourceName() || "standard readings")}${learned.length ? " + what this car taught the app" : ""})…`
     : (isCan ? "No factory definitions for this exact vehicle yet. Tap 🔎 Find every reading this car has to try every list for this make."
@@ -8297,9 +8333,13 @@ function catTick() {
   const C = T.cat; if (C.phase !== "run") return;
   const t = nowS();
   const upWide = /λ/.test(shown.o2b1s1 || "");
-  if (fresh("o2b1s1", 1.5)) C.up.push(upWide ? num.stft1 : num.o2b1s1);   // wideband: use short-term trim oscillation
-  if (fresh("o2b1s2", 1.5)) C.dn.push(num.o2b1s2);
-  if (fresh("o2b2s2", 1.5) && num.o2b2s2 != null) { C.dn2.push(num.o2b2s2); if (fresh("stft2", 2)) C.up2.push(/λ/.test(shown.o2b2s1 || "") ? num.stft2 : num.o2b2s1); }
+  // one sample per NEW reading (not one per pass of the loop), and only real numbers
+  const seen = C.seen || (C.seen = {});
+  const take = (id, list) => { if (fresh(id, 1.5) && numT[id] !== seen[id] && num[id] != null && isFinite(num[id])) { seen[id] = numT[id]; list.push(num[id]); } };
+  take(upWide ? "stft1" : "o2b1s1", C.up);   // wideband: use short-term trim oscillation
+  take("o2b1s2", C.dn);
+  take("o2b2s2", C.dn2);
+  take(/λ/.test(shown.o2b2s1 || "") ? "stft2" : "o2b2s1", C.up2);   // bank 2 upstream: its own sensor (or its trim if it is wideband)
   if (t - C.t0 >= CAT_SECS) {
     C.phase = "done";
     const upWideB = /λ/.test(shown.o2b1s1 || "");
@@ -8696,13 +8736,21 @@ const MON_TIPS = {
   "O2 Sensor": "Warm engine, steady 40–55 mph for 3 minutes, then a few long coast-downs without braking (fuel cut).",
   "O2 Heater": "Cold start and idle 2 minutes; some cars finish it after key-off.",
   "EGR / VVT": "Several coast-downs from 50+ mph off the throttle, plus steady 35–55 mph cruising.",
+  "NMHC Catalyst": "Warm engine, then steady highway driving for several minutes.",
+  "NOx / SCR": "Warm engine and steady driving; exact conditions vary by make — check service info.",
+  "Boost Pressure": "Runs during normal driving that includes some acceleration under load.",
+  "Exhaust Gas Sensor": "Warm engine and steady driving for several minutes.",
+  "PM Filter": "Often needs a longer steady highway drive; exact conditions vary by make — check service info.",
   "Misfire": "Runs continuously during normal driving.", "Fuel System": "Runs continuously once in closed loop.",
   "Comprehensive": "Runs continuously.",
 };
 function readinessRows(B, C, D, thisDrive) {
-  const names = ["Catalyst", "Heated Catalyst", "EVAP", "Secondary Air", "A/C Refrigerant", "O2 Sensor", "O2 Heater", "EGR / VVT"];
+  const diesel = (B & 0x08) !== 0;   // compression ignition: the monitors have different names (same as the readiness panel)
+  const names = diesel
+    ? ["NMHC Catalyst", "NOx / SCR", null, "Boost Pressure", null, "Exhaust Gas Sensor", "PM Filter", "EGR / VVT"]
+    : ["Catalyst", "Heated Catalyst", "EVAP", "Secondary Air", "A/C Refrigerant", "O2 Sensor", "O2 Heater", "EGR / VVT"];
   const rows = [["Misfire", 0, 4], ["Fuel System", 1, 5], ["Comprehensive", 2, 6]].map(([n, sb, rb]) => ({ n, sup: (B >> sb) & 1, done: !((B >> rb) & 1) }));
-  names.forEach((n, bit) => rows.push({ n, sup: (C >> bit) & 1, done: !((D >> bit) & 1) }));
+  names.forEach((n, bit) => { if (n) rows.push({ n, sup: (C >> bit) & 1, done: !((D >> bit) & 1) }); });
   return rows.filter((r) => r.sup || !thisDrive);
 }
 let r01raw = null;
@@ -8735,8 +8783,8 @@ function vacTick() {
   if (V.step === "idle" && el >= 10) { const a = V.buf.map((p) => p[1]); V.idle = { avg: avg(a), sd: sd(a), min: Math.min(...a), max: Math.max(...a) }; V.step = null; vacReport(); }
   if (V.step === "hold" && el >= 30) {
     const ok = V.buf.filter((p) => p[2] >= 2000 && p[2] <= 3000);
-    if (ok.length < 20) { V.hold = { error: "RPM wasn't held near 2,500 — try again." }; }
-    else { const first = avg(ok.slice(0, 15).map((p) => p[1])), last = avg(ok.slice(-15).map((p) => p[1])); V.hold = { first, last, drop: first - last }; }
+    if (ok.length < 8) { V.hold = { error: "RPM wasn't held near 2,500 — try again." }; }   // (a slow adapter gives few readings in 30 s)
+    else { const w = Math.min(15, Math.floor(ok.length / 3)), first = avg(ok.slice(0, w).map((p) => p[1])), last = avg(ok.slice(-w).map((p) => p[1])); V.hold = { first, last, drop: first - last }; }
     V.step = null; vacReport();
   }
   if (V.step === "snap") {
@@ -9032,7 +9080,7 @@ function tccTick() {
     if (mde != null && !cmdOn && Math.abs(m - mde) > Math.max(60, 0.5 * mde)) {
       if (++TCC.runErr >= 6) { tccEvent("offtarget", `Slip ${Math.round(m)} rpm vs desired ${Math.round(mde)} rpm at ${Math.round(ms)} mph — the converter isn't following what the TCM asks for`, { slip: m, des: mde }); TCC.runErr = 0; }
     } else TCC.runErr = 0;
-    if (cmdOff && m < 20 && mr > 1100 && ms < 40)
+    if (cmdOff && m > -20 && m < 20 && mr > 1100 && ms < 40)   // (clearly negative slip = coasting, not a stuck clutch)
       tccEvent("stuckon", `TCC commanded OFF but slip is only ${Math.round(m)} rpm at ${Math.round(ms)} mph — converter clutch may be stuck applied (does it stall when coming to a stop?)`, { slip: m });
     if (du.length >= 6 && range(du) >= 35)
       tccEvent("dutyhunt", `TCC command swinging ${Math.round(Math.min(...du))}–${Math.round(Math.max(...du))}% at a steady ${Math.round(ms)} mph — the TCM is fighting slip (common with shudder or a worn converter clutch)`, { duty: mdu });
@@ -9497,7 +9545,8 @@ const AUTO_RUN = {
   async crank() {
     if (!runEngineOff()) { runSay("Cranking test. Shut the engine off and leave the key ON."); if (!await runWait(runEngineOff, 120)) return; }
     await crankTest();
-    if (!runRunning()) { runSay("Start the engine for the next test."); await runWait(runRunning, 60); }
+    const cr = T.crank && T.crank.result;   // the engine just started on its own: the live RPM reading hasn't caught up yet, so don't tell the tech to start it
+    if (!(cr && cr.started) && !runRunning()) { runSay("Start the engine for the next test."); await runWait(runRunning, 60); }
   },
   async idle() {
     if (!await runNeedWarmIdle()) return;
@@ -9505,7 +9554,7 @@ const AUTO_RUN = {
     runSay("Idle check. Foot off the gas for one minute.");
     const rows = await runRecord(60, keys, runIdling);
     if (runAbort()) return;
-    const rpm = colOf(rows, keys, "rpm"), t1 = avg(colOf(rows, keys, "stft1")) + (avg(colOf(rows, keys, "ltft1")) ?? 0);
+    const rpm = colOf(rows, keys, "rpm"), s1 = colOf(rows, keys, "stft1"), t1 = s1.length ? avg(s1) + (avg(colOf(rows, keys, "ltft1")) ?? 0) : null;   // no readings = no verdict (not "0.0% normal")
     const st2 = colOf(rows, keys, "stft2"), t2 = st2.length ? avg(st2) + (avg(colOf(rows, keys, "ltft2")) ?? 0) : null;
     const newMis = misAnalyze().all - m0, wob = rpm.length > 5 ? sd(rpm) : null, out = []; let g = "g";
     if (wob != null && wob > 60) { g = "r"; out.push(`Idle is rough — RPM swings ±${wob.toFixed(0)}.`); } else if (wob != null && wob > 30) { g = "y"; out.push(`Idle is a bit unsteady (±${wob.toFixed(0)} RPM).`); } else if (wob != null) out.push("Idle RPM is steady.");
@@ -9670,7 +9719,7 @@ const EXTRA_ACTIONS = {
   "warm-start": () => { T.warm = { on: true, pts: [], t0: nowS(), result: null }; },
   "warm-stop": () => { T.warm.on = false; },
   "crank-arm": () => { crankTest(); },
-  "trans-start": () => { T.trans.on = true; }, "trans-stop": () => { T.trans.on = false; }, "trans-reset": () => { T.trans.pts = []; },
+  "trans-start": () => { T.trans.on = true; }, "trans-stop": () => { T.trans.on = false; }, "trans-reset": () => { T.trans.pts = []; tccReset(); },
   "nvh-acc": () => { nvhRecord("acc"); }, "nvh-mic": () => { nvhRecord("mic"); },
   "tail-rec": () => { tailRecord(); },
   "rec-csv": () => exportCsv(), "rec-before": () => saveBefore(),
@@ -10165,12 +10214,12 @@ def start_ai_job(job_id: str, fn) -> bool:
     jobs.pop(k, None)   # tidy up anything nobody collected
   if job_id in jobs:
     return True
-  jobs[job_id] = {"state": "running", "started": time.time()}
+  rec = jobs[job_id] = {"state": "running", "started": time.time()}
   def work():
     try:
-      jobs[job_id].update(state="done", result=fn(), finished=time.time())
-    except Exception as e:
-      jobs[job_id].update(state="error", error=f"{type(e).__name__}: {e}", finished=time.time())
+      rec.update(state="done", result=fn(), finished=time.time())
+    except Exception as e:   # (rec is held here, so tidying the list can never turn a finished job into a second error)
+      rec.update(state="error", error=f"{type(e).__name__}: {e}", finished=time.time())
   th = threading.Thread(target=work, daemon=True, name=f"ai-{job_id}")
   add_script_run_ctx(th, ctx)   # lets the job read the job's data and write to the problem log
   th.start()
@@ -10264,6 +10313,11 @@ def pick_tests(answer: str, ran: list) -> list:
 
 
 def handle_ble_event(ev: dict):
+  if ev.get("type") == "batch":   # several scanner messages that left in the same instant: handle them in order, the AI request last
+    _subs = [x for x in (ev.get("events") or []) if isinstance(x, dict)]
+    for x in sorted(_subs, key=lambda y: 2 if y.get("type") == "ai" else 1 if y.get("type") == "sync" else 0):
+      handle_ble_event(x)
+    return
   if ev.get("type") == "sync":
     d = ev.get("dtcs") or {}
     ss.ble_dtcs = d
@@ -10306,6 +10360,8 @@ def handle_ble_event(ev: dict):
     ss.test_results = ev.get("results") or {}
 
   elif ev.get("type") == "ai":
+    if isinstance(ev.get("tests"), dict) and ev["tests"]:
+      ss.test_results = ev["tests"]   # the scanner's running list of test results (a separate message may have been lost)
     vehicle = ss.vehicle_info or "General OBD-II Vehicle"
     pids = json.dumps(ev.get("pids") or {}, indent=1)
     dtcs = _fmt_dtcs(ev.get("dtcs") or {})
@@ -10797,6 +10853,9 @@ def ask_chat(question: str, imgs: list, team: bool, where: str, videos: list | N
       reply, who, research = run_chat_ai(job_id, prompt, question, photos_b64, vrefs, team, vehicle, codes, symptoms)
     except AIError as e:
       reply, who, research = f"⚠️ {e}", "", ""
+    except Exception as e:   # anything unexpected: still save it as FAILED, so the chat never sits "working" forever
+      log_problem("ai", "Chat answer", f"{type(e).__name__}: {e}")
+      reply, who, research = f"⚠️ The AI couldn't answer: {type(e).__name__}: {e}", "", ""
     reply, diag = split_need_diagram(reply)
     if who and n_notes:
       who += f" · 📖 {n_notes} of your notes sent"
@@ -10985,7 +11044,7 @@ def chat_messages(msgs: list, where: str, start: int = 0):
 
 
 def past_chats_panel():
-  rows = [r.get("data") or {} for r in store_list("chat", 300)]
+  rows = [dict(r.get("data") or {}, _id=r.get("id")) for r in store_list("chat", 300)]
   rows = [d for d in rows if d.get("q")]
   if not rows:
     st.caption("No saved chats yet — every question you ask is saved here.")
@@ -11004,12 +11063,13 @@ def past_chats_panel():
       a = d.get("a", "")
       st.markdown(a if len(a) <= 700 else a[:700] + " …")
       b1, b2 = st.columns(2)
-      if b1.button("↩️ Continue this chat", key=f"qh_cont_{d.get('id')}", use_container_width=True):
+      _rid = d.get("id") or d.get("_id")
+      if b1.button("↩️ Continue this chat", key=f"qh_cont_{_rid}", use_container_width=True):
         ss.chat_history = (ss.chat_history or []) + [{"role": "user", "content": d.get("q", ""), "chat_id": d.get("id")},
                                                      {"role": "assistant", "content": a, "chat_id": d.get("id"), "who": d.get("who", "")}]
         st.rerun()
-      if b2.button("🗑️ Delete", key=f"qh_del_{d.get('id')}", use_container_width=True):
-        store_delete("chat", d.get("id"))
+      if b2.button("🗑️ Delete", key=f"qh_del_{_rid}", use_container_width=True):
+        store_delete("chat", _rid)
         st.rerun()
 
 
@@ -11352,6 +11412,8 @@ def scope_data_section():
   fid = hashlib.md5(raw).hexdigest()[:10]
   st.caption(f"✅ {len(cap['chans'])} channel(s) · {cap['n']:,} samples · {(cap['t'][-1] - cap['t'][0]) * 1000:.1f} ms long · "
              f"one sample every {cap['dt'] * 1e6:.1f} µs")
+  if cap.get("time_note"):
+    st.caption("ℹ️ " + cap["time_note"])
 
   # ---- setup: what was going on, and what's on each channel ----
   vd = ss.vehicle_details or {}
@@ -11713,13 +11775,20 @@ with tab_scope, guard("Scope & Tests"):
     st.markdown("**📸 Or a photo of the scope / meter screen**")
     col_scope, col_scratch = st.columns(2)
     with col_scope:
-      scope_capture = st.camera_input("Capture oscilloscope or meter") if st.toggle("📷 Open Camera for Scope / Meter") else None
-      scope_file = st.file_uploader("Or upload a scope / meter photo", type=["png", "jpg", "jpeg"], key="scope_upload")
+      _sn = ss.get("job_n", 0)   # (a new car or another job starts with empty boxes: nothing from the last car carries over)
+      scope_capture = (st.camera_input("Capture oscilloscope or meter", key=f"scope_cam_{_sn}")
+                       if st.toggle("📷 Open Camera for Scope / Meter", key=f"scope_cam_on_{_sn}") else None)
+      scope_file = st.file_uploader("Or upload a scope / meter photo", type=["png", "jpg", "jpeg"], key=f"scope_upload_{_sn}")
       active_img = scope_capture or scope_file
       pil_scope_image = None
       if active_img:
-        st.image(active_img.getvalue(), caption="Captured Scope / Meter Display")
-        pil_scope_image = ImageOps.exif_transpose(Image.open(active_img))
+        try:
+          st.image(active_img.getvalue(), caption="Captured Scope / Meter Display")
+          pil_scope_image = ImageOps.exif_transpose(Image.open(io.BytesIO(active_img.getvalue())))
+        except Exception:
+          st.warning("That image couldn't be read. Try another photo.")
+          active_img = None
+      if active_img:
         with st.form("save_wave", clear_on_submit=True):
           _wl1, _wl2 = st.columns([3, 1])
           _wave_label = _wl1.text_input("Save this capture to your waveform library as:",
@@ -11759,16 +11828,17 @@ with tab_scope, guard("Scope & Tests"):
               st.rerun()
 
     with col_scratch:
-      comp_data = st.text_input("Compression / Leakdown (psi / % drop):",
+      comp_data = st.text_input("Compression / Leakdown (psi / % drop):", key=f"comp_data_{_sn}",
                                 placeholder="e.g., Cyl 1: 160, Cyl 2: 155, Cyl 3: 90, Cyl 4: 160")
-      fuel_data = st.text_input("Fuel Pressure (Running / 5-min Bleed-down):",
+      fuel_data = st.text_input("Fuel Pressure (Running / 5-min Bleed-down):", key=f"fuel_data_{_sn}",
                                 placeholder="e.g., 55 psi running, drops to 12 psi in 3 mins")
-      volt_data = st.text_input("Electrical / Voltage Drop:",
+      volt_data = st.text_input("Electrical / Voltage Drop:", key=f"volt_data_{_sn}",
                                 placeholder="e.g., Cranking battery drop 9.1V, engine ground drop 0.4V")
-      scope_notes = st.text_area("Scope Waveform Observations:", height=70,
+      scope_notes = st.text_area("Scope Waveform Observations:", height=70, key=f"scope_notes_{_sn}",
                                  placeholder="e.g., Coil burn time 0.7ms; injector kick only 35V; CKP missing tooth uneven")
 
     if st.button("🔍 Analyze Readings & Scope Pattern"):
+      code_str = ", ".join(current_codes())   # (own copy: the Diagnostics screen's may not exist if that screen hit a problem)
       prompt = f"""
   You are an expert ASE Master / L1 diagnostic technician and automotive oscilloscope waveform specialist.
   Analyze this oscilloscope or multimeter capture (if attached) alongside the physical shop test readings.
@@ -11860,7 +11930,8 @@ def drive_rows(rec: dict) -> list[dict]:
 def drive_text(rec: dict) -> str:
   rows = drive_rows(rec)
   step = 5 if len(rows) <= 1800 else 10
-  cols = ["sec", "rpm", "spd", "load", "tps", "stft1", "ltft1", "stft2", "ltft2", "o2b1s1", "o2b1s2", "ect", "fuel_system", "decel"]
+  cols = ["sec", "rpm", "spd", "load", "tps", "stft1", "ltft1", "stft2", "ltft2", "maf", "map", "o2b1s1", "o2b1s2", "ect", "iat", "timing",
+          "volt", "frp", "tccslip", "fuel_system", "decel"]
   cols = [c for c in cols if any(r.get(c) not in (None, "", False) for r in rows)] or ["sec"]
   def fmt(v):
     return "" if v is None else ("Y" if v is True else "" if v is False else str(v))
@@ -11963,7 +12034,7 @@ def build_report_html(notes: str) -> str:
   for m in d.get("modules") or []:
     for c in m.get("codes", []):
       code_rows.append((m.get("name", "Module"), c.get("code"), c.get("status")))
-  for c in ss.sel_codes or []:
+  for c in current_codes():   # picked from the scanner AND typed by hand
     if not any(c == r[1] for r in code_rows):
       code_rows.append(("Entered", c, ""))
   ff = d.get("freeze") or {}
@@ -12087,9 +12158,11 @@ with tab_ro, guard("Repair order"):
               st.rerun()
       with _pc2:
         st.markdown("**🧾 Estimate** (tap a cell to edit; ➕ at the bottom adds a line)")
-        _est_in = ss.estimate_rows if isinstance(ss.estimate_rows, list) and ss.estimate_rows else         [{"Item": "", "Parts $": 0.0, "Labor $": 0.0}]
-        _est = st.data_editor(_est_in, num_rows="dynamic", use_container_width=True,
-                              key=f"est_{ss.get('job_n', 0)}_{ss.get('job_id') or 'new'}")
+        if ss.get("_est_seed_n") != ss.get("job_n", 0):   # the editor's STARTING rows are set once per job and never rewritten while you edit
+          ss._est_seed = (copy.deepcopy(ss.estimate_rows) if isinstance(ss.estimate_rows, list) and ss.estimate_rows
+                          else [{"Item": "", "Parts $": 0.0, "Labor $": 0.0}])
+          ss._est_seed_n = ss.get("job_n", 0)
+        _est = st.data_editor(ss._est_seed, num_rows="dynamic", use_container_width=True, key=f"est_{ss.get('job_n', 0)}")
         ss.estimate_rows = [r for r in (_est or []) if isinstance(r, dict)]
         def _money(v):
           try:
@@ -12229,6 +12302,24 @@ DRIVE_REVIEW_TASK = """You are an expert ASE master diagnostic technician. Revie
 """
 
 
+def drive_review_text(rid: str) -> str:
+  """The AI team's review of a drive: this session's, or the one saved with the drive (it survives a refresh)."""
+  have = ss.get("drive_reviews") or {}
+  if have.get(rid):
+    return have[rid]
+  checked = ss.setdefault("_dr_checked", set())
+  if rid in checked:
+    return ""
+  checked.add(rid)
+  try:
+    t = str((store_get("drivereview", rid) or {}).get("text") or "")
+  except Exception:
+    t = ""
+  if t:
+    ss.setdefault("drive_reviews", {})[rid] = t
+  return t
+
+
 def review_drive(rec: dict, status_label: str = "Reviewing the drive...") -> str:
   with st.status(status_label) as status:
     same_car = not rec.get("vehicle") or rec.get("vehicle") == ss.vehicle_info
@@ -12237,6 +12328,8 @@ def review_drive(rec: dict, status_label: str = "Reviewing the drive...") -> str
                                                  ss.active_dtc, ss.symptoms.strip(), False, status)
     status.update(label="Done", state="complete")
   ss.setdefault("drive_reviews", {})[rec["id"]] = ans + f"\n\n_{team_names(draft, ds_draft, research, more)}_"
+  if not str(ans).startswith("⚠️"):
+    store_put("drivereview", rec["id"], {"text": ss.drive_reviews[rec["id"]], "at": datetime.now().strftime("%Y-%m-%d %I:%M %p")})
   notify("🚗 Test drive review ready", f"{rec.get('vehicle') or ss.vehicle_info or 'Test drive'} — {first_line(ans)}", "car", 3,
          app_link(ss.get("job_id")))
   return ans
@@ -12271,7 +12364,7 @@ with tab5, guard("Log tab"):
     with col_del:
       confirm = st.checkbox("Yes, delete all log entries")
       if st.button("🗑️ Clear Log History", disabled=not confirm):
-        store_delete("log")
+        store_delete("log", delete_all=True)
         queue_update(toast="Log cleared")
   else:
     st.info("No vehicles or DTCs logged yet. Connect the scanner (🚗 Vehicle Scan) or run a diagnostic tree (🔧 Diagnostics) to start logging.")
@@ -12280,17 +12373,24 @@ with tab5, guard("Log tab"):
   st.write("---")
   st.subheader("📅 Callbacks due")
   _today = datetime.now()
-  def _jdate(d):
-    for k in ("updated", "created"):
+  def _jdate_of(d, order):
+    for k in order:
       try:
         return datetime.strptime(str(d.get(k, "")), "%Y-%m-%d %I:%M %p")
       except ValueError:
         continue
     return None
+  def _jdate(d):   # the day of the visit (when the job was started): months and comebacks don't move when an old job is reopened
+    return _jdate_of(d, ("created", "updated"))
+  def _jdate_upd(d):   # when the job was last touched (closed): callbacks are counted from there
+    return _jdate_of(d, ("updated", "created"))
   _due = []
-  for _r in store_list("job", 300, {"status": "closed"}):
+  _closed_jobs = store_list("job", 300, {"status": "closed"})
+  if len(_closed_jobs) >= 300:
+    _closed_jobs = store_list_all("job", {"status": "closed"})
+  for _r in _closed_jobs:
     _d = _r.get("data") or {}
-    _days, _dt = _d.get("follow_up_days") or 0, _jdate(_d)
+    _days, _dt = _d.get("follow_up_days") or 0, _jdate_upd(_d)
     if not _days or _d.get("follow_up_done") or not _dt:
       continue
     _when = _dt + __import__("datetime").timedelta(days=int(_days))
@@ -12385,16 +12485,17 @@ with tab_scope, guard("Test drive review"):
     txt = drive_text(rec)
     c1, c2 = st.columns(2)
     with c1:
-      if st.button("🧠 Have the AI team review this drive" + (" again" if pick in (ss.get("drive_reviews") or {}) else "")):
+      if st.button("🧠 Have the AI team review this drive" + (" again" if drive_review_text(pick) else "")):
         review_drive(rec)
     with c2:
       csv_rows = ["seconds," + ",".join(rec.get("keys") or []) + ",fuel_system,decel"] + [
           ",".join("" if r.get(k) is None else str(r.get(k)) for k in ["sec", *(rec.get("keys") or []), "fuel_system"]) + ("," + ("yes" if r["decel"] else ""))
           for r in rows]
       st.download_button("⬇️ Download drive data (CSV)", data="\n".join(csv_rows), file_name=f"{pick}.csv", mime="text/csv")
-    if pick in (ss.get("drive_reviews") or {}):
+    _rv = drive_review_text(pick)
+    if _rv:
       st.markdown("##### 🤖 AI team review of this drive")
-      st.markdown(ss.drive_reviews[pick])
+      st.markdown(_rv)
     st.markdown("**Copy this to Claude** — tap the copy icon in the top-right corner of the box:")
     st.code(txt[:30000], language=None)
 
@@ -12439,7 +12540,7 @@ with tab5, guard("Log tab"):
         os.remove(PROBLEM_LOG)
       except OSError:
         pass
-      store_delete("problem")
+      store_delete("problem", delete_all=True)
       queue_update(toast="Problem log cleared")
 
   # ---------- 💾 Backup ----------
@@ -12450,10 +12551,10 @@ with tab5, guard("Log tab"):
   if st.button("📦 Prepare backup file"):
     with st.spinner("Gathering everything..."):
       _bk = {"app_version": APP_VERSION, "made": datetime.now().isoformat(),
-             **{k: store_list(k, 1000) for k in ("job", "fix", "log", "drive", "jobphoto", "diagram", "wave", "csvwave", "know", "chat", "sent", "problem")
-                if k != "know"}, "know": store_list_all("know")}
+             **{k: store_list_all(k) for k in ("job", "fix", "log", "drive", "drivereview", "jobphoto", "diagram", "wave", "csvwave", "know",
+                                               "chat", "sent", "problem", "oemmap", "link")}}
       ss._backup = json.dumps(_bk)
-      ss._backup_counts = " · ".join(f"{k}: {len(_bk.get(k) or [])}" for k in ("job", "fix", "log", "drive", "jobphoto", "wave"))
+      ss._backup_counts = " · ".join(f"{k}: {len(_bk.get(k) or [])}" for k in ("job", "fix", "log", "drive", "jobphoto", "wave", "chat", "know", "oemmap", "link"))
     st.toast("Backup ready — tap Download")
   if ss.get("_backup"):
     st.download_button("⬇️ Download backup", data=ss._backup, mime="application/json",
@@ -12635,18 +12736,19 @@ with tab6, guard("Knowledge tab"):
                                              "Type": st.column_config.SelectboxColumn(options=KNOW_KINDS)})
       ks1, ks2 = st.columns(2)
       if ks1.button("💾 Save these notes", type="primary", use_container_width=True):
-        n_saved = 0
+        n_saved, _new_rows = 0, []
         _have = {_note_key(e.get("rule")) for e in knowledge_entries()}
         for i_, row in enumerate(edited or []):
           if not row.get("Keep") or not str(row.get("Note") or "").strip() or _note_key(row.get("Note")) in _have:
             continue
           _have.add(_note_key(row.get("Note")))
-          store_put("know", datetime.now().strftime("%Y%m%d%H%M%S") + f"{i_:03d}",
+          _new_rows.append((datetime.now().strftime("%Y%m%d%H%M%S") + f"{i_:03d}",
                     {"topic": str(row.get("Topic") or "General").strip(), "type": row.get("Type") or "Rule of thumb",
                      "applies_to": str(row.get("Applies to") or "All").strip(), "rule": str(row.get("Note")).strip(),
                      "source": ss.get("know_pending_src") or "", "added": datetime.now().strftime("%Y-%m-%d"),
-                     "tech": ss.get("tech_user") or ""})
+                     "tech": ss.get("tech_user") or ""}))
           n_saved += 1
+        store_put_many("know", _new_rows)   # one request for all of them (not one per note)
         ss.know_pending = None
         ss.know_n = ss.get("know_n", 0) + 1   # empty the photo box
         queue_update(toast=f"Saved {n_saved} note(s) to shop knowledge")
@@ -12719,14 +12821,18 @@ with tab6, guard("Knowledge tab"):
     if up and st.button("Import"):
       try:
         items = json.loads(up.getvalue().decode("utf-8"))
-        n_ = 0
+        _have_i, _imp, n_dup = {_note_key(e.get("rule")) for e in knowledge_entries()}, [], 0
         for i_, x in enumerate(items if isinstance(items, list) else []):
           if isinstance(x, dict) and str(x.get("rule") or "").strip():
-            store_put("know", datetime.now().strftime("%Y%m%d%H%M%S") + f"i{i_:04d}",
-                      {k: x.get(k, "") for k in ("topic", "type", "applies_to", "rule", "source", "added", "tech")})
-            n_ += 1
+            if _note_key(x.get("rule")) in _have_i:   # already in your notes: importing the same file twice adds nothing
+              n_dup += 1
+              continue
+            _have_i.add(_note_key(x.get("rule")))
+            _imp.append((datetime.now().strftime("%Y%m%d%H%M%S") + f"i{i_:04d}",
+                         {k: x.get(k, "") for k in ("topic", "type", "applies_to", "rule", "source", "added", "tech")}))
+        store_put_many("know", _imp)   # one request for all of them
         ss.know_n = ss.get("know_n", 0) + 1
-        queue_update(toast=f"Imported {n_} note(s)")
+        queue_update(toast=f"Imported {len(_imp)} note(s)" + (f" · skipped {n_dup} you already have" if n_dup else ""))
       except (ValueError, UnicodeDecodeError):
         st.error("That file isn't a notes export.")
 
