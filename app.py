@@ -14,6 +14,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import nullcontext
 
 from PIL import Image, ImageEnhance, ImageOps
 import numpy as np
@@ -24,7 +25,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-26"
+APP_VERSION = "2026-11-27"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -154,6 +155,11 @@ WHATS_NEW = [
     "car on its own, the Chat screen says so with a 'different car' button",
     "AI CHECK SURVIVES A DROPPED CONNECTION: if the phone loses signal while the AI team is checking (a test drive in a "
     "dead spot, say), the answer is no longer lost: when the page comes back, the finished answer appears in the scanner panel",
+    "FIXES FROM A CODE REVIEW: door-jamb VIN barcodes that start with an 'I' now read correctly; a VIN typed or read after "
+    "the word 'VIN' is no longer shifted; ignition dwell on the primary scope channel is measured (it was coming back "
+    "empty); scope files with repeated time stamps or an off-scale sample no longer break the measurements; comebacks "
+    "are found even with an unrelated visit in between and aren't cut off after 500 records; DeepSeek's retry, "
+    "Perplexity's unreadable answers and a few save-time edge cases are handled",
 ]
 
 st.markdown(
@@ -375,9 +381,17 @@ def queue_update(toast: str | None = None, **values):
 # --- HELPERS ---
 # ========================================================
 # --- PROBLEM LOG: crashes, AI/API failures and scanner errors, so they can be sent to Claude to fix ---
+def _session_get(key: str, default=""):
+  """st.session_state read that can't crash (a plain background thread has no page session)."""
+  try:
+    return st.session_state.get(key, default)
+  except Exception:
+    return default
+
+
 def log_problem(kind: str, where: str, message: str, details: str = "", extra: dict | None = None):
   entry = {"time": datetime.now().strftime("%Y-%m-%d %I:%M:%S %p"), "version": APP_VERSION, "kind": kind, "where": where,
-           "message": str(message)[:500], "details": str(details)[-4000:], "vehicle": st.session_state.get("vehicle_info", ""),
+           "message": str(message)[:500], "details": str(details)[-4000:], "vehicle": _session_get("vehicle_info", ""),
            **(extra or {})}
   try:
     with open(PROBLEM_LOG, "a", encoding="utf-8") as f:
@@ -563,7 +577,10 @@ def _bump(kind: str):
 
 def _store_error(msg: str):
   """Note a storage problem without calling log_problem (which itself saves to storage)."""
-  st.session_state["_store_err"] = msg
+  try:
+    st.session_state["_store_err"] = msg
+  except Exception:
+    pass   # a background thread has no page to show it on; it still goes in the problem file below
   try:
     with open(PROBLEM_LOG, "a", encoding="utf-8") as f:
       f.write(json.dumps({"time": datetime.now().strftime("%Y-%m-%d %I:%M:%S %p"), "version": APP_VERSION,
@@ -702,7 +719,7 @@ def _store_list_all(kind: str, where_json: str, ver: int, online: bool) -> list[
     return _store_list(kind, 100000, where_json, ver, online)
   rows, off = [], 0
   while True:
-    params = {"kind": f"eq.{kind}", "select": "id,data", "order": "id.asc", "limit": "1000", "offset": str(off)}
+    params = {"kind": f"eq.{kind}", "select": "id,data,updated_at", "order": "id.asc", "limit": "1000", "offset": str(off)}
     for k, v in where.items():
       if re.fullmatch(r"[\w .\-]{1,80}", str(v)):   # plain text only; anything else gets matched below, never sent
         params[f"data->>{k}"] = f"eq.{v}"
@@ -719,6 +736,20 @@ def _store_list_all(kind: str, where_json: str, ver: int, online: bool) -> list[
     if len(page) < 1000:
       break
     off += 1000
+  seen = {r.get("id") for r in rows}
+  try:   # plus anything a failed save left on the temporary disk (the same as store_list does)
+    d = _local_dir(kind)
+    for fn in os.listdir(d):
+      if fn.endswith(".json"):
+        try:
+          with open(os.path.join(d, fn), encoding="utf-8") as f:
+            rec = json.load(f)
+        except (OSError, ValueError):
+          continue
+        if rec.get("id") not in seen and all(str((rec.get("data") or {}).get(k, "")) == str(v) for k, v in where.items()):
+          rows.append(rec)
+  except OSError:
+    pass
   return rows
 
 
@@ -1025,7 +1056,8 @@ def ensure_vectors(src: str, items: list) -> dict:
       have[d["sid"]] = (d.get("h"), d["v"])
   todo = [(sid, t) for sid, t in items if have.get(sid, (None,))[0] != hashlib.md5(t.encode()).hexdigest()[:12]]
   if todo:   # a big library is built a few hundred at a time (each batch is saved, so nothing is redone)
-    with st.spinner(f"🧠 Building meaning search for {len(todo)} item(s) — one time…" if len(todo) > 20 else "🧠 …"):
+    with (nullcontext() if threading.current_thread().name.startswith("ai-")   # (no page widgets from a side thread)
+          else st.spinner(f"🧠 Building meaning search for {len(todo)} item(s) — one time…" if len(todo) > 20 else "🧠 …")):
       for i in range(0, min(len(todo), 400), 100):
         chunk = todo[i:i + 100]
         try:
@@ -1096,7 +1128,12 @@ def ask_perplexity(prompt: str, effort: str = "low", timeout: int = 60) -> str:
     return f"⚠️ Perplexity connection error: {e}"
   if res.status_code != 200:
     return f"⚠️ Perplexity API error ({res.status_code}): {res.text[:300]}"
-  data = res.json()
+  try:
+    data = res.json()
+  except ValueError:
+    return "⚠️ Perplexity sent back something unreadable. Please try again."
+  if not isinstance(data, dict):
+    return "⚠️ Perplexity sent back something unreadable. Please try again."
   if data.get("output_text"):
     return data["output_text"]
   text = "".join(
@@ -1364,8 +1401,10 @@ def _deepseek_raw(key: str, model: str, session: requests.Session, prompt: str, 
         swaps["_deepseek_note"] = (model, alt)
       model = alt
       res = call(off, budget0)
+  no_switch = False
   if res.status_code == 400 and "think" in res.text.lower():   # this model doesn't take the switch: ask normally
     res = call(False, max(max_tokens, 12000))
+    no_switch = True
   if res.status_code != 200:
     raise RuntimeError(f"DeepSeek API error ({res.status_code}, {model}): {res.text[:300]}")
   try:
@@ -1375,7 +1414,10 @@ def _deepseek_raw(key: str, model: str, session: requests.Session, prompt: str, 
     raise RuntimeError("DeepSeek returned an unreadable answer.") from e
   text = msg.get("content") or ""
   if not text.strip() and choice.get("finish_reason") == "length":
-    res = call(False, max(max_tokens * 3, 12000)) if off else call(True, max_tokens)   # thinking ate the budget
+    # ran out of room: with thinking already off (or not switchable), more room; with thinking on, turn it off
+    res = call(not no_switch, max(max_tokens * 3, 12000)) if off else call(True, max_tokens)
+    if res.status_code != 200:
+      raise RuntimeError(f"DeepSeek API error ({res.status_code}, {model}): {res.text[:300]}")
     try:
       choice = res.json()["choices"][0]
       msg = choice["message"]
@@ -1686,11 +1728,12 @@ def team_answer(prompt: str, vehicle: str, codes: str, symptoms: str, use_web: b
 
 def team_names(draft: str, ds_draft: str, research: str, more: dict | None = None) -> str:
   """Who worked on an answer, for the small line under it."""
+  more_given = bool(more)   # a real "who did what" record: if it says nobody drafted, nobody gets the credit
   more = more or {}
   judge = more.get("judge", "claude" if (draft or ds_draft) and has_claude() else "")
   return " + ".join(x for x in [
       ("🌐 ChatGPT web search" if research.startswith(RESEARCH_BY_GPT) else "🌐 Perplexity") if research else "",
-      "✨ " + gemini_label() if draft or more.get("solo") == "gemini" or (not judge and not ds_draft and not more.get("gpt")) else "",
+      "✨ " + gemini_label() if draft or more.get("solo") == "gemini" or (not more_given and not judge and not ds_draft and not more.get("gpt")) else "",
       "💬 " + openai_label() if more.get("gpt") else "",
       "🐋 " + deepseek_label() if ds_draft else "",
       "🧠 " + claude_label() if judge == "claude" else ("🧠 " + openai_label() + " (final check)" if judge == "chatgpt" else ""),
@@ -1728,6 +1771,17 @@ def vin_check_digit_ok(vin: str) -> bool:
   return vin[8] == ("X" if r == 10 else str(r))
 
 
+def vin_from_barcode_text(text: str) -> str:
+  """The VIN inside what a barcode says. Many North American door-jamb barcodes (Code 39) are 'I' + the 17-character VIN;
+  the I is dropped first so it can't shift the whole VIN by one. A candidate whose check digit is right wins."""
+  raw = re.sub(r"[^A-Z0-9]", "", str(text or "").upper())
+  if len(raw) == 18 and raw[0] == "I":
+    raw = raw[1:]
+  fixed = raw.replace("I", "1").replace("O", "0").replace("Q", "0")
+  cands = [fixed[i:i + 17] for i in range(max(0, len(fixed) - 16)) if VIN_RE.fullmatch(fixed[i:i + 17])]
+  return next((c for c in cands if vin_check_digit_ok(c)), cands[0] if cands else "")
+
+
 def scan_vin_barcode(img: Image.Image) -> str:
   """Door-jamb / registration barcodes (Code 39, DataMatrix, QR, PDF417). Tries several clean-ups of the photo."""
   gray = ImageOps.grayscale(img)
@@ -1740,9 +1794,9 @@ def scan_vin_barcode(img: Image.Image) -> str:
     except Exception:
       continue
     for b in found:
-      for m in re.finditer(r"[A-Z0-9]{17}", re.sub(r"[^A-Z0-9]", "", b.text.upper().replace("I", "1").replace("O", "0").replace("Q", "0"))):
-        if VIN_RE.fullmatch(m.group(0)):
-          return m.group(0)
+      v = vin_from_barcode_text(b.text)
+      if v:
+        return v
   return ""
 
 
@@ -1752,10 +1806,17 @@ _CONFUSE = {"0": "DQOU", "1": "IL7T", "2": "Z", "5": "S", "6": "G", "8": "B3", "
 
 
 def clean_vin_text(s: str) -> list[str]:
-  """Pull every 17-character VIN-looking string out of text, fixing letters that can't appear in a VIN."""
-  t = s.upper().replace("O", "0").replace("Q", "0").replace("I", "1")
+  """Pull every 17-character VIN-looking string out of text, fixing letters that can't appear in a VIN. The word "VIN" in
+  front of the number is set aside first (its I would turn into a 1 and shift everything), and a longer run of characters
+  is slid along so one extra character at either end can't hide the real VIN: ones with a correct check digit come first."""
+  t = str(s or "").upper()
+  t = re.sub(r"\bV\.?\s?I\.?\s?N\b(?=[\s:#.\-]*[A-Z0-9])", "|", t)
+  t = t.replace("O", "0").replace("Q", "0").replace("I", "1")
   t = re.sub(r"[\s\-\.\*]", "", t)
-  return list(dict.fromkeys(m.group(0) for m in re.finditer(r"[A-HJ-NPR-Z0-9]{17}", t)))
+  runs = re.findall(r"[A-HJ-NPR-Z0-9]{17,}", t)
+  good = [r[i:i + 17] for r in runs for i in range(len(r) - 16) if vin_check_digit_ok(r[i:i + 17])]
+  plain = [m.group(0) for m in re.finditer(r"[A-HJ-NPR-Z0-9]{17}", t)]
+  return list(dict.fromkeys(good + plain))
 
 
 def vin_fixes(v: str) -> list[str]:
@@ -1881,7 +1942,7 @@ def find_vin(img_bytes: bytes) -> dict:
   return {"vin": best, "method": " + ".join(sorted(why[best])), "confidence": conf, "alts": alts, "note": note}
 
 
-@st.cache_data(show_spinner=False, max_entries=20)
+@st.cache_data(ttl=3600, show_spinner=False, max_entries=20)   # (a customer's details don't stay in memory for long)
 def extract_customer(img_bytes: bytes) -> dict:
   img = ImageOps.exif_transpose(Image.open(io.BytesIO(img_bytes)))
   ask = ("Read this work order / invoice. Extract ONLY the customer name, address, phone number, email and odometer/mileage."
@@ -2360,7 +2421,23 @@ def parse_scope_csv(raw: bytes) -> dict:
   if not chans:
     raise ValueError("No usable channels in this file.")
   dt = float(np.nanmedian(np.diff(t)))
-  return {"t": t, "chans": chans, "dt": dt, "n": len(t)}
+  note = ""
+  if not np.isfinite(dt) or dt <= 0:
+    # Time stamps repeated (a scope that writes whole milliseconds, say) or broken. If they never go backwards, spread the
+    # samples evenly over the capture; otherwise the file can't be measured.
+    d_ = np.diff(t)
+    span = float(np.nanmax(t) - np.nanmin(t)) if np.isfinite(t).any() else 0.0
+    if len(t) > 1 and np.all(d_[np.isfinite(d_)] >= 0) and np.isfinite(span) and span > 0:
+      dt = span / (len(t) - 1)
+      t = float(np.nanmin(t)) + np.arange(len(t)) * dt
+      note = "The time column repeats values, so the samples were spread evenly over the capture."
+    else:
+      raise ValueError("The time column in this file doesn't count up (repeated, backwards or missing times), so it can't be "
+                       "measured. Save the capture again with a normal time column.")
+  out = {"t": t, "chans": chans, "dt": dt, "n": len(t)}
+  if note:
+    out["time_note"] = note
+  return out
 
 
 def envelope(t, y, n: int = 1200):
@@ -2479,6 +2556,12 @@ def _general(t, y):
           "duty_cycle_pct": _r(float(np.mean(yy > mid) * 100), 1) if (hi - lo) > 0.2 else None}
 
 
+def _nanmed(x) -> float:
+  x = np.asarray(x, dtype=float)
+  x = x[np.isfinite(x)]
+  return float(np.median(x)) if len(x) else float("nan")
+
+
 def _sec_ign(t, y, dt):
   if abs(np.nanmin(y)) > abs(np.nanmax(y)):
     y = -y   # inverted probe or negative-fire coil
@@ -2494,15 +2577,16 @@ def _sec_ign(t, y, dt):
     if s is None:
       continue
     first = seg[s: s + max(3, int(0.0004 / dt))]
-    level = float(np.median(first))
-    if level <= 0.2:
+    level = _nanmed(first)
+    if not np.isfinite(level) or level <= 0.2:
       continue
     e = next((i for i in range(s + max(2, int(0.0002 / dt)), len(seg)) if seg[i] < 0.35 * level), None)
     if e is None:
       continue
     line = seg[s:e]
-    slope = float(np.polyfit(np.arange(len(line)) * dt * 1000, line, 1)[0]) if len(line) > 5 else None
-    after = seg[e: e + int(0.002 / dt)] - np.median(seg[-max(5, int(0.0005 / dt)):])
+    ok_ = np.isfinite(line)   # an off-scale (∞) sample in the line would otherwise break the fit
+    slope = float(np.polyfit((np.arange(len(line)) * dt * 1000)[ok_], line[ok_], 1)[0]) if ok_.sum() > 5 else None
+    after = seg[e: e + int(0.002 / dt)] - _nanmed(seg[-max(5, int(0.0005 / dt)):])
     osc = int(np.sum(np.diff(np.sign(after[np.abs(after) > 0.08 * level])) != 0) // 2) if len(after) > 5 else 0
     ev.append({"time_ms": _r(t[p] * 1000, 2), "firing_kv": _r(y[p], 1), "spark_line_kv": _r(level, 2),
                "burn_ms": _r((e - s) * dt * 1000, 2), "spark_slope_kv_per_ms": _r(slope, 2), "coil_oscillations": osc})
@@ -2542,8 +2626,12 @@ def _pri_ign(t, y, dt):
   ev, notes = [], []
   for p in pk:
     back = y[max(0, p - int(0.012 / dt)): p][::-1]
+    # Walk back over the spike's rising edge (still above 2.5 V), then count how long the coil sat below 2.5 V: the dwell.
+    rise, r = max(3, int(0.0003 / dt)), 0
+    while r < min(len(back), rise) and not back[r] < 2.5:
+      r += 1
     d = 0
-    while d < len(back) and back[d] < 2.5:
+    while r + d < len(back) and back[r + d] < 2.5:
       d += 1
     seg = y[p: p + int(0.004 / dt)]
     s = next((i for i in range(1, len(seg)) if seg[i] < 0.5 * y[p]), None)
@@ -2602,8 +2690,10 @@ def _inj_v(t, y, dt):
   down = _edges(-y, -lo_thr, -(supply * 0.7))   # falling through the low threshold = driver turns on
   for d in down:
     k = d
-    while k < len(y) and y[k] < supply * 0.7:
+    while k < len(y) and (y[k] < supply * 0.7 or not np.isfinite(y[k])):   # a blank (∞/dropout) doesn't end the pulse...
       k += 1
+    while k > d + 1 and not np.isfinite(y[k - 1]):   # ...unless it is the clipped spike itself, right at the end
+      k -= 1
     if k >= len(y):
       break
     seg = y[k: k + int(0.003 / dt)]
@@ -3107,6 +3197,33 @@ def job_codes(d: dict) -> str:
   codes = list(d.get("sel_codes") or [])
   codes += [c for c in re.split(r"[,\s;/]+", str(d.get("manual_dtc") or "").upper()) if DTC_RE.fullmatch(c) and c not in codes]
   return ", ".join(codes)
+
+
+def find_comebacks(jobs: list, jdate) -> list:
+  """Same car (VIN) back with the same fault code within 60 days of an earlier visit — even when an unrelated visit
+  (an oil change, say) came in between the two."""
+  byvin = {}
+  for j in jobs:
+    if j.get("active_vin") and jdate(j):
+      byvin.setdefault(j["active_vin"], []).append(j)
+  out = []
+  for vin, js in byvin.items():
+    js.sort(key=jdate)
+    for i in range(1, len(js)):
+      now_codes = {c for c in re.split(r"[,\s]+", str(js[i].get("codes") or "")) if c}
+      if not now_codes:
+        continue
+      for k in range(i - 1, -1, -1):
+        gap = (jdate(js[i]) - jdate(js[k])).days
+        if gap > 60:
+          break
+        shared = now_codes & {c for c in re.split(r"[,\s]+", str(js[k].get("codes") or "")) if c}
+        if gap > 0 and shared:
+          out.append({"vehicle": js[i].get("vehicle_info", ""), "customer": js[i].get("customer_name", ""),
+                      "code(s)": ", ".join(sorted(shared)), "days apart": gap,
+                      "first": jdate(js[k]).strftime("%b %d"), "back": jdate(js[i]).strftime("%b %d")})
+          break
+  return out
 
 
 def autosave_job(force: bool = False):
@@ -12185,9 +12302,10 @@ with tab5, guard("Log tab"):
     for _when, _jid, _d in sorted(_due):
       _cb1, _cb2 = st.columns([5, 1])
       _late = "🔴 overdue" if _when < _today else "🟡 this week"
-      _cb1.markdown(f"{_late} · **{_d.get('customer_name') or 'No name'}** ({_d.get('customer_phone') or 'no phone'}) · "
-                    f"{_d.get('vehicle_info') or 'vehicle'}  \n<small>Due {_when:%b %d}: "
-                    f"{_d.get('follow_up_note') or FOLLOW_UP_LABELS.get(_d.get('follow_up_days'), '')}</small>", unsafe_allow_html=True)
+      _e = lambda v: html_lib.escape(str(v))   # names and notes are typed text: show them as text, never as markup
+      _cb1.markdown(f"{_late} · **{_e(_d.get('customer_name') or 'No name')}** ({_e(_d.get('customer_phone') or 'no phone')}) · "
+                    f"{_e(_d.get('vehicle_info') or 'vehicle')}  \n<small>Due {_when:%b %d}: "
+                    f"{_e(_d.get('follow_up_note') or FOLLOW_UP_LABELS.get(_d.get('follow_up_days'), ''))}</small>", unsafe_allow_html=True)
       if _cb2.button("✔️ Called", key=f"fu_done_{_jid}", use_container_width=True):
         _rec = store_get("job", _jid) or {}
         _rec["follow_up_done"] = True
@@ -12197,8 +12315,13 @@ with tab5, guard("Log tab"):
   # ---------- 📈 Shop summary ----------
   st.write("---")
   with st.expander("📈 Shop summary — cars, top codes, top fixes and comebacks"):
-    _all_jobs = [dict(_r.get("data") or {}, _id=_r["id"]) for _r in store_list("job", 500)]
-    _all_fixes = [_r.get("data") or {} for _r in store_list("fix", 500)]
+    _job_rows, _fix_rows = store_list("job", 500), store_list("fix", 500)
+    if len(_job_rows) >= 500:   # a big shop: get every record, so the totals and comebacks aren't cut off
+      _job_rows = store_list_all("job")
+    if len(_fix_rows) >= 500:
+      _fix_rows = store_list_all("fix")
+    _all_jobs = [dict(_r.get("data") or {}, _id=_r["id"]) for _r in _job_rows]
+    _all_fixes = [_r.get("data") or {} for _r in _fix_rows]
     _months = sorted({_jdate(j).strftime("%Y-%m") for j in _all_jobs if _jdate(j)}, reverse=True)
     if not _months:
       st.caption("No jobs recorded yet.")
@@ -12215,20 +12338,7 @@ with tab5, guard("Log tab"):
           if DTC_RE.fullmatch(_c):
             _code_count[_c] = _code_count.get(_c, 0) + 1
       # comebacks across ALL jobs: same VIN, same code, two different jobs within 60 days
-      _byvin = {}
-      for _j in _all_jobs:
-        if _j.get("active_vin") and _jdate(_j):
-          _byvin.setdefault(_j["active_vin"], []).append(_j)
-      _comebacks = []
-      for _vin, _js in _byvin.items():
-        _js.sort(key=_jdate)
-        for _i in range(1, len(_js)):
-          _gap = (_jdate(_js[_i]) - _jdate(_js[_i - 1])).days
-          _shared = set(re.split(r"[,\s]+", str(_js[_i].get("codes") or ""))) &                     set(re.split(r"[,\s]+", str(_js[_i - 1].get("codes") or ""))) - {""}
-          if 0 < _gap <= 60 and _shared:
-            _comebacks.append({"vehicle": _js[_i].get("vehicle_info", ""), "customer": _js[_i].get("customer_name", ""),
-                               "code(s)": ", ".join(sorted(_shared)), "days apart": _gap,
-                               "first": _jdate(_js[_i - 1]).strftime("%b %d"), "back": _jdate(_js[_i]).strftime("%b %d")})
+      _comebacks = find_comebacks(_all_jobs, _jdate)
       _m3.metric("Comebacks (60 days)", len(_comebacks))
       if _code_count:
         st.markdown("**Most common codes this month**")
