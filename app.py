@@ -25,7 +25,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-29"
+APP_VERSION = "2026-11-30"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -169,6 +169,11 @@ WHATS_NEW = [
     "with the job; the estimate table no longer duplicates rows; the backup now includes everything (no 1,000-row cut) plus "
     "factory reading maps and links; scope boxes start empty on a new car; knowledge saves and imports are one request and "
     "never duplicate notes; diesel monitors, catalyst, vacuum, idle, cranking and transmission test fixes",
+    "THIRD CODE REVIEW (small fixes): if the Bluetooth link hiccups between two scanner commands, the next command's reply is no "
+    "longer lost; one off-scale sample in a primary-ignition capture no longer drops that firing's burn time; a typed VIN with a "
+    "letter O, I or Q now shows the check-digit warning; if Google retires the Gemini model name the app switches to the older "
+    "one for everyone (and says so in the problem log); big scope files are kept in memory for less time; 🧹 New chat goes "
+    "back to the short view",
 ]
 
 st.markdown(
@@ -799,8 +804,13 @@ def _model_swaps() -> dict:
   return {}
 
 
+def _gemini_wanted() -> str:
+  return secret("GEMINI_MODEL") or GEMINI_DEFAULT_MODEL
+
+
 def gemini_model() -> str:
-  return ss.get("_gemini_model_ok") or secret("GEMINI_MODEL") or GEMINI_DEFAULT_MODEL
+  wanted = _gemini_wanted()
+  return _model_swaps().get(("gemini", wanted), wanted)   # (shared by every session and background job; no page session needed)
 
 
 def gemini_label() -> str:
@@ -835,10 +845,13 @@ def gemini(parts: list, *, json_mode: bool = False, timeout: int = 60, think: st
     if res.status_code == 400 and "thinkingConfig" in cfg and re.search(r"think", res.text or "", re.I):
       _model_swaps()[("gemini_no_think", model)] = True   # this model doesn't take a thinking level: ask without it
       continue
-    # Model not available on this key/region -> fall back once to the older model
-    if res.status_code in (400, 404) and model != GEMINI_FALLBACK_MODEL and "model" in res.text.lower() and not fell_back:
+    # Model not available on this key/region -> fall back once to the older model (and remember it for everyone)
+    if (_model_error(res) or (res.status_code == 404 and "model" in (res.text or "").lower())) \
+        and model != GEMINI_FALLBACK_MODEL and not fell_back:
+      _model_swaps()[("gemini", _gemini_wanted())] = GEMINI_FALLBACK_MODEL
+      log_problem("ai", "Gemini model", f"Model '{model}' isn't available on your key — using '{GEMINI_FALLBACK_MODEL}' instead. "
+                                        f"Put GEMINI_MODEL = \"{GEMINI_FALLBACK_MODEL}\" in Secrets to make it permanent.")
       model = GEMINI_FALLBACK_MODEL
-      ss["_gemini_model_ok"] = model
       fell_back = True
       continue
     if res.status_code in (429, 500, 502, 503, 504) and not retried:   # busy: wait a moment and try once more
@@ -1778,7 +1791,7 @@ _VIN_WEIGHTS = [8, 7, 6, 5, 4, 3, 2, 10, 0, 9, 8, 7, 6, 5, 4, 3, 2]
 
 
 def vin_check_digit_ok(vin: str) -> bool:
-  if len(vin or "") != 17:
+  if not VIN_RE.fullmatch(str(vin or "")):   # 17 characters, and none of the letters a VIN never uses (I, O, Q)
     return False
   total =sum((int(c) if c.isdigit() else _VIN_VALUES.get(c, 0)) * w for c, w in zip(vin, _VIN_WEIGHTS))
   r = total % 11
@@ -2651,8 +2664,8 @@ def _pri_ign(t, y, dt):
     s = next((i for i in range(1, len(seg)) if seg[i] < 0.5 * y[p]), None)
     burn = None
     if s is not None:
-      level = float(np.median(seg[s: s + max(3, int(0.0003 / dt))]))
-      e = next((i for i in range(s + 2, len(seg)) if seg[i] < 0.6 * level), None)
+      level = _nanmed(seg[s: s + max(3, int(0.0003 / dt))])   # (ignores an off-scale sample, like the secondary does)
+      e = next((i for i in range(s + 2, len(seg)) if seg[i] < 0.6 * level), None) if np.isfinite(level) else None
       burn = (e - s) * dt * 1000 if e else None
     ev.append({"time_ms": _r(t[p] * 1000, 2), "peak_v": _r(y[p], 0), "dwell_ms": _r(d * dt * 1000, 2) if d > 2 else None,
                "burn_ms": _r(burn, 2)})
@@ -3999,6 +4012,7 @@ if "ble_vin" in st.query_params or "ble_dtc" in st.query_params:
 # ========================================================
 if (_jr := ss.pop("_job_request", None)) is not None:
   ss.chat_conv, ss._chat_pending = None, None   # a different car = a new conversation
+  ss.pop("qh_all", None)
   ss.pop("_picked_up", None)
   ss.pop("_ask_new", None)
   if "chat" in st.query_params:
@@ -5307,7 +5321,8 @@ function rawSend(cmd, timeoutMs) {
   return new Promise((resolve) => {
     buf = "";
     let t;
-    const done = (out) => { clearTimeout(t); pending = null; traceAdd(cmd, out); resolve(out); };
+    let finished = false;   // a late write error can call done() again: that must not wipe the NEXT command's reply handler
+    const done = (out) => { if (finished) return; finished = true; clearTimeout(t); if (pending === done) pending = null; traceAdd(cmd, out); resolve(out); };
     t = setTimeout(() => { staleReply = true; done(buf); }, timeoutMs);
     pending = done;
     const data = new TextEncoder().encode(cmd + "\r");
@@ -10956,6 +10971,7 @@ def open_car_label() -> str:
 
 def new_chat():
   ss.chat_history, ss.chat_conv, ss._chat_pending = [], None, None
+  ss.pop("qh_all", None)   # (the "show earlier messages" choice belongs to the old conversation)
   if "chat" in st.query_params:
     del st.query_params["chat"]
 
@@ -11358,7 +11374,7 @@ FORMAT STRICTLY AS:
 (Exactly what to hook up where, what to look for, and what result proves it.)"""
 
 
-@st.cache_data(show_spinner=False, max_entries=6)
+@st.cache_data(show_spinner=False, max_entries=2, ttl=1800)   # (a big capture's number arrays are large: keep two, for half an hour)
 def load_capture(raw: bytes) -> dict:
   return parse_scope_csv(raw)
 
