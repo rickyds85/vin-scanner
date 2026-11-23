@@ -25,7 +25,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-11-30"
+APP_VERSION = "2026-12-01"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -174,6 +174,7 @@ WHATS_NEW = [
     "letter O, I or Q now shows the check-digit warning; if Google retires the Gemini model name the app switches to the older "
     "one for everyone (and says so in the problem log); big scope files are kept in memory for less time; 🧹 New chat goes "
     "back to the short view",
+    "TIDIER: 🚗 Vehicle Scan — the VIN photo reader and the enter-the-vehicle-by-hand box are now closed drop-downs (the scanner fills the VIN in when the car connects), so the scanner sits much higher on the screen; the vehicle info shows right under them",
 ]
 
 st.markdown(
@@ -4624,7 +4625,7 @@ with _veh_box, guard("Vehicle Scan — VIN search"):
   context_bar()
   job_bar()
   st.markdown("#### 🔎 VIN search")
-  with st.expander("📸 Read the VIN from a photo", expanded=not ss.vehicle_details):
+  with st.expander("📸 Read the VIN from a photo", expanded=False):   # closed: connecting the scanner fills the VIN in by itself
     st.caption("Tip: use **Take or upload photo** — on a phone it opens the full-resolution camera, which reads far better than "
              "the small in-app camera. Get close, fill the frame with the VIN, avoid glare. Works with the door sticker, "
              "windshield plate, registration/insurance card or a scan-tool screen. (Connecting the scanner reads the VIN "
@@ -4705,7 +4706,7 @@ with _veh_box, guard("Vehicle Scan — VIN search"):
       ss._failed_vin = ""
       st.rerun()
 
-  with st.expander("🚗 No VIN? Enter the vehicle by hand", expanded=not ss.vehicle_details):
+  with st.expander("🚗 No VIN? Enter the vehicle by hand", expanded=False):
     this_year = datetime.now().year
     _mk = f"_{ss.get('job_n', 0)}"   # fresh boxes for each new car; model box resets when year/make change
     m1, m2, m3 = st.columns(3)
