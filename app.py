@@ -25,7 +25,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-12-02"
+APP_VERSION = "2026-12-03"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -179,6 +179,10 @@ WHATS_NEW = [
     "sentences, you can cut in any time, and it knows the open car, the codes, the scanner data and your notes. What's said is saved "
     "in the chat. It shows a running cost estimate (roughly 2-5 cents a minute), stops by itself after a quiet spell or a time limit, "
     "and needs OPENAI_API_KEY (optional Secrets: OPENAI_REALTIME_MODEL, VOICE_NAME, VOICE_MAX_MINUTES, VOICE_IDLE_SECONDS)",
+    "BETTER CHAT SPEED: the chat's new 🧠 Auto setting (⋯ menu, now the default) gives a simple question like a greeting or a "
+    "how-to a quick one-AI answer in seconds and keeps the full team (web search + every AI checking each other) for real diagnosis "
+    "puzzles; ⚡ Quick and 🤝 Full team are there if you want to choose. 🎙️ Talk mode is now a compact strip pinned right above the "
+    "message box, so the Start button is always in view",
 ]
 
 st.markdown(
@@ -266,6 +270,8 @@ div[data-baseweb="tab-highlight"], div[data-baseweb="tab-border"], [data-testid=
   flex-direction: row !important; flex-wrap: nowrap !important; align-items: flex-end !important; gap: 8px !important;
   padding: 7px !important; background: rgba(13,17,22,.96); border: 1px solid rgba(34,211,238,.35); border-radius: 24px;
   box-shadow: 0 -8px 30px rgba(0,0,0,.5); backdrop-filter: blur(10px); }}
+.st-key-voicebar {{ position: fixed !important; left: 0; right: 0; margin: 0 auto !important; bottom: calc(142px + env(safe-area-inset-bottom));
+  width: min(calc(100% - 20px), 740px) !important; max-width: none !important; z-index: 997; }}
 .st-key-chatbar > div {{ width: auto !important; flex: 0 0 auto !important; min-width: 0 !important; margin: 0 !important; }}
 .st-key-chatbar > div:has([data-testid="stChatInput"]) {{ flex: 1 1 auto !important; }}
 .st-key-chatbar [data-testid="stChatInput"] {{ border: none !important; background: transparent !important; }}
@@ -10070,17 +10076,19 @@ VOICE_HTML = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="vi
   @keyframes p { 0%,100% { box-shadow: 0 0 0 0 rgba(16,185,129,.0); } 50% { box-shadow: 0 0 9px 3px rgba(16,185,129,.55); } }
   #status { font-weight: 700; }
   .note { color: #8B9BB4; font-size: .78rem; }
-  #log { max-height: 230px; overflow-y: auto; margin-top: 8px; font-size: .93rem; line-height: 1.4; }
+  #log { max-height: 92px; overflow-y: auto; margin-top: 6px; font-size: .9rem; line-height: 1.35; }
+  .warn { color: #FBBF24; font-size: .8rem; margin-top: 4px; }
   #log div { margin: 4px 0; }
   .u { color: #93C5FD; } .a { color: #E2E8F0; } .u b, .a b { font-weight: 700; margin-right: 4px; }
 </style></head><body>
 <div class="card">
   <div class="row"><button id="go" class="go">🎙️ Start talking</button><button id="mute" hidden>🔇 Mute</button>
-    <span class="dot" id="dot"></span><span id="status">Ready</span></div>
-  <div class="note" id="meter" style="margin-top:4px"></div>
-  <div id="log"></div>
-  <div class="note" id="hint" style="margin-top:6px">Tap Start, then just talk — it answers out loud and you can cut in any time. A Bluetooth earpiece (or the phone held close) works best in a noisy shop. Tap Stop when you're done.</div>
-  <div class="row" style="margin-top:6px"><button id="dbg" class="small">🐞 Send voice debug info</button></div>
+    <span class="dot" id="dot"></span><span id="status">Ready</span>
+    <button id="dbg" class="small" title="Send voice debug info (if it won't work)" style="margin-left:auto">🐞</button></div>
+  <div class="note" id="meter" hidden style="margin-top:4px"></div>
+  <div id="log" hidden></div>
+  <div class="warn" id="warn" hidden></div>
+  <div class="note" id="hint" style="margin-top:4px">Tap Start, then just talk — it talks back, and you can cut in. An earpiece helps in a noisy shop.</div>
   <audio id="remote" autoplay playsinline></audio>
 </div>
 <script>
@@ -10120,8 +10128,11 @@ function setState(k, text) {
   $("go").textContent = on ? "⏹ Stop" : "🎙️ Start talking";
   $("go").className = on ? "stop" : "go";
   $("mute").hidden = !(S && !S.ended && S.open);
+  $("hint").hidden = on;
+  $("meter").hidden = !S;
   fit();
 }
+function showWarn(t) { const w = $("warn"); w.textContent = t || ""; w.hidden = !t; fit(); }
 const fmtTime = (s) => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
 const fmtCost = (c) => (c < 0.005 ? "under 1¢" : "$" + c.toFixed(2));
 
@@ -10141,6 +10152,7 @@ function releasePre() { try { if (PRE) PRE.getTracks().forEach((t) => t.stop());
 $("go").onclick = async () => {
   if (phase === "preparing") { reqId = null; releasePre(); setState("idle"); return; }
   if (phase === "active") { end("you stopped it"); return; }
+  showWarn("");
   setState("preparing", "Asking for the microphone…");
   try { PRE = await getMic(); }
   catch (e) { fail(micMsg(e), "microphone", String(e && e.name) + ": " + String(e && e.message)); return; }
@@ -10169,6 +10181,7 @@ async function connect(t) {
   PRE = null;
   setState("connecting");
   render();
+  updateMeter();
   try {
     const pc = new RTCPeerConnection();
     S.pc = pc;
@@ -10176,7 +10189,7 @@ async function connect(t) {
       const a = $("remote");
       a.srcObject = e.streams[0];
       const pr = a.play();
-      if (pr && pr.catch) pr.catch(() => { $("hint").textContent = "Tap anywhere on this card once to turn the sound on."; document.addEventListener("click", () => a.play().catch(() => {}), { once: true }); });
+      if (pr && pr.catch) pr.catch(() => { showWarn("Tap anywhere on this card once to turn the sound on."); document.addEventListener("click", () => a.play().catch(() => {}), { once: true }); });
     };
     S.stream.getTracks().forEach((tr) => pc.addTrack(tr, S.stream));
     const dc = pc.createDataChannel("oai-events");
@@ -10278,8 +10291,7 @@ function onMsg(m) {
   } else if (ty === "error") {
     const er = e.error || {};
     S.lastError = er.message || ty;
-    $("hint").textContent = "⚠️ " + (er.message || "OpenAI reported a problem.");
-    fit();
+    showWarn("⚠️ " + (er.message || "OpenAI reported a problem."));
   }
 }
 function addUsage(u) {
@@ -10301,6 +10313,7 @@ function addUsage(u) {
 function render() {
   const box = $("log");
   const rows = S ? S.order.map((id) => S.byId[id]).filter((T) => T.text || T.live).slice(-8) : [];
+  box.hidden = rows.length === 0;
   box.innerHTML = rows.map((T) => (T.role === "user" ? '<div class="u"><b>You:</b>' : '<div class="a"><b>AI:</b>') + esc(T.text || T.live + "…") + "</div>").join("");
   box.scrollTop = box.scrollHeight;
   fit();
@@ -10342,7 +10355,7 @@ function end(reason, note2, err) {
   teardown();
   snap("ended", { reason, error: err || "", events: err ? S.events.slice(-40) : [] });   // everything said so far goes to the app in this one message
   setState("idle", note2 || "");
-  render();
+  $("log").innerHTML = ""; $("log").hidden = true; fit();   // the talk now lives in the chat, so the strip tidies itself
 }
 function failSession(msg, details) {
   if (S) { S.ended = true; clearInterval(S.tick); clearTimeout(S.connTimer); clearTimeout(S.discTimer); clearTimeout(S.snapTimer); }
@@ -11073,10 +11086,48 @@ class _JobStatus:
       _ai_jobs()[self.job_id]["label"] = label
 
 
-def run_chat_ai(job_id: str, prompt: str, question: str, photos_b64: list, vrefs: list, team: bool,
+CHAT_ROUTE_PROMPT = """A professional mechanic typed (or said) this to a shop assistant app. Decide how much help it needs.
+SIMPLE = one quick AI answer is enough: greetings and small talk, how-to and what-is questions, definitions, general knowledge, a quick
+spec or a follow-up / clarification — anything a good tech could answer from the top of his head.
+COMPLEX = needs the whole team (web research plus several AIs cross-checking each other): working out what is actually wrong with a
+SPECIFIC car from codes, scan data, test results, photos or symptoms; choosing which part to replace; conflicting readings; anything
+where a wrong answer costs real money or safety.
+Context: {ctx}
+Message: {q}
+Reply with exactly one word: SIMPLE or COMPLEX."""
+
+
+def auto_team(question: str, n_files: int = 0, vehicle: str = "", codes: str = "") -> tuple[bool, str]:
+  """🧠 Auto: does this need the full team (the web is searched and all the AIs check each other — a minute or two), or is one
+  quick AI answer enough? Returns (needs the team, a few words why). Never raises."""
+  q = " ".join(str(question or "").split())
+  words = q.split()
+  has_code = bool(re.search(r"\b[PCBU][0-3][0-9A-F]{3}\b", q.upper()))
+  if len(words) <= 5 and not has_code and not n_files:
+    return False, "a short message"
+  try:
+    raw, _who = quick_ai(CHAT_ROUTE_PROMPT.format(
+        ctx=f"a car is open: {vehicle or 'no'}; trouble codes on it: {codes or 'none'}; attachments with this message: {n_files}", q=q[:1500]),
+        max_tokens=600, effort="low")
+    m = None if str(raw).startswith("⚠️") else re.search(r"\b(SIMPLE|COMPLEX)\b", str(raw).upper())
+    if m:
+      return m.group(1) == "COMPLEX", f"the AI judged it {m.group(1).lower()}"
+  except Exception as e:   # the router is a convenience; never let it stop an answer
+    log_problem("ai", "Auto answer router", f"{type(e).__name__}: {e}")
+  hard = has_code or n_files or len(words) > 30 or re.search(
+      r"diagnos|won'?t start|no[- ]start|misfir|stall|overheat|intermittent|test plan|root cause|why (is|does|did)", q.lower())
+  return bool(hard), "guessed from the wording"
+
+
+def run_chat_ai(job_id: str, prompt: str, question: str, photos_b64: list, vrefs: list, team: bool | None,
                 vehicle: str, codes: str, symptoms: str) -> tuple[str, str, str]:
-  """The AI part of one chat answer (runs in the background). Returns (answer, who answered, web research)."""
+  """The AI part of one chat answer (runs in the background). team: True = the full team, False = one quick AI,
+  None = 🧠 Auto (decided here). Returns (answer, who answered, web research)."""
   status = _JobStatus(job_id)
+  auto = team is None
+  if auto:
+    status.update(label="🧠 Deciding how much help this needs...")
+    team, _why = auto_team(question, len(photos_b64 or []) + len(vrefs or []), vehicle, codes)
   docs = [v for v in vrefs or [] if v.get("mime") in DOC_TYPES.values()]
   vids = [v for v in vrefs or [] if v not in docs]
   vparts = video_parts(vrefs)
@@ -11110,19 +11161,21 @@ def run_chat_ai(job_id: str, prompt: str, question: str, photos_b64: list, vrefs
     reply, research, draft, ds_draft, more = team_answer(prompt, vehicle or "General vehicle", codes, symptoms,
                                                    bool(secret("PERPLEXITY_API_KEY")), status, question=question,
                                                    image_b64=photos_b64, extra_parts=vparts)
-    who = ("🎥 " if vids else "") + ("📄 " if docs else "") + team_names(draft, ds_draft, research, more) + " · all checked each other"
+    who = ("🎥 " if vids else "") + ("📄 " if docs else "") + team_names(draft, ds_draft, research, more) + " · all checked each other" \
+        + (" (Auto: this one needed the team)" if auto else "")
   elif vparts:   # quick answer about a video or PDF: Gemini is the one that can watch / read it
     status.update(label="📄 ✨ Gemini is reading the PDF..." if docs and not vids else "🎥 ✨ Gemini is watching and listening to the video...")
     try:
       reply = gemini([{"text": prompt}] + [{"inline_data": {"mime_type": "image/jpeg", "data": b}} for b in photos_b64] + vparts,
                      timeout=240)
-      who = f"✨ {gemini_label()} · " + " and ".join((["watched the video"] if vids else []) + (["read the PDF"] if docs else [])) + " · quick answer"
+      who = f"✨ {gemini_label()} · " + " and ".join((["watched the video"] if vids else []) + (["read the PDF"] if docs else [])) + " · quick answer" \
+          + (" (Auto)" if auto else "")
     except AIError as e:
       reply, who = f"⚠️ {e}", ""
   else:
     status.update(label="⚡ Quick answer — thinking...")
     reply, who = quick_ai(prompt, image_b64=photos_b64, max_tokens=4000)
-    who = (who + " · quick answer") if who else ""
+    who = (who + " · quick answer" + (" (Auto: simple question)" if auto else "")) if who else ""
   return reply, who, research
 
 
@@ -11787,9 +11840,10 @@ def chat_home():
   msgs = ss.chat_history or []
   pending = ss.get("_chat_pending")
   # fixed spots, in this order, so the shared screen (👀) never reloads when messages come in
-  top, eye_box, voice_box, past_box, convo, watch_box, tail = (st.container() for _ in range(7))
+  top, eye_box, past_box, convo, watch_box, tail = (st.container() for _ in range(6))
   bar = _keyed_box("chatbar")
-  team = bool(ss.get("qh_team", True))
+  voice_box = _keyed_box("voicebar")   # 🎙️ Talk mode: pinned just above the message box, so it's always in view
+  team = {"⚡ Quick": False, "🧠 Auto": None, "🤝 Full team": True}.get(ss.get("qh_mode") or "🧠 Auto")   # None = Auto: decided per question
 
   # ---------- the bar at the bottom: ＋ extras and the message box ----------
   with bar:
@@ -11799,12 +11853,13 @@ def chat_home():
                 help="Share your scan tool's screen (from a computer) or point the phone camera at it. The AI reads it every "
                      "half minute and uses it in every answer and AI Check — so it sees what you see.")
       st.toggle("🎙️ Talk mode — hands-free voice chat", key="voice_toggle",
-                help="Talk and it talks back out loud, like a phone call (ChatGPT's live voice). You can cut in any time. It knows the open "
-                     "car, the codes and the scanner data, and the conversation is saved in this chat. Roughly 2-5 cents a minute while "
-                     "you're talking — the panel shows a running estimate. Needs the microphone.")
-      st.checkbox("🤝 All AIs check each other (a minute or two)", value=True, key="qh_team",
-                  help="On: the web is searched, Gemini, ChatGPT and DeepSeek each write their own answer without seeing "
-                       "the others, and Claude checks them all against the data. Off: one AI answers in a few seconds.")
+                help="Talk and it talks back out loud, like a phone call (ChatGPT's live voice). A strip appears right above the "
+                     "message box — tap Start talking there. You can cut in any time. It knows the open car, the codes and the scanner "
+                     "data, and the conversation is saved in this chat. Roughly 2-5 cents a minute while you're talking — the strip "
+                     "shows a running estimate. Needs the microphone.")
+      st.radio("How hard should it work on a question?", ["⚡ Quick", "🧠 Auto", "🤝 Full team"], index=1, key="qh_mode", horizontal=True,
+               help="⚡ Quick: one AI answers in a few seconds. 🤝 Full team: the web is searched and all the AIs check each other "
+                    "(a minute or two). 🧠 Auto: a simple question gets a quick answer, a real diagnosis puzzle gets the full team.")
       st.toggle("🕘 Past chats", key="qh_past")
       n_kn = len(knowledge_entries())
       st.caption("The AI knows the open car, the codes, the scanner data, the test plan, your shop history and "
@@ -11951,7 +12006,8 @@ def chat_home():
     with watch_box:
       _chat_watch()
   with tail:
-    st.markdown('<div class="tdg-chatpad"></div>', unsafe_allow_html=True)   # room so the bar never covers the last answer
+    _pad = 64 + (140 if ss.get("voice_toggle") else 0)   # (more room while the Talk mode strip is showing)
+    st.markdown(f'<div class="tdg-chatpad" style="height:{_pad}px"></div>', unsafe_allow_html=True)   # room so the bars never cover the last answer
     if len(msgs) != ss.get("_chat_seen_n", 0):
       ss._chat_seen_n = len(msgs)
       if msgs:
