@@ -25,7 +25,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-12-01"
+APP_VERSION = "2026-12-02"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -175,6 +175,10 @@ WHATS_NEW = [
     "one for everyone (and says so in the problem log); big scope files are kept in memory for less time; 🧹 New chat goes "
     "back to the short view",
     "TIDIER: 🚗 Vehicle Scan — the VIN photo reader and the enter-the-vehicle-by-hand box are now closed drop-downs (the scanner fills the VIN in when the car connects), so the scanner sits much higher on the screen; the vehicle info shows right under them",
+    "NEW: 🎙️ Talk mode — in 💬 Chat tap ⋯ → Talk mode, tap Start and just talk: ChatGPT's live voice answers out loud in short "
+    "sentences, you can cut in any time, and it knows the open car, the codes, the scanner data and your notes. What's said is saved "
+    "in the chat. It shows a running cost estimate (roughly 2-5 cents a minute), stops by itself after a quiet spell or a time limit, "
+    "and needs OPENAI_API_KEY (optional Secrets: OPENAI_REALTIME_MODEL, VOICE_NAME, VOICE_MAX_MINUTES, VOICE_IDLE_SECONDS)",
 ]
 
 st.markdown(
@@ -10044,6 +10048,336 @@ def _paste_component_dir() -> str:
 _paste_box = components.declare_component("paste_box", path=_paste_component_dir())
 
 
+# ========================================================
+# --- 🎙️ TALK MODE: a hands-free voice conversation with ChatGPT's live voice (OpenAI Realtime API) ---
+# ========================================================
+# The phone talks straight to OpenAI over WebRTC (low delay, you can interrupt it). The secret key never leaves the server:
+# Python mints a short-lived one-time pass (voice_mint) and hands it to this panel. Everything provider-specific lives in two
+# places — voice_mint() on the server and connect() / onMsg() below — so another voice service can replace them later.
+VOICE_HTML = r'''<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { margin: 0; font-family: Inter, system-ui, -apple-system, sans-serif; color: #F1F5F9; background: transparent; }
+  .card { border: 1px solid rgba(34,211,238,.4); border-radius: 16px; padding: 12px; background: rgba(13,17,22,.92); }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button { background: #131B2E; color: #F1F5F9; border: 1px solid rgba(255,255,255,.18); border-radius: 10px; padding: 9px 13px; font-weight: 600; cursor: pointer; font-size: .9rem; }
+  button.go { background: linear-gradient(135deg, #14B8A6, #22D3EE); color: #04131a; border: none; font-size: 1.05rem; padding: 13px 20px; font-weight: 700; }
+  button.stop { background: #7F1D1D; border-color: #EF4444; color: #fff; }
+  button.small { font-size: .74rem; padding: 4px 9px; color: #8B9BB4; }
+  .dot { width: 13px; height: 13px; border-radius: 50%; background: #64748B; display: inline-block; flex: none; }
+  .dot.live { background: #10B981; animation: p 1.6s ease-in-out infinite; }
+  .dot.busy { background: #F59E0B; animation: p .8s ease-in-out infinite; }
+  .dot.err { background: #EF4444; }
+  @keyframes p { 0%,100% { box-shadow: 0 0 0 0 rgba(16,185,129,.0); } 50% { box-shadow: 0 0 9px 3px rgba(16,185,129,.55); } }
+  #status { font-weight: 700; }
+  .note { color: #8B9BB4; font-size: .78rem; }
+  #log { max-height: 230px; overflow-y: auto; margin-top: 8px; font-size: .93rem; line-height: 1.4; }
+  #log div { margin: 4px 0; }
+  .u { color: #93C5FD; } .a { color: #E2E8F0; } .u b, .a b { font-weight: 700; margin-right: 4px; }
+</style></head><body>
+<div class="card">
+  <div class="row"><button id="go" class="go">🎙️ Start talking</button><button id="mute" hidden>🔇 Mute</button>
+    <span class="dot" id="dot"></span><span id="status">Ready</span></div>
+  <div class="note" id="meter" style="margin-top:4px"></div>
+  <div id="log"></div>
+  <div class="note" id="hint" style="margin-top:6px">Tap Start, then just talk — it answers out loud and you can cut in any time. A Bluetooth earpiece (or the phone held close) works best in a noisy shop. Tap Stop when you're done.</div>
+  <div class="row" style="margin-top:6px"><button id="dbg" class="small">🐞 Send voice debug info</button></div>
+  <audio id="remote" autoplay playsinline></audio>
+</div>
+<script>
+function toStreamlit(type, data) { window.parent.postMessage(Object.assign({ isStreamlitMessage: true, type }, data || {}), "*"); }
+const sendValue = (value) => toStreamlit("streamlit:setComponentValue", { value, dataType: "json" });
+let lastH = 0;
+function fit() { const h = document.documentElement.scrollHeight; if (h !== lastH) { lastH = h; toStreamlit("streamlit:setFrameHeight", { height: h }); } }
+new ResizeObserver(fit).observe(document.body);
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+let ARGS = {}, reqId = null, handled = null, S = null, PRE = null, seq = 0, phase = "idle";
+const CFG = () => ARGS.cfg || {};
+window.addEventListener("message", (e) => {
+  if (!e.data || e.data.type !== "streamlit:render") return;
+  ARGS = e.data.args || {};
+  const t = ARGS.token;
+  // only a pass that answers THIS panel's own Start tap is used (a stale pass can never open the microphone by itself)
+  if (t && t.id && t.id === reqId && t.id !== handled) {
+    handled = t.id;
+    if (t.error) fail(t.error, "pass");
+    else connect(t);
+  }
+  fit();
+});
+toStreamlit("streamlit:componentReady", { apiVersion: 1 });
+
+const STATES = { idle: ["", "Ready"], preparing: ["", "Getting ready…"], connecting: ["busy", "Connecting…"], listening: ["live", "Listening — go ahead"],
+  hearing: ["live", "Hearing you…"], thinking: ["busy", "Thinking…"], speaking: ["busy", "Talking…"], error: ["err", ""] };
+function setState(k, text) {
+  const [cls, label] = STATES[k] || STATES.idle;
+  phase = k === "idle" || k === "error" ? "idle" : k === "preparing" ? "preparing" : "active";
+  $("dot").className = "dot " + cls;
+  const muted = S && !S.ended && S.muted && (k === "listening" || k === "hearing" || k === "thinking");
+  $("status").textContent = muted ? "Muted — it can't hear you" : text || label;
+  const on = phase !== "idle";
+  $("go").textContent = on ? "⏹ Stop" : "🎙️ Start talking";
+  $("go").className = on ? "stop" : "go";
+  $("mute").hidden = !(S && !S.ended && S.open);
+  fit();
+}
+const fmtTime = (s) => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
+const fmtCost = (c) => (c < 0.005 ? "under 1¢" : "$" + c.toFixed(2));
+
+async function getMic() {
+  const c = { audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
+  try { return await navigator.mediaDevices.getUserMedia(c); }
+  catch (e) { try { return await window.parent.navigator.mediaDevices.getUserMedia(c); } catch (e2) { throw e; } }
+}
+function micMsg(e) {
+  const n = (e && e.name) || "";
+  if (n === "NotAllowedError" || n === "SecurityError") return "The microphone is blocked. Tap the lock icon next to the address, allow the microphone for this site, then try again.";
+  if (n === "NotFoundError") return "No microphone was found on this device.";
+  return "Couldn't open the microphone: " + ((e && e.message) || n || "unknown problem");
+}
+function releasePre() { try { if (PRE) PRE.getTracks().forEach((t) => t.stop()); } catch (_) {} PRE = null; }
+
+$("go").onclick = async () => {
+  if (phase === "preparing") { reqId = null; releasePre(); setState("idle"); return; }
+  if (phase === "active") { end("you stopped it"); return; }
+  setState("preparing", "Asking for the microphone…");
+  try { PRE = await getMic(); }
+  catch (e) { fail(micMsg(e), "microphone", String(e && e.name) + ": " + String(e && e.message)); return; }
+  if (phase !== "preparing") { releasePre(); return; }   // cancelled while the permission box was open
+  setState("preparing", "Getting ready…");
+  const mine = (reqId = "nt-" + Date.now() + "-" + ++seq);
+  sendValue({ type: "need_token", id: mine });
+  setTimeout(() => { if (phase === "preparing" && reqId === mine) { releasePre(); fail("Talk mode didn't get ready in time. Tap Start to try again.", "pass"); } }, 30000);
+};
+$("mute").onclick = () => {
+  if (!S || S.ended) return;
+  S.muted = !S.muted;
+  try { S.stream.getAudioTracks().forEach((t) => (t.enabled = !S.muted)); } catch (_) {}
+  $("mute").textContent = S.muted ? "🎙️ Unmute" : "🔇 Mute";
+  $("status").textContent = S.muted ? "Muted — it can't hear you" : (STATES.listening[1]);
+  S.lastAct = Date.now();
+};
+$("dbg").onclick = () => sendValue({ type: "error", id: "dbg-" + Date.now() + "-" + ++seq, message: "Voice debug info (sent by hand)", where: "debug", details: debugText() });
+
+// ---------------- connect to OpenAI ----------------
+async function connect(t) {
+  const d = new Date(), p2 = (n) => String(n).padStart(2, "0");
+  S = { sid: "" + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + p2(d.getHours()) + p2(d.getMinutes()) + p2(d.getSeconds()), t0: Date.now(),
+        model: t.model, order: [], byId: {}, usage: { in_audio: 0, in_text: 0, cached: 0, out_audio: 0, out_text: 0, responses: 0 }, cost: 0,
+        muted: false, ended: false, open: false, speaking: false, lastAct: Date.now(), events: [], counts: {}, stream: PRE };
+  PRE = null;
+  setState("connecting");
+  render();
+  try {
+    const pc = new RTCPeerConnection();
+    S.pc = pc;
+    pc.ontrack = (e) => {
+      const a = $("remote");
+      a.srcObject = e.streams[0];
+      const pr = a.play();
+      if (pr && pr.catch) pr.catch(() => { $("hint").textContent = "Tap anywhere on this card once to turn the sound on."; document.addEventListener("click", () => a.play().catch(() => {}), { once: true }); });
+    };
+    S.stream.getTracks().forEach((tr) => pc.addTrack(tr, S.stream));
+    const dc = pc.createDataChannel("oai-events");
+    S.dc = dc;
+    dc.onopen = onOpen;
+    dc.onmessage = onMsg;
+    dc.onclose = () => { if (S && !S.ended) end("connection closed", "The voice connection closed. Tap Start to talk again."); };
+    pc.onconnectionstatechange = () => {
+      if (!S || S.ended) return;
+      const st = pc.connectionState;
+      note("pc:" + st, {});
+      clearTimeout(S.discTimer);
+      if (st === "failed" || st === "closed") end("connection lost", "The connection dropped. Tap Start to talk again.", "WebRTC state: " + st);
+      else if (st === "disconnected") S.discTimer = setTimeout(() => { if (S && !S.ended && pc.connectionState !== "connected") end("connection lost", "The connection dropped. Tap Start to talk again.", "WebRTC state: disconnected"); }, 8000);
+    };
+    S.connTimer = setTimeout(() => { if (S && !S.open && !S.ended) failSession("Couldn't connect to the voice service in time. Check the signal and try again.", "connect timed out"); }, 20000);
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    const url = "https://api.openai.com/v1/realtime/calls";
+    const post = (u) => fetch(u, { method: "POST", body: offer.sdp, headers: { Authorization: "Bearer " + t.secret, "Content-Type": "application/sdp" } });
+    let r = await post(url + "?model=" + encodeURIComponent(t.model));
+    if (!r.ok && r.status >= 400 && r.status < 500) {   // some setups want the model only in the pass: ask once more without it
+      const first = (await r.text()).slice(0, 300);
+      r = await post(url);
+      if (!r.ok) throw new Error("OpenAI said " + r.status + ": " + ((await r.text()) || first).slice(0, 300));
+    } else if (!r.ok) throw new Error("OpenAI said " + r.status + ": " + (await r.text()).slice(0, 300));
+    await pc.setRemoteDescription({ type: "answer", sdp: await r.text() });
+    S.tick = setInterval(tick, 1000);
+  } catch (e) { failSession("Couldn't start the voice connection: " + ((e && e.message) || e), String(e && e.stack || "")); }
+}
+function onOpen() {
+  if (!S || S.ended) return;
+  S.open = true;
+  clearTimeout(S.connTimer);
+  S.lastAct = Date.now();
+  setState("listening");
+  send({ type: "response.create", response: { instructions: "Say only the single word: Ready." } });   // a spoken confirmation that it's live
+}
+function send(o) { try { if (S && S.dc && S.dc.readyState === "open") S.dc.send(JSON.stringify(o)); } catch (_) {} }
+
+// ---------------- what OpenAI tells us ----------------
+function note(ty, e) {
+  if (!S) return;
+  S.counts[ty] = (S.counts[ty] || 0) + 1;
+  const extra = e && e.error ? " " + JSON.stringify(e.error).slice(0, 220) : "";
+  if (ty.indexOf("delta") < 0) { S.events.push(fmtTime((Date.now() - S.t0) / 1000) + " " + ty + extra); if (S.events.length > 90) S.events.shift(); }
+}
+function turn(id, role) {
+  id = id || "cur-" + role;
+  let T = S.byId[id];
+  if (!T) { T = S.byId[id] = { id, role, text: "", live: "" }; S.order.push(id); }
+  return T;
+}
+function itemEvent(it, ty) {
+  if (!it || !it.id || (it.role !== "user" && it.role !== "assistant")) return;
+  const T = turn(it.id, it.role);
+  if (/done$/.test(ty)) {
+    const c = (it.content || []).map((x) => (x && (x.transcript || x.text)) || "").join(" ").trim();
+    if (c) T.text = c;   // (what you said stays blank until its transcript is ready)
+  }
+  render();
+}
+function onMsg(m) {
+  if (!S || S.ended) return;
+  let e;
+  try { e = JSON.parse(m.data); } catch (_) { return; }
+  const ty = String(e.type || "");
+  note(ty, e);
+  if (ty === "input_audio_buffer.speech_started") { S.lastAct = Date.now(); S.speaking = false; if (!S.muted) setState("hearing"); }
+  else if (ty === "input_audio_buffer.speech_stopped") { if (!S.muted) setState("thinking"); }
+  else if (ty === "response.created") { S.lastAct = Date.now(); if (!S.speaking) setState("thinking"); }
+  else if (ty === "output_audio_buffer.started") { S.speaking = true; S.lastAct = Date.now(); setState("speaking"); }
+  else if (ty === "output_audio_buffer.stopped" || ty === "output_audio_buffer.cleared") { S.speaking = false; setState("listening"); }
+  else if (/^response\.(output_)?audio_transcript\.delta$/.test(ty)) {
+    const T = turn(e.item_id, "assistant");
+    T.live = (T.live || "") + (e.delta || "");
+    if (!S.speaking) { S.speaking = true; setState("speaking"); }
+    S.lastAct = Date.now();
+    render();
+  } else if (/^response\.(output_)?audio_transcript\.done$/.test(ty)) {
+    const T = turn(e.item_id, "assistant");
+    T.text = String(e.transcript || T.live || "").trim();
+    T.live = "";
+    render();
+  } else if (ty === "conversation.item.input_audio_transcription.completed") {
+    const T = turn(e.item_id, "user"), x = String(e.transcript || "").trim();
+    if (x) T.text = x;
+    render();
+    queueSnap();
+  } else if (/^conversation\.item\.(added|created|done)$/.test(ty)) itemEvent(e.item, ty);
+  else if (ty === "response.done") {
+    S.speaking = false;
+    S.lastAct = Date.now();
+    addUsage(e.response && e.response.usage);
+    if (e.response && e.response.status === "failed") S.lastError = JSON.stringify(e.response.status_details || {}).slice(0, 300);
+    setState("listening");
+    render();
+    queueSnap();
+  } else if (ty === "error") {
+    const er = e.error || {};
+    S.lastError = er.message || ty;
+    $("hint").textContent = "⚠️ " + (er.message || "OpenAI reported a problem.");
+    fit();
+  }
+}
+function addUsage(u) {
+  if (!u) return;
+  const R = CFG().rates || {}, idt = u.input_token_details || {}, odt = u.output_token_details || {}, cdt = idt.cached_tokens_details || {};
+  let inA = +idt.audio_tokens || 0, inT = +idt.text_tokens || 0, outA = +odt.audio_tokens || 0, outT = +odt.text_tokens || 0;
+  if (!inA && !inT && u.input_tokens) inA = +u.input_tokens;        // no breakdown given: count it all as audio (the dearer kind), so the estimate is never low
+  if (!outA && !outT && u.output_tokens) outA = +u.output_tokens;
+  let cA = +cdt.audio_tokens || 0, cT = +cdt.text_tokens || 0;
+  if (!cA && !cT && idt.cached_tokens) { cT = Math.min(inT, +idt.cached_tokens); cA = Math.max(0, +idt.cached_tokens - cT); }   // cached split not given: the typed instructions come first
+  const c = ((inA - cA) * R.a_in + cA * R.a_cache + (inT - cT) * R.t_in + cT * R.t_cache + outA * R.a_out + outT * R.t_out) / 1e6;
+  if (isFinite(c)) S.cost += c;
+  const U = S.usage;
+  U.in_audio += inA; U.in_text += inT; U.cached += cA + cT; U.out_audio += outA; U.out_text += outT; U.responses++;
+  updateMeter();
+}
+
+// ---------------- screen + saving ----------------
+function render() {
+  const box = $("log");
+  const rows = S ? S.order.map((id) => S.byId[id]).filter((T) => T.text || T.live).slice(-8) : [];
+  box.innerHTML = rows.map((T) => (T.role === "user" ? '<div class="u"><b>You:</b>' : '<div class="a"><b>AI:</b>') + esc(T.text || T.live + "…") + "</div>").join("");
+  box.scrollTop = box.scrollHeight;
+  fit();
+}
+function turnsOut() { return S ? S.order.map((id) => S.byId[id]).filter((T) => T.text || T.live).map((T) => ({ role: T.role, text: T.text || T.live })) : []; }
+function snap(type, extra) {
+  const secs = Math.round((Date.now() - S.t0) / 1000);
+  sendValue(Object.assign({ type, id: type[0] + "-" + Date.now() + "-" + ++seq, sid: S.sid, secs, cost: +S.cost.toFixed(6), model: S.model, usage: S.usage, turns: turnsOut() }, extra || {}));
+}
+function queueSnap() {
+  if (!S || S.snapTimer) return;
+  S.snapTimer = setTimeout(() => { S.snapTimer = null; if (S && !S.ended) snap("turns"); }, 2500);   // the app saves the conversation as it goes
+}
+function updateMeter() {
+  if (!S) return;
+  $("meter").textContent = "⏱ " + fmtTime((Date.now() - S.t0) / 1000) + " · about " + fmtCost(S.cost) + " so far (estimate)";
+}
+function tick() {
+  if (!S || S.ended) return;
+  const now = Date.now(), secs = (now - S.t0) / 1000;
+  updateMeter();
+  const maxS = (+CFG().max_min || 20) * 60, idleS = +CFG().idle_s || 120;
+  let hidden = false;
+  try { hidden = window.parent.document.visibilityState === "hidden"; } catch (_) { hidden = document.hidden; }
+  S.hiddenSince = hidden ? S.hiddenSince || now : 0;
+  if (secs > maxS) end("time limit", "Stopped at the " + Math.round(maxS / 60) + "-minute limit. Tap Start to keep going.");
+  else if (S.hiddenSince && now - S.hiddenSince > 45000) end("screen off", "Stopped because the screen went off. Tap Start to keep going.");
+  else if (S.open && !S.speaking && !S.muted && now - S.lastAct > idleS * 1000) end("quiet", "Stopped after " + idleS + " seconds of quiet, to save money. Tap Start to keep going.");
+}
+function teardown() {
+  try { if (S) { S.stream && S.stream.getTracks().forEach((t) => t.stop()); S.dc && S.dc.close(); S.pc && S.pc.close(); } } catch (_) {}
+  releasePre();
+  try { $("remote").srcObject = null; } catch (_) {}
+}
+function end(reason, note2, err) {
+  if (!S || S.ended) { if (phase !== "idle") setState("idle"); return; }
+  S.ended = true;
+  clearInterval(S.tick); clearTimeout(S.snapTimer); clearTimeout(S.connTimer); clearTimeout(S.discTimer);
+  teardown();
+  snap("ended", { reason, error: err || "", events: err ? S.events.slice(-40) : [] });   // everything said so far goes to the app in this one message
+  setState("idle", note2 || "");
+  render();
+}
+function failSession(msg, details) {
+  if (S) { S.ended = true; clearInterval(S.tick); clearTimeout(S.connTimer); clearTimeout(S.discTimer); clearTimeout(S.snapTimer); }
+  teardown();
+  fail(msg, "connect", details);
+}
+function fail(msg, where, details) {
+  releasePre();
+  setState("error", msg);
+  sendValue({ type: "error", id: "er-" + Date.now() + "-" + ++seq, message: msg, where, details: (details || "") + "\n" + debugText() });
+}
+function debugText() {
+  const lines = ["state: " + phase + (S ? " · open=" + S.open + " · ended=" + S.ended + " · model=" + S.model + " · secs=" + Math.round((Date.now() - S.t0) / 1000) : ""),
+    "page: " + navigator.userAgent, "settings: " + JSON.stringify({ max_min: CFG().max_min, idle_s: CFG().idle_s })];
+  if (S) { lines.push("event counts: " + JSON.stringify(S.counts), "last error: " + (S.lastError || "none"), "--- last events ---"); lines.push(...S.events.slice(-60)); }
+  return lines.join("\n");
+}
+window.addEventListener("pagehide", () => end("page closed"));
+fit();
+</script></body></html>
+'''
+
+
+def _voice_component_dir() -> str:
+  d = Path(tempfile.gettempdir()) / "voice_talk"
+  d.mkdir(exist_ok=True)
+  f = d / "index.html"
+  if not f.exists() or f.read_text(encoding="utf-8") != VOICE_HTML:
+    f.write_text(VOICE_HTML, encoding="utf-8")
+  return str(d)
+
+
+_voice = components.declare_component("voice_talk", path=_voice_component_dir())
+
+
 EYE_READ_PROMPT = """This is a live view of what an automotive technician is looking at right now — usually a scan tool screen
 (Autel, Snap-on, factory tool) showing live data, codes, freeze frame, Mode $06 or a scope; or a camera view of the
 engine bay or a meter.
@@ -11157,6 +11491,295 @@ def _chat_scroll_down(n: int):
   </script>""", height=0)
 
 
+# ========================================================
+# --- 🎙️ TALK MODE (server side): the one-time pass, what the voice knows about the car, and saving the conversation ---
+# ========================================================
+VOICE_MINT_URL = "https://api.openai.com/v1/realtime/client_secrets"
+VOICE_DEFAULT_MODEL = "gpt-realtime-2.1-mini"   # the cheaper live voice model; change with OPENAI_REALTIME_MODEL in Secrets
+VOICE_DEFAULT_VOICE = "marin"                   # change with VOICE_NAME in Secrets (cedar, alloy, ash, coral, echo, sage, shimmer...)
+# Prices per 1 MILLION tokens, as read from OpenAI's pricing page on 2026-11-26 (change them here if they move).
+# The running cost shown in the panel is worked out from these and the usage OpenAI reports — an estimate, not a bill.
+VOICE_RATES = {"mini": {"a_in": 10.0, "a_out": 20.0, "a_cache": 0.30, "t_in": 0.60, "t_out": 2.40, "t_cache": 0.06},
+               "full": {"a_in": 32.0, "a_out": 64.0, "a_cache": 0.40, "t_in": 4.00, "t_out": 24.00, "t_cache": 0.40}}
+
+VOICE_RULES = """You are the shop's diagnostic assistant, talking OUT LOUD (voice only) with a professional automotive technician who is
+working on a car with his hands busy. Be a sharp, friendly colleague.
+HOW TO TALK:
+- Short spoken answers: usually one to three sentences. No lists, no headings, no markdown, no emojis. Don't read long procedures
+  out; give the next step or the key number, then stop and let the technician answer.
+- Say trouble codes one character at a time (P zero one seven one). Say numbers with their units plainly (about fourteen point five volts).
+- Don't repeat the question back and don't narrate what you're about to do.
+- If the technician says that's all, stop, or thanks, answer with a very short goodbye.
+HONESTY:
+- Never invent a spec, torque value, resistance, pin number, wire color, connector ID or part number. If you are not sure, say so
+  plainly and say to check service information.
+- Base what you say about THIS car on the facts below; if a fact you need isn't there, ask for it in a few words.
+- Don't condemn a part from a code alone: say what test would prove it.
+- If a question needs web research, a wiring diagram, a TSB search or a deeper check by the whole AI team, say so in one sentence and
+  tell the technician to ask it in the Chat box (the typed chat does that). You can still give your best short answer first.
+"""
+
+
+def voice_model() -> str:
+  wanted = secret("OPENAI_REALTIME_MODEL") or VOICE_DEFAULT_MODEL
+  return _model_swaps().get(("realtime", wanted), wanted)
+
+
+def _voice_num(name: str, default: float, lo: float, hi: float) -> float:
+  try:
+    v = float(secret(name) or default)
+  except ValueError:
+    v = default
+  return max(lo, min(hi, v))
+
+
+def voice_cfg() -> dict:
+  """What the panel needs: the prices (for the running cost), the time limit, and how long a quiet spell ends the chat."""
+  return {"rates": VOICE_RATES["mini" if "mini" in voice_model().lower() else "full"],
+          "max_min": _voice_num("VOICE_MAX_MINUTES", 20, 2, 55), "idle_s": _voice_num("VOICE_IDLE_SECONDS", 120, 20, 900)}
+
+
+def _realtime_replacement(key: str, wanted: str) -> str | None:
+  """The realtime model's name was retired: ask OpenAI which realtime models this key can use and take the closest one."""
+  try:
+    r = http().get(OPENAI_MODELS_URL, headers={"Authorization": f"Bearer {key}"}, timeout=15)
+    ids = [m.get("id", "") for m in (r.json().get("data") or [])] if r.status_code == 200 else []
+  except (requests.RequestException, ValueError):
+    ids = []
+  ids = [i for i in ids if i and i != wanted and "realtime" in i and not re.search(r"preview|transcribe|whisper|tts|\d{4}-\d{2}-\d{2}", i)]
+  if not ids:
+    return None
+  mini = "mini" in wanted.lower()
+  pool = [i for i in ids if ("mini" in i.lower()) == mini] or ids
+  def ver(i):
+    nums = re.findall(r"\d+", i.split("realtime", 1)[-1])
+    return tuple(int(n) for n in nums) or (0,)
+  return sorted(pool, key=ver, reverse=True)[0]
+
+
+def voice_session_variants(model: str, instructions: str) -> list:
+  """The session settings to ask for, fullest first. If OpenAI turns a setting down, the next, plainer set is tried."""
+  voice = (secret("VOICE_NAME") or VOICE_DEFAULT_VOICE).strip()
+  noise = (secret("VOICE_NOISE") or "near_field").strip().lower()
+  base = {"type": "realtime", "model": model, "instructions": instructions}
+  inp = {"transcription": {"model": "gpt-4o-mini-transcribe", "language": "en"}, "turn_detection": {"type": "semantic_vad", "eagerness": "medium"}}
+  if noise in ("near_field", "far_field"):
+    inp["noise_reduction"] = {"type": noise}
+  return [
+      dict(base, max_output_tokens=800, audio={"input": inp, "output": {"voice": voice}}),
+      dict(base, audio={"input": {"transcription": {"model": "gpt-4o-mini-transcribe"}, "turn_detection": {"type": "semantic_vad"}},
+                        "output": {"voice": voice}}),
+      dict(base, audio={"input": {"transcription": {"model": "whisper-1"}}, "output": {"voice": voice}}),
+      dict(base),   # nothing optional: default voice, and no written transcript
+  ]
+
+
+def voice_mint(instructions: str) -> dict:
+  """Ask OpenAI for a one-time pass the phone's browser can use to start ONE voice conversation (the real key stays here).
+  Returns {"secret", "model", "transcripts"}; raises AIError with a plain message if it can't."""
+  key = secret("OPENAI_API_KEY")
+  if not key:
+    raise AIError("Talk mode needs OPENAI_API_KEY (ChatGPT's key) in Streamlit Secrets.")
+  wanted = secret("OPENAI_REALTIME_MODEL") or VOICE_DEFAULT_MODEL
+  model = voice_model()
+  headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+  variants, i, swapped, res, first_400 = voice_session_variants(model, instructions), 0, False, None, ""
+  for _ in range(7):
+    try:
+      res = http().post(VOICE_MINT_URL, headers=headers, timeout=25,
+                        json={"expires_after": {"anchor": "created_at", "seconds": 120}, "session": variants[i]})
+    except requests.RequestException as e:
+      raise AIError(f"Talk mode couldn't reach OpenAI: {e}") from e
+    if res.status_code == 200:
+      break
+    text = res.text or ""
+    if _model_error(res) and model in text and not swapped:   # that model name is gone / not on this key: use the closest one it has
+      alt = _realtime_replacement(key, model)
+      if alt:
+        swapped = True
+        _model_swaps()[("realtime", wanted)] = alt
+        log_problem("ai", "Talk mode model", f"Model '{model}' isn't available on your key any more — switched to '{alt}'. "
+                                              f"Put OPENAI_REALTIME_MODEL = \"{alt}\" in Secrets to make it permanent.")
+        model, i = alt, 0
+        variants = voice_session_variants(model, instructions)
+        continue
+    if res.status_code == 400 and i + 1 < len(variants):   # a setting it doesn't take: try again with plainer settings
+      first_400 = first_400 or text[:300]
+      i += 1
+      continue
+    break
+  if res is None or res.status_code != 200:
+    code, text = (res.status_code if res is not None else 0), ((res.text if res is not None else "") or "")
+    if "insufficient_quota" in text:
+      why = "the OpenAI account is out of credit (add credit at platform.openai.com → Billing)."
+    elif code == 401:
+      why = "OpenAI didn't accept the OPENAI_API_KEY in Secrets."
+    elif code in (403, 404):
+      why = f"this OpenAI key can't use the live voice model '{model}' ({text[:160]})."
+    else:
+      why = f"OpenAI said {code}: {text[:240]}"
+    raise AIError("Talk mode couldn't start: " + why)
+  if first_400:
+    log_problem("ai", "Talk mode settings", f"OpenAI turned down some voice settings, so plainer ones were used. First answer: {first_400}")
+  try:
+    data = res.json()
+  except ValueError as e:
+    raise AIError("Talk mode: OpenAI sent back something unreadable.") from e
+  value = data.get("value") or (data.get("client_secret") or {}).get("value")
+  if not value:
+    raise AIError("Talk mode: OpenAI didn't send back a pass to start the conversation.")
+  return {"secret": value, "model": model, "transcripts": i < 3}
+
+
+def voice_instructions() -> str:
+  """What the voice is told before the conversation starts: how to talk, plus the open car, codes, scan data, test plan,
+  your shop's history and Knowledge notes, and the last few typed and spoken messages (a snapshot at the moment you tap Start)."""
+  facts = vehicle_facts()
+  head = ("THE CAR THE TECHNICIAN IS WORKING ON: "
+          + ((ss.vehicle_info + (" — " + facts if facts else "")) if ss.get("vehicle_info") else "none open yet (ask which car if the answer depends on it)")
+          + f"\nFault codes: {', '.join(current_codes()) or 'none'}\nComplaint / symptoms: {(ss.symptoms or '').strip() or 'not given'}\n")
+  try:
+    ctx = scan_context("voice conversation")
+  except Exception as e:   # the context is a bonus; the conversation still works without it
+    log_problem("voice", "Talk mode context", f"{type(e).__name__}: {e}")
+    ctx = ""
+  plan = (ss.get("dtc_result") or {}).get("text", "")[:1500]
+  try:
+    eye = eye_context()[:1500]
+  except Exception:
+    eye = ""
+  recent = "\n".join(f"{'TECHNICIAN' if m.get('role') == 'user' else 'YOU'}: {' '.join(str(m.get('content') or '').split())[:350]}"
+                     for m in (ss.chat_history or [])[-6:] if m.get("content"))
+  return (VOICE_RULES + "\n" + head + ctx[:6500] + ("\nTEST PLAN SO FAR (summary): " + plan if plan else "") + eye
+          + ("\nTHE CONVERSATION SO FAR (typed and spoken) — carry on from here:\n" + recent if recent else ""))[:12000]
+
+
+def _voice_pairs(turns: list) -> list:
+  """Spoken turns in order -> [(what the technician said, what it answered)]. Anything it said before the technician spoke
+  (the 'Ready.') is left out."""
+  out, q, a = [], None, []
+  for t in turns or []:
+    if not isinstance(t, dict) or not str(t.get("text") or "").strip():
+      continue
+    text = " ".join(str(t["text"]).split())
+    if t.get("role") == "user":
+      if q is not None:
+        out.append((q, " ".join(a)))
+      q, a = text, []
+    elif q is not None:
+      a.append(text)
+  if q is not None:
+    out.append((q, " ".join(a)))
+  return out
+
+
+def _voice_save(ev: dict):
+  """Put the spoken conversation in the chat and in permanent chat memory (safe to call again with a longer copy of the same talk)."""
+  sid = re.sub(r"\D", "", str(ev.get("sid") or ""))[:14] or datetime.now().strftime("%Y%m%d%H%M%S")
+  pairs = _voice_pairs(ev.get("turns") or [])
+  if not pairs:
+    return
+  if not ss.get("chat_conv"):
+    ss.chat_conv = sid + "v"
+  who = f"🎙️ Talk mode · ChatGPT voice ({str(ev.get('model') or voice_model())})"
+  hist = [m for m in (ss.chat_history or []) if not str(m.get("chat_id") or "").startswith(sid + "v")]
+  saved = ss.setdefault("_voice_saved", {})
+  at = datetime.now().strftime("%Y-%m-%d %I:%M %p")
+  for n, (q, a) in enumerate(pairs):
+    rid = f"{sid}v{n:03d}"
+    hist.append({"role": "user", "content": q, "chat_id": rid, "who": ""})
+    if a:
+      hist.append({"role": "assistant", "content": a, "chat_id": rid, "who": who})
+    if saved.get(rid) != (q, a):
+      saved[rid] = (q, a)
+      store_put("chat", rid, {"id": rid, "conv": ss.chat_conv, "q": q, "a": a, "at": at, "vin": ss.active_vin or "", "vehicle": ss.vehicle_info or "",
+                              "codes": current_codes(), "job": ss.get("job_id") or "", "tech": ss.get("tech_user") or "", "photos_n": 0,
+                              "videos_n": 0, "where": "voice", "team": False, "who": who, "state": "done" if a else "failed"})
+  ss.chat_history = hist
+
+
+def _voice_record_usage(ev: dict):
+  secs = float(ev.get("secs") or 0)
+  if secs < 5:
+    return
+  sid = re.sub(r"\D", "", str(ev.get("sid") or "")) or datetime.now().strftime("%Y%m%d%H%M%S")
+  store_put("voice", sid, {"sid": sid, "at": datetime.now().strftime("%Y-%m-%d %I:%M %p"), "month": datetime.now().strftime("%Y-%m"),
+                           "secs": round(secs), "cost": round(float(ev.get("cost") or 0), 4), "model": ev.get("model") or voice_model(),
+                           "turns": len(_voice_pairs(ev.get("turns") or [])), "reason": ev.get("reason") or "", "usage": ev.get("usage") or {},
+                           "tech": ss.get("tech_user") or ""})
+
+
+def _voice_month_text() -> str:
+  try:
+    rows = [r.get("data") or {} for r in store_list("voice", 500, {"month": datetime.now().strftime("%Y-%m")})]
+  except Exception:
+    return ""
+  if not rows:
+    return ""
+  cost, mins = sum(float(d.get("cost") or 0) for d in rows), sum(float(d.get("secs") or 0) for d in rows) / 60
+  return f"🎙️ Talk mode this month: about ${cost:.2f} (estimate) over {len(rows)} conversation(s), {mins:.0f} min of talking."
+
+
+def _voice_rerun():
+  """Refresh just the voice panel (so it gets its pass); a whole-page refresh on a Streamlit too old for that."""
+  try:
+    st.rerun(scope="fragment")
+  except Exception:
+    st.rerun()
+
+
+def _voice_handle(ev):
+  if not (isinstance(ev, dict) and ev.get("id") and ev["id"] != ss.get("_voice_last")):
+    return
+  ss._voice_last = ev["id"]
+  kind = ev.get("type")
+  if kind == "need_token":   # you tapped Start: make the one-time pass (with the car's facts) and hand it to the panel
+    try:
+      tok = voice_mint(voice_instructions())
+      ss._voice_token = dict(tok, id=ev["id"], error="")
+    except AIError as e:
+      ss._voice_token = {"id": ev["id"], "error": str(e)}
+    except Exception as e:
+      log_problem("voice", "Talk mode start", f"{type(e).__name__}: {e}")
+      ss._voice_token = {"id": ev["id"], "error": f"Talk mode couldn't start: {type(e).__name__}: {e}"}
+    _voice_rerun()
+  elif kind in ("turns", "ended"):
+    _voice_save(ev)
+    if kind == "ended":
+      ss._voice_token = None   # a pass is good for one conversation
+      _voice_record_usage(ev)
+      if ev.get("error"):
+        log_problem("voice", "Talk mode", f"{ev.get('reason', '')}: {ev['error']}", "\n".join(str(x) for x in (ev.get("events") or [])))
+      if ss.get("chat_conv"):
+        st.query_params["chat"] = ss.chat_conv   # a reload brings this conversation back (like a typed one)
+      st.rerun()   # whole page, so the conversation shows in the chat
+  elif kind == "error":
+    log_problem("voice", "Talk mode" + (f" ({ev.get('where')})" if ev.get("where") else ""), ev.get("message", ""), ev.get("details", ""))
+
+
+def _voice_panel_body():
+  if not has_openai():
+    st.info("🎙️ Talk mode uses ChatGPT's live voice. Add OPENAI_API_KEY in ⚙️ → Secrets to turn it on.")
+    return
+  ev = _voice(key="voice_talk", token=ss.get("_voice_token"), cfg=voice_cfg(), default=None)
+  _voice_handle(ev)
+  if (ss.get("_voice_token") or {}).get("transcripts") is False:
+    st.caption("⚠️ OpenAI wouldn't turn on the written transcript this time, so this talk can't be saved in the chat.")
+  mt = _voice_month_text()
+  if mt:
+    st.caption(mt)
+
+
+if hasattr(st, "fragment"):
+  @st.fragment
+  def voice_panel():
+    """Runs on its own, so talking never reloads the rest of the page."""
+    _voice_panel_body()
+else:
+  def voice_panel():
+    _voice_panel_body()
+
+
 def chat_home():
   """💬 The front screen: just the conversation with the AI, like a chat app. Type, 📎 attach or 🎙️ talk in the bar at the
   bottom; ⋯ holds the extras (show the AI your screen, all the AIs checking each other, past chats). 🧹 New chat is pinned
@@ -11164,7 +11787,7 @@ def chat_home():
   msgs = ss.chat_history or []
   pending = ss.get("_chat_pending")
   # fixed spots, in this order, so the shared screen (👀) never reloads when messages come in
-  top, eye_box, past_box, convo, watch_box, tail = (st.container() for _ in range(6))
+  top, eye_box, voice_box, past_box, convo, watch_box, tail = (st.container() for _ in range(7))
   bar = _keyed_box("chatbar")
   team = bool(ss.get("qh_team", True))
 
@@ -11175,6 +11798,10 @@ def chat_home():
       st.toggle("👀 Let the AI see my screen or camera", key="eye_toggle",
                 help="Share your scan tool's screen (from a computer) or point the phone camera at it. The AI reads it every "
                      "half minute and uses it in every answer and AI Check — so it sees what you see.")
+      st.toggle("🎙️ Talk mode — hands-free voice chat", key="voice_toggle",
+                help="Talk and it talks back out loud, like a phone call (ChatGPT's live voice). You can cut in any time. It knows the open "
+                     "car, the codes and the scanner data, and the conversation is saved in this chat. Roughly 2-5 cents a minute while "
+                     "you're talking — the panel shows a running estimate. Needs the microphone.")
       st.checkbox("🤝 All AIs check each other (a minute or two)", value=True, key="qh_team",
                   help="On: the web is searched, Gemini, ChatGPT and DeepSeek each write their own answer without seeing "
                        "the others, and Claude checks them all against the data. Off: one AI answers in a few seconds.")
@@ -11256,6 +11883,13 @@ def chat_home():
       eye_panel()
     else:
       ss.eye_on, ss.eye = False, None
+
+  # ---------- 🎙️ Talk mode ----------
+  with voice_box:
+    if ss.get("voice_toggle"):
+      voice_panel()
+    else:
+      ss._voice_token = None
 
   # ---------- 🕘 past chats ----------
   if ss.get("qh_past"):
@@ -12569,7 +13203,7 @@ with tab5, guard("Log tab"):
     with st.spinner("Gathering everything..."):
       _bk = {"app_version": APP_VERSION, "made": datetime.now().isoformat(),
              **{k: store_list_all(k) for k in ("job", "fix", "log", "drive", "drivereview", "jobphoto", "diagram", "wave", "csvwave", "know",
-                                               "chat", "sent", "problem", "oemmap", "link")}}
+                                               "chat", "sent", "problem", "oemmap", "link", "voice")}}
       ss._backup = json.dumps(_bk)
       ss._backup_counts = " · ".join(f"{k}: {len(_bk.get(k) or [])}" for k in ("job", "fix", "log", "drive", "jobphoto", "wave", "chat", "know", "oemmap", "link"))
     st.toast("Backup ready — tap Download")
