@@ -25,7 +25,7 @@ import zxingcpp
 
 st.set_page_config(page_title="Test Don't Guess", page_icon="⚡", layout="wide")
 
-APP_VERSION = "2026-12-03"
+APP_VERSION = "2026-12-04"
 WHATS_NEW = [
     "Email or text the report to the customer (needs the email/text setup in Secrets)",
     "Job photos: attach pictures to the job; they go on the customer report",
@@ -183,6 +183,11 @@ WHATS_NEW = [
     "how-to a quick one-AI answer in seconds and keeps the full team (web search + every AI checking each other) for real diagnosis "
     "puzzles; ⚡ Quick and 🤝 Full team are there if you want to choose. 🎙️ Talk mode is now a compact strip pinned right above the "
     "message box, so the Start button is always in view",
+    "BETTER CHAT HONESTY: the chat no longer guesses. If it doesn't know the car, the engine or a part's type (like narrowband vs "
+    "wideband O2 sensors), it asks you first instead of building an answer on a guess. Every diagnostic answer now splits into "
+    "✅ Confirmed (from you, the open car, your scan data and notes) and ⚠️ Assumed - check this. It won't state sensor types, "
+    "engine codes, pinouts, wire colors, torque or voltages from memory; it says to verify them in ALLDATA / ProDemand / Identifix. "
+    "When you correct it, the correction is remembered and the wrong earlier answer stops being fed back to the AI",
 ]
 
 st.markdown(
@@ -10952,12 +10957,9 @@ def _question_names(question: str, keys: set) -> bool:
 def chat_memory(question: str) -> str:
   """Earlier saved chats worth remembering for this question. Only chats about THIS car, chats that weren't about any car, and
   chats about another car the question itself names ('like that Edge we had'): a different car's answers never leak in."""
-  try:
-    rows = [r.get("data") or {} for r in store_list("chat", 300)]
-  except Exception:
-    return ""
+  rows = _chat_rows_clean()
   in_convo = {m.get("chat_id") for m in (ss.chat_history or []) if m.get("chat_id")}
-  rows = [d for d in rows if d.get("q") and d.get("a") and d.get("state", "done") == "done"
+  rows = [d for d in rows if d.get("q") and d.get("a") and d.get("state", "done") == "done" and not d.get("_wrong")
           and not str(d.get("a")).startswith("⚠️") and d.get("id") not in in_convo]
   cur_vin, cur_car = str(ss.get("active_vin") or "").strip().upper(), _car_norm(ss.get("vehicle_info"))
 
@@ -11010,6 +11012,90 @@ def vehicle_facts() -> str:
   return " · ".join(([f"VIN {vin}"] if vin else []) + parts + ([f"odometer {ss.odometer}"] if str(ss.get("odometer") or "").strip() else []))
 
 
+CHAT_TRUST_RULES = """
+HOW TO ANSWER - this technician diagnoses real cars; a confident wrong answer costs him time and money:
+1. ASK BEFORE GUESSING. Before diagnosing, check the facts your answer depends on: the exact car (year, engine, transmission), what
+   TYPE of sensor or part it has (e.g. narrowband or wideband O2 sensor, number of wires), and what the codes and data really say.
+   If a missing fact would change the answer and it is not in the vehicle info, scan data, notes, an attachment or what he told you,
+   ASK FIRST: reply with one or two short questions (and one line on why you need them) and stop. Do not write a long diagnosis built
+   on a guess. If part of the answer holds either way, you may give that part, but put "Assuming ...  - tell me if that's wrong" at the top.
+2. CONFIRMED vs ASSUMED. For any diagnostic answer, show two short parts: "✅ Confirmed" (only what comes from his words, the open car,
+   the scan data, his notes or an attached document) and "⚠️ Assumed - check this" (anything you are inferring, remembering or not sure of).
+   Leave these out for greetings, small talk and simple definitions.
+3. NO GUESSED SPECIFICS. Never state from memory: sensor type or wire count, engine or transmission codes, pinouts, wire colors,
+   connector IDs, torque, pressures, voltages, resistances, part numbers, TSB numbers or what a code means for this exact car - unless it
+   is in the facts above or an attachment. If it is not, say "not sure - verify in ALLDATA / ProDemand / Identifix / factory service
+   information". Standard, well-known test steps are fine.
+4. HIS WORD WINS. What the technician tells you about his car (or a correction to something you said) is true for that car. Accept it,
+   say plainly what changes, and do not repeat the earlier mistake or argue.
+5. EARLIER ANSWERS ARE NOT FACTS. Do not build on an earlier AI message in this conversation or in EARLIER CHATS unless it is confirmed.
+"""
+
+CORRECTION_RE = re.compile(
+    r"^\W*(no(?=\W*[,.!:;]|\W*$)|nope|nah|wrong|incorrect|not (a|an|the|even)|actually|that'?s (not|wrong|incorrect)|it'?s not|its not|"
+    r"(these|those|they|there|this|that)\s?('?re|are|is|s|isn'?t|aren'?t)?\s?(not|n'?t|no)\b|you('?re| are| got| have)? (wrong|it wrong|that wrong)|"
+    r"i (said|told you))\b"
+    r"|\b(that'?s|that is|thats) (wrong|not right|not true|incorrect)|\bnot (right|true|correct)\b|\b(aren'?t|isn'?t|arent|isnt|"
+    r"are not|is not|there'?s no|theres no|there is no|has no|have no|doesn'?t have|does not have)\b", re.I)
+
+
+def is_correction(q: str) -> bool:
+  """Does this message correct (or flatly contradict) something the AI said or assumed? A cheap word check - a miss costs
+  nothing, and a false alarm only files the tech's own statement of fact as a 'what he told you' note."""
+  q = " ".join(str(q or "").split())
+  return 2 < len(q) < 600 and bool(CORRECTION_RE.search(q))
+
+
+def _chat_rows_clean() -> list[dict]:
+  """Saved chats (newest first) with the AI answers a later message of the tech's CORRECTED removed (so a wrong answer is not fed
+  back to the AI as an 'earlier chat'), plus a list of the corrections themselves."""
+  try:
+    rows = [r.get("data") or {} for r in store_list("chat", 300)]
+  except Exception:
+    return []
+  rows = [d for d in rows if d.get("id")]
+  by_conv: dict = {}
+  for d in sorted(rows, key=lambda d: str(d.get("id"))):
+    by_conv.setdefault(d.get("conv") or d.get("id"), []).append(d)
+  bad = set()
+  for seq in by_conv.values():
+    for prev, nxt in zip(seq, seq[1:]):
+      if nxt.get("fix"):
+        bad.add(prev.get("id"))
+  for d in rows:
+    d["_wrong"] = d.get("id") in bad
+  return rows
+
+
+def chat_corrections(question: str) -> str:
+  """What the technician has told or corrected the AI about THIS car (or in this conversation), as hard facts for the prompt."""
+  rows = [d for d in _chat_rows_clean() if d.get("fix") and d.get("q")]
+  if not rows:
+    return ""
+  cur_vin, cur_car = str(ss.get("active_vin") or "").strip().upper(), _car_norm(ss.get("vehicle_info"))
+  in_convo = {m.get("chat_id") for m in (ss.chat_history or []) if m.get("chat_id")}
+  words = {w for w in re.findall(r"[a-z0-9]+", f"{question} {ss.get('vehicle_info') or ''}".lower()) if len(w) >= 3} - KN_STOP
+  pick = []
+  for d in rows:   # newest first
+    vin = str(d.get("vin") or "").strip().upper()
+    if d.get("id") in in_convo or (ss.get("chat_conv") and d.get("conv") == ss.get("chat_conv")):
+      pick.append(d)
+    elif vin and cur_vin:
+      if vin == cur_vin:
+        pick.append(d)
+    elif cur_car and _car_norm(d.get("vehicle")) == cur_car:
+      pick.append(d)
+    elif not vin and not str(d.get("vehicle") or "").strip():   # said with no car open: only when it plainly fits this question
+      if len(words & set(re.findall(r"[a-z0-9]+", str(d.get("q")).lower()))) >= 2:
+        pick.append(d)
+  pick = pick[:6]
+  if not pick:
+    return ""
+  return ("THE TECHNICIAN'S CORRECTIONS AND FACTS (he told you these - they are TRUE for the car named on each line, so do not contradict them "
+          "or repeat the mistake they fix; a line with no car applies only if it fits the car being discussed):\n"
+          + "\n".join(f"- {d.get('at', '')} · {d.get('vehicle') or 'no car open'}: \"{' '.join(str(d.get('q')).split())[:300]}\"" for d in pick))
+
+
 def chat_prompt_for(question: str, n_photos: int, n_videos: int = 0, n_docs: int = 0) -> str:
   history = "\n".join(f"{m['role'].upper()}: {m['content']}" + (f" [attached {len(m['photos'])} photo(s)]" if m.get("photos") else "")
                       for m in (ss.chat_history or [])[-6:])
@@ -11027,6 +11113,8 @@ Current test plan (if any): {plan or 'none yet'}
 Latest scope/readings evaluation (if any): {((sr or {}).get('text', '') if isinstance(sr, dict) else (sr or ''))[:1500] or 'none'}
 Latest scope DATA FILE analysis (measured from raw data, if any): {((ss.wave_result or {}).get('text', ''))[:2000] or 'none'}
 
+{chat_corrections(question)}
+
 {chat_memory(question)}
 
 Recent conversation:
@@ -11036,7 +11124,7 @@ Earlier web research for this job (if any): {(ss.dtc_result or {}).get("research
 {eye_context()}
 
 Respond directly, practically, and concisely to the latest question. Focus on physical shop tests, circuit checks, and logical isolation.
-""" + DIAGRAM_RULE + (f"""
+""" + CHAT_TRUST_RULES + DIAGRAM_RULE + (f"""
 The technician attached {n_photos} photo(s) with this question (wiring diagram, connector, part, scope or meter).
 Read them carefully: wire colors, pin/cavity numbers, splices, grounds, connector IDs, component names, readings on screen.
 Say what you can read in the photo, and say so plainly if part of it is too blurry or cut off to read.""" if n_photos else "") + ("""
@@ -11241,7 +11329,7 @@ def ask_chat(question: str, imgs: list, team: bool, where: str, videos: list | N
   meta = {"id": rid, "conv": ss.chat_conv, "q": question, "at": datetime.now().strftime("%Y-%m-%d %I:%M %p"),
           "vin": ss.active_vin or "", "vehicle": vehicle, "codes": current_codes(), "job": ss.get("job_id") or "",
           "tech": ss.get("tech_user") or "", "photos_n": len(imgs), "videos_n": len(videos) or len(reuse), "where": where,
-          "team": bool(team)}
+          "team": bool(team), "fix": is_correction(question)}
   store_put("chat", rid, dict(meta, a="", state="working"))
   job_id = "chat-" + rid
   link, t_start = app_link(ss.get("job_id"), ss.chat_conv), time.time()
